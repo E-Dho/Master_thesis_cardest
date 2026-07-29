@@ -1,0 +1,63 @@
+dataset:
+  type: neurocard_full_join
+  name: job_light
+  csv_directory: datasets/job
+  prepared_directory: data/neurocard_prepared/job_light
+  sample_batch_size: 1024
+  num_workers: 0
+
+schema:
+  join_type: acyclic
+  column_order: data_indicators_fanouts
+
+model:
+  type: predicate_resmade
+  hidden_sizes: [512, 512, 512, 512]
+  residual_connections: true
+  direct_io_connections: true
+  activation: relu
+  input_encoding: embed
+  output_encoding: one_hot
+  embedding_size: 32
+  residual_dropout: 0.0
+  fixed_ordering: true
+
+factorization:
+  enabled: false
+  strategy: none
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  compute_weights_in_log_space: true
+  weight_normalization: batch_sum
+  weight_clipping: null
+
+predicate_generation:
+  enabled: true
+  wildcard_probability: 0.2
+  table_subset_sampling: connected
+  seed: 0
+
+training:
+  seed: 0
+  device: auto
+  batch_size: 512
+  learning_rate: 0.0001
+  optimizer: adam
+  epochs: 10
+  steps_per_epoch: 1000
+  gradient_clip_norm: 5.0
+  checkpoint_interval_steps: 500
+  validation_interval_steps: 500
+  head_loss_reduction: mean
+  mixed_precision: false
+
+inference:
+  progressive_sampling: false
+  use_log_space_product: true
+
+logging:
+  output_directory: model/runs/job_light_resmade_inv_fanout
+  tensorboard: true
+

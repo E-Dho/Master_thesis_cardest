@@ -22,8 +22,19 @@ No upstream code was vendored or copied.
   placeholder.
 - `model/src/model/predicate_made.py`: correctness-first autoregressive
   conditional-table model.
+- `model/src/model/resmade.py`: PyTorch predicate-conditioned ResMADE with
+  separate predicate input bins and data output bins.
+- `model/src/model/masked_layers.py`: NeuroCard-inspired masked linear and
+  residual layers.
+- `model/src/predicates/vocabulary.py`: per-column predicate-token
+  vocabularies.
+- `model/src/training/torch_losses.py`: torch weighted per-head CE.
+- `model/src/training/resmade_trainer.py`: ResMADE training loop and
+  checkpointing.
 - `model/src/inference`: one-pass estimator.
 - `model/src/evaluation`: exact oracle and q-error metrics.
+- `model/scripts/prepare_neurocard_data.py`, `inspect_sampler.py`,
+  `train_resmade.py`, and `evaluate_resmade.py`: real-training CLI surface.
 
 ## Mathematical Assumptions
 
@@ -46,15 +57,19 @@ Tests cover:
 - Weighted cross entropy.
 - Checkpoint ordering/domain preservation.
 - Factorization default and explicit failure.
+- ResMADE tests are present and skip when PyTorch is not installed. They cover
+  output width, separate input/output bins, per-column softmax, masking leakage,
+  CPU backward, checkpointing, and CUDA smoke when available.
 - Exact two-fanout reweighted marginal.
 - Synthetic full-outer-join oracle cases.
 - Deterministic training smoke and finite one-pass estimates.
 
 ## Limitations
 
-- The trainable backend is currently an empirical conditional table, not a
-  PyTorch MADE/ResMADE.
-- No real NeuroCard sampler integration yet.
+- The trainable ResMADE backend is implemented, but local verification skipped
+  torch-specific tests because PyTorch is not installed in this environment.
+- The NeuroCard sampler is integrated as a manifest-backed adapter boundary;
+  the full upstream Rust/index Exact Weight runtime is not vendored here.
 - No JOB-light or trajectory workload integration yet.
 - No ANPM or column factorization.
 - No large-scale performance optimization.
@@ -70,4 +85,3 @@ model/src/model/output_adapter.py
 Replace or extend `ANPMFactorizedOutputAdapter` and route it through
 configuration validation once factorized columns, reconstruction metadata, and
 tests are implemented.
-

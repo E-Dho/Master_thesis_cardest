@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -35,6 +36,8 @@ class ColumnMetadata:
     kind: ColumnKind
     domain: tuple[Any, ...]
     table: str | None = None
+    predicate_domain: tuple[Any, ...] | None = None
+    fanout_source: str | None = None
     factorization: FactorizationMetadata = field(default_factory=FactorizationMetadata)
 
     def __post_init__(self) -> None:
@@ -50,6 +53,12 @@ class ColumnMetadata:
 
     @property
     def domain_size(self) -> int:
+        return len(self.domain)
+
+    @property
+    def predicate_domain_size(self) -> int:
+        if self.predicate_domain is not None:
+            return len(self.predicate_domain)
         return len(self.domain)
 
     def encode_value(self, value: Any) -> int:
@@ -69,6 +78,7 @@ class ModelMetadata:
     full_join_cardinality: float
     column_order: str = "data_indicators_fanouts"
     upstream_attribution: dict[str, str] = field(default_factory=dict)
+    schema_hash: str | None = None
 
     def __post_init__(self) -> None:
         if self.full_join_cardinality < 0:
@@ -92,10 +102,36 @@ class ModelMetadata:
             if column.kind == ColumnKind.FANOUT
         )
 
-    def to_json_dict(self) -> dict[str, Any]:
+    @property
+    def data_output_bins(self) -> tuple[int, ...]:
+        return tuple(column.domain_size for column in self.columns)
+
+    @property
+    def predicate_input_bins(self) -> tuple[int, ...]:
+        return tuple(column.predicate_domain_size for column in self.columns)
+
+    @property
+    def output_slices(self) -> tuple[tuple[int, int], ...]:
+        slices = []
+        start = 0
+        for column in self.columns:
+            stop = start + column.domain_size
+            slices.append((start, stop))
+            start = stop
+        return tuple(slices)
+
+    def stable_schema_hash(self) -> str:
+        """Hash the ordering, domains, predicate domains, and join cardinality."""
+
+        payload = json.dumps(self.to_json_dict(include_hash=False), sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def to_json_dict(self, *, include_hash: bool = True) -> dict[str, Any]:
         data = asdict(self)
         for column in data["columns"]:
             column["kind"] = column["kind"].value
+        if include_hash and data.get("schema_hash") is None:
+            data["schema_hash"] = self.stable_schema_hash()
         return data
 
     @classmethod
@@ -109,6 +145,12 @@ class ModelMetadata:
                     kind=ColumnKind(raw_column["kind"]),
                     domain=tuple(raw_column["domain"]),
                     table=raw_column.get("table"),
+                    predicate_domain=(
+                        tuple(raw_column["predicate_domain"])
+                        if raw_column.get("predicate_domain") is not None
+                        else None
+                    ),
+                    fanout_source=raw_column.get("fanout_source"),
                     factorization=FactorizationMetadata(
                         original_column=raw_factorization.get("original_column"),
                         subcolumns=tuple(raw_factorization.get("subcolumns", ())),
@@ -128,6 +170,7 @@ class ModelMetadata:
             full_join_cardinality=float(data["full_join_cardinality"]),
             column_order=data.get("column_order", "data_indicators_fanouts"),
             upstream_attribution=dict(data.get("upstream_attribution", {})),
+            schema_hash=data.get("schema_hash"),
         )
 
     def save(self, path: str | Path) -> None:
@@ -155,4 +198,3 @@ class ForeignKey:
     left_column: str
     right_table: str
     right_column: str
-

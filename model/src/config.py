@@ -31,6 +31,11 @@ def load_simple_yaml(path: str | Path) -> dict[str, Any]:
 
 
 def _parse_scalar(value_text: str) -> Any:
+    if value_text.startswith("[") and value_text.endswith("]"):
+        inner = value_text[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_scalar(part.strip()) for part in inner.split(",")]
     if value_text == "false":
         return False
     if value_text == "true":
@@ -56,4 +61,18 @@ def validate_config(config: dict[str, Any]) -> None:
     inference = config.get("inference", {})
     if inference.get("progressive_sampling", False):
         raise ValueError("this milestone requires inference.progressive_sampling=false")
+    model = config.get("model", {})
+    if model.get("type") == "predicate_resmade" and not model.get("fixed_ordering", True):
+        raise ValueError("predicate_resmade requires model.fixed_ordering=true")
 
+
+def resolve_device(config: dict[str, Any]) -> str:
+    device = str(config.get("training", {}).get("device", "cpu"))
+    if device != "auto":
+        return device
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ModuleNotFoundError:
+        return "cpu"

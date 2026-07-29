@@ -16,6 +16,12 @@ Adapted concepts:
 - Fixed column ordering stored with checkpoints.
 - Future sampler/model boundaries compatible with MADE/ResMADE-style density
   estimators.
+- Masked autoregressive layers, fixed ordering, residual MADE structure, and
+  direct input-output masking ideas from `neurocard/made.py`.
+- Exact Weight full-outer-join sampler boundary from
+  `neurocard/factorized_sampler.py`, including the role of join-count/index
+  artifacts. NeuroCard's `FactorizedSampler` name refers to Exact Weight join
+  sampling, not this project's disabled lossless column factorization.
 
 No NeuroCard source code is copied into this repository. The NeuroCard GitHub
 repository page identifies Apache-2.0 licensing.
@@ -40,4 +46,3 @@ Adapted concepts:
 - ANPM is explicitly not implemented in this milestone.
 
 No DistJoin source code is copied into this repository.
-

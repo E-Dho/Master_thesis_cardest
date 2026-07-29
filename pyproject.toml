@@ -12,6 +12,9 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+model = [
+  "torch>=2.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["query_generation", "model/tests"]

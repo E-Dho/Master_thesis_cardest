@@ -15,7 +15,7 @@ env/
 # Generated datasets, database files, and cluster runtime output
 data/
 !model/src/data/
-!model/src/data/**
+!model/src/data/**/*.py
 datasets/
 mobilitydb/
 envs/
@@ -37,6 +37,7 @@ query_generation/visualizations/
 
 # Model prototype runtime artifacts
 model/examples/*.json
+model/runs/
 
 # POL source is intentionally not vendored in this repo.
 generate-mobility-dataset/

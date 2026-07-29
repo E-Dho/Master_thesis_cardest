@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -36,6 +36,27 @@ class IdentityOutputAdapter:
         return distributions
 
 
+class TorchIdentityOutputAdapter:
+    """Torch unfactorized adapter with one softmax per output slice."""
+
+    def distributions_from_logits(
+        self, logits: Any, columns: tuple[ColumnMetadata, ...]
+    ) -> list[Any]:
+        import torch
+
+        distributions: list[Any] = []
+        start = 0
+        for column in columns:
+            stop = start + column.domain_size
+            distributions.append(torch.softmax(logits[:, start:stop], dim=1))
+            start = stop
+        if start != logits.shape[-1]:
+            raise ValueError(
+                f"logit width {logits.shape[-1]} does not match column domains {start}"
+            )
+        return distributions
+
+
 class ANPMFactorizedOutputAdapter:
     """Placeholder for DistJoin-style ANPM reconstruction in the next milestone."""
 
@@ -46,4 +67,3 @@ class ANPMFactorizedOutputAdapter:
             "ANPM factorized output reconstruction is not implemented in this "
             "milestone. Keep factorization.enabled=false."
         )
-
