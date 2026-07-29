@@ -1,45 +1,18 @@
 # Master Thesis CardEst
 
-Trajectory cardinality-estimation benchmark tooling for POL-generated mobility data and MobilityDB.
+This repository contains the practical implementation for the Master's Thesis of Eric Hotho on the topic of "Learned Cardinalities Estimation on Range Queries".
 
-## Contents
+The project focuses on trajectory-data cardinality estimation: generating POL trajectory datasets, loading them into MobilityDB/PostgreSQL, generating labeled range-query workloads, and later training/evaluating learned estimators against baseline models.
 
-- `query_generation/`: generic, config-driven SQL query generator for `standard`, `temporal`, `spatial`, and `spatio_temporal` COUNT workloads.
-- `mobilitydb_loader/`: CAU-cluster scripts for building/running MobilityDB and loading POL trajectory data into PostgreSQL/MobilityDB.
-- `pol_runs/`: Slurm scripts and configs for reproducible POL benchmark simulations.
+## Directory Structure
 
-Generated datasets, database directories, query run outputs, and POL source checkouts are intentionally ignored. POL is kept as an external dependency rather than vendored in this repository.
+- `dataset_generation/`: scripts and notes for POL simulation runs, trajectory extraction, MobilityDB setup, and database loading.
+- `query_generation/`: config-driven workload generator for standard, temporal, spatial, and spatio-temporal COUNT queries.
+- `model/`: planned implementation area for learned cardinality-estimation models.
+- `baselines/`: planned implementation area for classical and learned baseline estimators.
 
-## Query Generation
+Generated datasets, database files, query run outputs, visualizations, logs, and POL source checkouts are intentionally excluded from Git. POL is treated as an external dependency rather than vendored in this repository.
 
-Generate SQL-only workloads:
+## AI Assistance
 
-```bash
-python3 query_generation/query_generator.py \
-  --config query_generation/pol_query_config.json \
-  --output queries.jsonl \
-  --queries-per-category 500 \
-  --seed 1 \
-  --no-execute
-```
-
-Generate and execute against a running MobilityDB/PostgreSQL instance:
-
-```bash
-python3 query_generation/query_generator.py \
-  --config query_generation/pol_query_config.json \
-  --output queries.jsonl \
-  --queries-per-category 500 \
-  --seed 1 \
-  --execute \
-  --host 127.0.0.1 \
-  --port 55432 \
-  --dbname pol_mobilitydb \
-  --user sunip956
-```
-
-Run tests:
-
-```bash
-python3 -m unittest query_generation.test_query_generator
-```
+AI assistance, primarily Codex, was used to draft and iterate on parts of the code, scripts, documentation, and repository organization. The repository should therefore be treated like any AI-assisted codebase: important logic, experiments, and results need human review and validation.

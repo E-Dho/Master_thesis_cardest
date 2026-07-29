@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/common.sh
+source /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/common.sh
 
 activate_mobilitydb_env
 mkdir -p "$MOBILITYDB_DATA_DIR" "$MOBILITYDB_RUN_DIR" "$MOBILITYDB_LOG_DIR"

@@ -7,7 +7,7 @@
 #SBATCH --error=/work_beegfs/sunip956/master_thesis_trajectories/slurm_logs/load_pol_mobilitydb_%j.err
 
 set -euo pipefail
-source /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/common.sh
+source /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/common.sh
 activate_mobilitydb_env
 
 RUN_ID="pol_mobilitydb_load_$(date -u +%Y%m%dT%H%M%SZ)"

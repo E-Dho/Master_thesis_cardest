@@ -7,7 +7,7 @@
 #SBATCH --error=/work_beegfs/sunip956/master_thesis_trajectories/slurm_logs/load_pol_50m_mobilitydb_%j.err
 
 set -euo pipefail
-source /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/common.sh
+source /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/common.sh
 activate_mobilitydb_env
 
 DATASET_LIST="${POL_DATASET_LIST:-/work_beegfs/sunip956/master_thesis_trajectories/runs/pol_atl_5000a_365d_5min_trajbench_50m/datasets.txt}"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 export THESIS_HOME_ROOT=${THESIS_HOME_ROOT:-/zfshome/sunip956/master_thesis_trajectories}
 export THESIS_WORK_ROOT=${THESIS_WORK_ROOT:-/work_beegfs/sunip956/master_thesis_trajectories}
-export MOBILITYDB_LOADER_DIR="$THESIS_HOME_ROOT/mobilitydb_loader"
+export MOBILITYDB_LOADER_DIR="$THESIS_HOME_ROOT/dataset_generation/mobilitydb_loader"
 export MOBILITYDB_ROOT="$THESIS_WORK_ROOT/mobilitydb"
 export MOBILITYDB_ENV="$THESIS_WORK_ROOT/envs/mobilitydb"
 export MOBILITYDB_SRC="$MOBILITYDB_ROOT/src/MobilityDB"

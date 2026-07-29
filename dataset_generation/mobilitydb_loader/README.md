@@ -5,7 +5,7 @@ trajectory dataset into PostgreSQL/PostGIS/MobilityDB tables.
 
 Cluster paths:
 
-- Scripts: `/zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader`
+- Scripts: `/zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader`
 - Env: `/work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb`
 - DB root: `/work_beegfs/sunip956/master_thesis_trajectories/mobilitydb`
 - Dataset: `/work_beegfs/sunip956/master_thesis_trajectories/datasets/pol_atl_1000a_365d_5min_seed1_enriched_traj_20260714T111045Z`
@@ -13,9 +13,9 @@ Cluster paths:
 Typical workflow:
 
 ```bash
-sbatch /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/build_mobilitydb.sbatch
-/zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/init_mobilitydb.sh
-sbatch /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/load_pol_to_mobilitydb.sbatch
+sbatch /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/build_mobilitydb.sbatch
+/zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/init_mobilitydb.sh
+sbatch /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/load_pol_to_mobilitydb.sbatch
 ```
 
 The reusable database is stored in work storage, but PostgreSQL should be run only
@@ -25,8 +25,8 @@ loads and validates the data, and stops the server at the end.
 For an explicit reusable server allocation:
 
 ```bash
-sbatch /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/start_mobilitydb.sbatch
-source /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/common.sh
+sbatch /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/start_mobilitydb.sbatch
+source /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/common.sh
 module load micromamba/1.4.2
 export MAMBA_ROOT_PREFIX=/work_beegfs/sunip956/micromamba
 micromamba run -p /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb \
@@ -36,7 +36,7 @@ micromamba run -p /work_beegfs/sunip956/master_thesis_trajectories/envs/mobility
 Stop it with:
 
 ```bash
-/zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/stop_mobilitydb.sh
+/zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/stop_mobilitydb.sh
 ```
 
 Tables:

@@ -7,7 +7,7 @@
 #SBATCH --error=/work_beegfs/sunip956/master_thesis_trajectories/slurm_logs/mobilitydb_server_%j.err
 
 set -euo pipefail
-source /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/common.sh
+source /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/common.sh
 activate_mobilitydb_env
 mkdir -p "$MOBILITYDB_RUN_DIR" "$MOBILITYDB_LOG_DIR"
 

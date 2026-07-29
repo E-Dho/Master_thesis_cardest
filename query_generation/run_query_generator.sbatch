@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-source /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/common.sh
+source /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/common.sh
 activate_mobilitydb_env
 
 QUERY_GENERATION_DIR=/zfshome/sunip956/master_thesis_trajectories/query_generation

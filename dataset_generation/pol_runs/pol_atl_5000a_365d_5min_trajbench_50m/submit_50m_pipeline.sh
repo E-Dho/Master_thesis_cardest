@@ -4,9 +4,9 @@ set -euo pipefail
 THESIS_HOME=/zfshome/sunip956/master_thesis_trajectories
 THESIS_WORK=/work_beegfs/sunip956/master_thesis_trajectories
 RUN_ROOT="$THESIS_WORK/runs/pol_atl_5000a_365d_5min_trajbench_50m"
-HOME_RUN_ROOT="$THESIS_HOME/pol_runs/pol_atl_5000a_365d_5min_trajbench_50m"
+HOME_RUN_ROOT="$THESIS_HOME/dataset_generation/pol_runs/pol_atl_5000a_365d_5min_trajbench_50m"
 DATASET_LIST="$RUN_ROOT/datasets.txt"
-LOAD_SCRIPT="$THESIS_HOME/mobilitydb_loader/load_pol_multi_to_mobilitydb.sbatch"
+LOAD_SCRIPT="$THESIS_HOME/dataset_generation/mobilitydb_loader/load_pol_multi_to_mobilitydb.sbatch"
 
 mkdir -p "$RUN_ROOT" "$THESIS_WORK/slurm_logs"
 : > "$DATASET_LIST"

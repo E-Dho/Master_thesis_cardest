@@ -7,7 +7,7 @@
 #SBATCH --error=/work_beegfs/sunip956/master_thesis_trajectories/slurm_logs/build_mobilitydb_%j.err
 
 set -euo pipefail
-source /zfshome/sunip956/master_thesis_trajectories/mobilitydb_loader/common.sh
+source /zfshome/sunip956/master_thesis_trajectories/dataset_generation/mobilitydb_loader/common.sh
 
 mkdir -p "$MOBILITYDB_ROOT" "$MOBILITYDB_LOG_DIR" "$MOBILITYDB_ROOT/src" "$MOBILITYDB_ROOT/build"
 load_micromamba
