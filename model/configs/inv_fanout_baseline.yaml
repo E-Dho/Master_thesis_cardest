@@ -1,0 +1,26 @@
+model:
+  type: predicate_made
+  column_order: data_indicators_fanouts
+
+factorization:
+  enabled: false
+  strategy: none
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  weight_normalization: batch_sum
+  compute_weights_in_log_space: true
+  weight_clipping: null
+
+training:
+  seed: 0
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 1
+  smoothing: 0.000001
+
+inference:
+  progressive_sampling: false
+  use_log_space_product: true
+

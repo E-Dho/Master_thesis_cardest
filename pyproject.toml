@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Trajectory cardinality-estimation benchmark tooling for POL and MobilityDB."
 requires-python = ">=3.10"
 dependencies = [
+  "numpy>=2.0",
   "psycopg[binary]>=3.1",
 ]
 
@@ -13,5 +14,5 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["query_generation"]
+testpaths = ["query_generation", "model/tests"]
 python_files = ["test_*.py"]
