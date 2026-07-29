@@ -1,0 +1,38 @@
+.DS_Store
+Thumbs.db
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.env
+
+# Generated datasets, database files, and cluster runtime output
+data/
+datasets/
+mobilitydb/
+envs/
+m2/
+logs/
+slurm_logs/
+query_runs/
+*.out
+*.err
+*.log
+*.tsv
+*.csv
+*.zip
+*.gz
+*.dgs
+
+# Generated visual artifacts
+query_generation/visualizations/
+
+# POL source is intentionally not vendored in this repo.
+generate-mobility-dataset/
+remote_pol_src/
