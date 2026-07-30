@@ -330,8 +330,11 @@ model/src/data/full_join_sampler.py
 It is a tiny three-table chain with matched rows, unmatched full-outer-join
 branches, duplicate join keys, and correlated fanouts.
 
-For real datasets, the future integration point is a NeuroCard-style sampler
-that emits uniform full-outer-join samples in the same fixed column order.
+For JOB-light, the real-data path is a NeuroCard-backed preparation step that
+loads complete base-table dictionaries, complete join-key fanout metadata, and
+an optional sampled full-outer-join fixture into
+`data/neurocard_prepared/job_light/`. Training then reads the manifest-backed
+fixture through `NeuroCardFullJoinSampleSource`.
 
 ## NeuroCard Sampler Preparation
 
@@ -339,15 +342,17 @@ The wrapper command is:
 
 ```bash
 python3 -m model.scripts.prepare_neurocard_data \
-  --config model/configs/job_light_resmade_inv_fanout.yaml
+  --config model/configs/job_light_resmade_factorized_anpm.yaml \
+  --rebuild-domains \
+  --sample-rows 512
 ```
 
-For `dataset.type: neurocard_full_join`, the command validates CSV presence and
-checks for prepared Exact Weight artifacts under `dataset.prepared_directory`.
-If join-count tables, index files, or the preparation manifest are absent, it
-prints the missing paths. The actual JOB-light download/preparation and first
-real sampler run should be executed on the shared compute cluster, then synced
-back or run in place there.
+For `dataset.type: neurocard_full_join`, the command validates CSV presence,
+uses NeuroCard's JOB-light schema/join metadata, constructs complete domains,
+samples validation rows, writes `manifest.json`, `sample_rows.npy`, and
+`preparation_stats.json`, then reload-validates the artifacts. Without
+`--rebuild-domains`, an existing complete manifest is validated and reused; an
+old smoke-domain manifest fails with a rebuild hint.
 
 The adapter boundary is `NeuroCardFullJoinSampleSource`. It expects the prepared
 manifest to contain canonical `ModelMetadata` and join cardinality. It does not
@@ -427,8 +432,9 @@ python3 -m model.scripts.inspect_sampler \
 ```
 
 This prints join cardinality, column order, column types, domain sizes,
-indicator frequencies, fanout domains/min/max, padded-row percentages, and
-decoded sample rows.
+indicator frequencies, summarized fanout domains/min/max, padded-row
+percentages, decoded sample rows, factorization selection, output-width
+reduction, and estimated parameter size when PyTorch is available.
 
 ## Training Command
 
@@ -468,6 +474,13 @@ python3 -m model.scripts.train_resmade \
   --config model/configs/job_light_resmade_factorized_anpm.yaml
 ```
 
+The production JOB-light factorized template currently uses
+`batch_size=2048`, `steps_per_epoch=3500`, and therefore sees
+`7,168,000` nominal sampled tuples in one epoch. Training summaries report both
+`total_sampled_tuples` and `nominal_rows_seen`, plus parameter counts, model
+size, training time, per-column losses, factor losses, and fanout-head
+effective sample size.
+
 ## Evaluation Command
 
 Correctness prototype:
@@ -499,6 +512,12 @@ python3 -m model.scripts.evaluate_resmade \
 ```bash
 python3 -m model.scripts.exact_oracle
 ```
+
+This command runs a tiny synthetic oracle only. It scans the materialized
+synthetic full outer join and prints exact quantities used to validate
+`INV_FANOUT`, table indicators, predicate masks, and weighted fanout
+corrections. It does not train a model, use JOB-light, query MobilityDB, or
+invoke NeuroCard.
 
 ## Minimal Synthetic Example
 
@@ -569,7 +588,8 @@ direct input-output connections.
 
 ## Factorization Status
 
-Factorization is disabled by default and enabled explicitly:
+The baseline and unfactorized configs leave factorization disabled. The
+factorized smoke and JOB-light configs enable it explicitly:
 
 ```yaml
 factorization:
@@ -589,7 +609,10 @@ anpm:
 
 `IdentityOutputAdapter` handles unfactorized outputs.
 `ANPMFactorizedOutputAdapter` decodes factorized torch outputs back to
-original-column semantics through chunked valid-ID enumeration.
+original-column semantics through chunked valid-ID enumeration. On the rebuilt
+complete-domain JOB-light manifest, inspection selected
+`movie_companies:company_id` and `movie_keyword:keyword_id`, reducing output
+width from `374732` to `9915`.
 
 ## Testing
 
@@ -602,9 +625,11 @@ python3 -m pytest
 
 The tests cover logit slicing, predicate masks, reciprocal fanout masks,
 expected inverse fanout, cumulative weights, wildcard exclusion, weighted cross
-entropy, checkpoint metadata, lossless factorization round-trips, invalid factor
-tuples, output-width reduction for a large synthetic domain, exact two-fanout
-arithmetic, synthetic oracle cases, and a deterministic training smoke.
+entropy, checkpoint metadata, complete-domain preparation, manifest validation,
+sample-size-independent domains, OOD literal classification, lossless
+factorization round-trips, invalid factor tuples, output-width reduction for a
+large synthetic domain, exact two-fanout arithmetic, synthetic oracle cases, and
+a deterministic training smoke.
 
 When PyTorch is installed, additional tests cover ResMADE output width, separate
 input/output bins, per-column softmax, residual shape preservation through the
@@ -636,13 +661,18 @@ Loading can reject incompatible schema hashes.
 
 ## Evaluation Metrics
 
-The evaluation utilities report:
+The in-repo ResMADE evaluation command reports:
 
 - Estimated cardinality.
-- True cardinality.
-- Q-error.
-- Median, p90, p95, p99, and max Q-error.
 - Inference latency.
+- Backbone forward time.
+- ANPM decode time.
+- Model forward-call count.
+
+For the synthetic dataset it also reports true cardinality and q-error from the
+exact oracle. JOB-light query-workload summaries with median/p90/p95 q-error
+are currently produced by the cluster-side workload evaluation artifacts rather
+than a standalone checked-in CLI.
 
 The training utilities expose fanout-head weight statistics, including
 effective sample size:
@@ -655,17 +685,22 @@ effective sample size:
 
 - The NeuroCard adapter is a manifest/sample-source boundary; this repository
   does not vendor NeuroCard's full Rust/index preparation stack.
-- Real JOB-light preparation and first smoke training must run on the shared
-  cluster with dataset files and NeuroCard artifacts available.
+- Complete JOB-light preparation and smoke training have been run on the shared
+  cluster; reproducing them still requires the cluster dataset files and
+  upstream NeuroCard checkout/environment.
 - Local validation in this workspace skipped torch-specific tests because
   PyTorch is not installed here.
-- Direct input-output connections are disabled in factorized mode.
-- Indicators and fanouts are not factorized.
+- Direct input-output connections are intentionally disabled in factorized mode
+  until dedicated factor-head masks are implemented.
+- Indicators and fanouts are intentionally not factorized; only ordinary data
+  columns are factorized.
 - Factorized inference uses chunk enumeration, not optimized prefix dynamic
   programming.
-- Two-sided ranges still use external inclusion-exclusion.
+- Two-sided ranges are handled outside the backbone by inclusion-exclusion, so
+  they require multiple model calls.
 - Factorized checkpoints require fresh training.
-- Full benchmark execution still depends on prepared cluster data.
+- Evaluation against stored JOB-light query workloads is still a cluster-side
+  workflow rather than a self-contained local command in this repository.
 
 ## Troubleshooting
 
@@ -673,8 +708,9 @@ effective sample size:
   prototype-table scripts.
 - Missing CSV directory: update `dataset.csv_directory` or download/export the
   dataset on the cluster.
-- Missing join-count/index artifacts: run or sync NeuroCard Exact Weight
-  preparation artifacts into `dataset.prepared_directory`.
+- Missing or smoke-domain manifest: run
+  `python3 -m model.scripts.prepare_neurocard_data --config <cfg> --rebuild-domains`
+  in an environment with JOB-light CSVs and NeuroCard available.
 - Non-positive fanout value: inspect sampler output; only known outer-padding
   neutral branches may canonicalize to fanout `1`.
 - Direct I/O validation error: set `model.direct_io_connections: false` when
@@ -682,9 +718,9 @@ effective sample size:
 
 ## Reproducibility
 
-The baseline config sets `training.seed: 0`. The current synthetic trainer is
-deterministic because it uses closed-form weighted counts. Future neural
-training should seed Python, NumPy, and PyTorch explicitly.
+The shipped configs set `training.seed: 0`. The ResMADE trainer seeds Python,
+NumPy, and PyTorch at startup; the synthetic trainer is deterministic because
+it uses closed-form weighted counts.
 
 ## Upstream Attribution And Licenses
 
