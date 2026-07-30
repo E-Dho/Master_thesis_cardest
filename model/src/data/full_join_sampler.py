@@ -113,6 +113,9 @@ class NeuroCardFullJoinSampleSource:
                 "Run python3 -m model.scripts.prepare_neurocard_data --config <config>."
             )
         self.manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        from model.src.data.complete_domain_preparation import validate_prepared_manifest
+
+        validate_prepared_manifest(self.prepared_directory)
         self._metadata = ModelMetadata.from_json_dict(self.manifest["metadata"])
 
     @property

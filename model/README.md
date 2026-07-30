@@ -28,8 +28,9 @@ ResMADE backend, `model.type: predicate_resmade`.
     heads, per-column logit slicing, and one-pass inference without progressive
     sampling.
 - DistJoin: https://github.com/GIS-PuppetMaster/DistJoin
-  - Inspected only for the future ANPM/factorized-output boundary. ANPM and
-    lossless column factorization are not implemented in this milestone.
+  - Conceptual base for lossless high-bit-to-low-bit column factorization and
+    ANPM-style previous-factor embedding modulation. The implementation adapts
+    those ideas to this repository's original-column-preserving ResMADE layout.
 
 No upstream source files are vendored or copied. See `ATTRIBUTION.md`.
 
@@ -72,6 +73,104 @@ while its real output domain may contain:
 Ordinary columns similarly preserve both operator identity and predicate value.
 `EQUAL(5)`, `LESS_EQUAL(5)`, and `GREATER_EQUAL(5)` are different input tokens.
 Output heads always classify actual encoded data, indicator, or fanout values.
+
+## Lossless Column Factorization
+
+Original columns remain the query-facing schema. For a selected high-cardinality
+ordinary data column `X_i`, the model may internally represent the original
+dictionary ID as bit factors:
+
+```text
+x <-> (z_1, ..., z_K)
+```
+
+The mapping is deterministic, most-significant-factor first, and derived only
+from the complete original domain size in metadata. `sample_rows.npy` stays in
+original encoded-column form; factor targets are produced by a deterministic
+training adapter. Invalid bit combinations beyond the original domain are never
+decoded as valid IDs.
+
+## ANPM Factor Decoding
+
+For a factorized original column, the outer ResMADE supplies context from
+previous original predicate tokens:
+
+```text
+q_i(x | T_<i) = product_k q_{i,k}(z_k | T_<i, z_<k)
+```
+
+Each factorized column owns a local ANPM decoder. The first factor uses the base
+ResMADE logits. Later factors add a learned offset from embeddings of preceding
+factor values, adapted from DistJoin's ANPM modulation pattern and confined to
+that one original column.
+
+## Original Columns Versus Model Heads
+
+`ModelMetadata.columns` remains authoritative and contains original columns
+only. `factorization_plan.output_head_specs` describes model heads:
+
+```text
+unfactorized X_i -> one output head
+factorized X_i   -> one output head per factor
+```
+
+Every factor head for `X_i` receives outer autoregressive degree `i`, so it may
+depend on `T_<i` but not on `T_i` or future tokens. Same-column factor
+dependence enters only through ANPM.
+
+## Interaction With INV_FANOUT
+
+Indicators and fanout columns remain atomic in this milestone. The
+`INV_FANOUT` token, reciprocal fanout mask, and cumulative inverse-fanout
+weighted cross entropy are unchanged. Factorized ordinary columns can coexist
+with fanout heads without changing fanout effective sample size or weighting
+semantics.
+
+## Factorized Training Loss
+
+Factorized labels are trained with teacher forcing. For each row, the CE terms
+for all factors of one original column are summed first. The original-column row
+weight is then applied once:
+
+```text
+L_i = sum_b w_bi * sum_k CE(q_i,k, z_i,k) / (sum_b w_bi + eps)
+```
+
+This preserves original-column loss semantics and avoids normalizing each factor
+as if it were an independent modeled column.
+
+## Factorized Inference
+
+Inference remains one predicate-conditioned ResMADE backbone pass per query row,
+followed by deterministic ANPM decoding. The output adapter hides factor digits
+from callers and computes original-column factors:
+
+```text
+s_i = sum_x q_i(x) phi_i(x)
+```
+
+For factorized columns, valid original IDs are enumerated in chunks. Their
+factor paths are evaluated, invalid combinations are excluded by normalizing
+over valid IDs, and the existing original-domain predicate mask is applied.
+Two-sided ranges continue to use the external inclusion-exclusion path.
+
+## Memory Reduction
+
+For large domains, output width changes from the original domain size to the sum
+of bit-factor domains. With the JOB-light template settings
+`word_size_bits: 11` and `minimum_domain_size: 2048`, a column with millions of
+IDs is represented by small factor heads instead of one flat million-way
+softmax. The synthetic factorized smoke config intentionally uses tiny domains
+for correctness and may not reduce width.
+
+## Checkpoint Compatibility
+
+Factorized checkpoints store original metadata, the full factorization plan,
+output-head specs, ANPM configuration, model state, optimizer state, predicate
+vocabularies, schema hash, and factorization hash. Legacy unfactorized
+checkpoints remain loadable. Loading can reject a mismatched expected
+factorization plan; factorized training requires a fresh checkpoint rather than
+reusing unfactorized output-layer weights.
 
 ## Exact Autoregressive Masking Contract
 
@@ -202,7 +301,8 @@ Initially supported:
 - `INV_FANOUT` and `WILDCARD` fanout tokens.
 - One-pass predicate-conditioned inference.
 - No progressive sampling.
-- No lossless column factorization.
+- Lossless bitwise factorization for ordinary data columns.
+- ANPM decoding for factorized ordinary data columns.
 
 The included integration tests use a materialized synthetic full outer join for
 oracle validation only.
@@ -253,6 +353,72 @@ The adapter boundary is `NeuroCardFullJoinSampleSource`. It expects the prepared
 manifest to contain canonical `ModelMetadata` and join cardinality. It does not
 estimate `|J|` from sampled row count.
 
+## Complete Domains Versus Smoke Samples
+
+For JOB-light, `manifest.json` is the model schema contract and
+`sample_rows.npy` is only a small training or validation fixture. The manifest
+domains must be built from the complete JOB-light base tables and join metadata,
+not from the sampled join rows. Changing `--sample-rows` can change the fixture
+shape, but it must not change ordinary domains, indicator domains, fanout
+domains, schema hashes, or factorization mappings.
+
+The preparation path now uses complete source-table columns for ordinary data
+domains, adds the canonical outer-padding token separately, writes explicit
+indicator domains `(0, 1)`, and derives fanout domains as dense positive ranges
+`1..f_max` from complete join-key frequencies. The neutral outer-join fanout is
+`1`; zero or negative fanouts fail validation.
+
+Factorization only becomes useful once these complete high-cardinality domains
+are present. Old smoke-domain manifests used only 512 sampled rows, so every
+ordinary domain stayed below `factorization.minimum_domain_size: 2048` and the
+factorization plan had no selected columns. Old checkpoints trained against a
+smoke manifest are incompatible with a rebuilt complete manifest because output
+dimensions, predicate vocabularies, schema hashes, and factorization mappings
+can change.
+
+## Regenerating the JOB-light Manifest
+
+On the cluster, archive old smoke artifacts if they are present:
+
+```bash
+cd /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest
+stamp=$(date +%Y%m%d%H%M%S)
+mkdir -p data/neurocard_prepared/job_light/archive_$stamp
+mv data/neurocard_prepared/job_light/manifest.json data/neurocard_prepared/job_light/archive_$stamp/ 2>/dev/null || true
+mv data/neurocard_prepared/job_light/sample_rows.npy data/neurocard_prepared/job_light/archive_$stamp/ 2>/dev/null || true
+mv data/neurocard_prepared/job_light/preparation_stats.json data/neurocard_prepared/job_light/archive_$stamp/ 2>/dev/null || true
+```
+
+Rebuild complete domains and encode a 512-row validation fixture:
+
+```bash
+python3 -m model.scripts.prepare_neurocard_data \
+  --config model/configs/job_light_resmade_factorized_anpm.yaml \
+  --rebuild-domains \
+  --sample-rows 512
+```
+
+Inspect the prepared metadata and factorization reduction:
+
+```bash
+python3 -m model.scripts.inspect_sampler \
+  --config model/configs/job_light_resmade_factorized_anpm.yaml \
+  --sample-rows 2
+```
+
+The rebuilt cluster manifest reported `original_output_width=374732`,
+`factorized_output_width=9915`, and reduction ratio `0.026459`. The selected
+factorized columns were `movie_companies:company_id` with factor domains
+`(128, 2048)` and `movie_keyword:keyword_id` with factor domains
+`(128, 2048)`.
+
+Run the short JOB-light factorized training smoke:
+
+```bash
+python3 -m model.scripts.train_resmade \
+  --config model/configs/job_light_resmade_factorized_smoke.yaml
+```
+
 ## Sampler Inspection
 
 ```bash
@@ -288,6 +454,20 @@ python3 -m model.scripts.train_resmade \
   --config model/configs/job_light_resmade_inv_fanout.yaml
 ```
 
+Synthetic factorized ANPM smoke:
+
+```bash
+python3 -m model.scripts.train_resmade \
+  --config model/configs/resmade_factorized_smoke.yaml
+```
+
+JOB-light factorized ANPM template:
+
+```bash
+python3 -m model.scripts.train_resmade \
+  --config model/configs/job_light_resmade_factorized_anpm.yaml
+```
+
 ## Evaluation Command
 
 Correctness prototype:
@@ -304,6 +484,14 @@ ResMADE:
 python3 -m model.scripts.evaluate_resmade \
   --config model/configs/resmade_smoke.yaml \
   --checkpoint model/runs/resmade_smoke/checkpoint_step_200.pt
+```
+
+Factorized ResMADE:
+
+```bash
+python3 -m model.scripts.evaluate_resmade \
+  --config model/configs/resmade_factorized_smoke.yaml \
+  --checkpoint model/runs/resmade_factorized_smoke/checkpoint_step_20.pt
 ```
 
 ## Exact Oracle Command
@@ -349,6 +537,9 @@ ResMADE configs:
 model/configs/resmade_inv_fanout_example.yaml
 model/configs/resmade_smoke.yaml
 model/configs/job_light_resmade_inv_fanout.yaml
+model/configs/resmade_factorized_smoke.yaml
+model/configs/job_light_resmade_factorized_smoke.yaml
+model/configs/job_light_resmade_factorized_anpm.yaml
 ```
 
 Important settings:
@@ -360,7 +551,12 @@ Important settings:
 - `model.direct_io_connections`: enables masked direct input-output path.
 - `model.input_encoding`: `embed` or `one_hot`.
 - `model.column_order`: `data_indicators_fanouts`.
-- `factorization.enabled`: must be `false`.
+- `factorization.enabled`: enables lossless ordinary-column bit factorization.
+- `factorization.word_size_bits`: maximum bit width per factor head.
+- `factorization.minimum_domain_size`: minimum original domain size considered
+  for factorization.
+- `anpm.enabled`: required when factorization is enabled.
+- `anpm.decode_chunk_size`: valid original IDs accumulated per decoding chunk.
 - `fanout.compute_weights_in_log_space`: builds cumulative inverse weights in
   log space.
 - `fanout.weight_clipping`: `null` by default. Clipping would bias the target
@@ -368,22 +564,32 @@ Important settings:
 - `inference.progressive_sampling`: must be `false`.
 - `inference.use_log_space_product`: controls log-space product accumulation.
 
-Startup validation fails for incompatible milestone settings.
+Startup validation fails for incompatible settings, including factorization with
+direct input-output connections.
 
 ## Factorization Status
 
-Factorization is disabled by default:
+Factorization is disabled by default and enabled explicitly:
 
 ```yaml
 factorization:
-  enabled: false
-  strategy: none
+  enabled: true
+  strategy: bitwise_lossless
+  word_size_bits: 11
+  minimum_domain_size: 2048
+  blacklist_columns: []
+  blacklist_kinds: [indicator, fanout]
+
+anpm:
+  enabled: true
+  previous_factor_embedding_size: 64
+  hidden_size: 64
+  decode_chunk_size: 4096
 ```
 
-`OutputDistributionAdapter` defines the extension boundary. The current
-`IdentityOutputAdapter` handles unfactorized columns. The
-`ANPMFactorizedOutputAdapter` exists only as a documented placeholder and raises
-`NotImplementedError`.
+`IdentityOutputAdapter` handles unfactorized outputs.
+`ANPMFactorizedOutputAdapter` decodes factorized torch outputs back to
+original-column semantics through chunked valid-ID enumeration.
 
 ## Testing
 
@@ -396,13 +602,16 @@ python3 -m pytest
 
 The tests cover logit slicing, predicate masks, reciprocal fanout masks,
 expected inverse fanout, cumulative weights, wildcard exclusion, weighted cross
-entropy, checkpoint metadata, factorization failure, exact two-fanout arithmetic,
-synthetic oracle cases, and a deterministic training smoke.
+entropy, checkpoint metadata, lossless factorization round-trips, invalid factor
+tuples, output-width reduction for a large synthetic domain, exact two-fanout
+arithmetic, synthetic oracle cases, and a deterministic training smoke.
 
 When PyTorch is installed, additional tests cover ResMADE output width, separate
 input/output bins, per-column softmax, residual shape preservation through the
-forward/backward path, checkpoint save/load, current/future token leakage, and
-CUDA smoke when CUDA is available.
+forward/backward path, checkpoint save/load, current/future token leakage,
+factor-head masking, ANPM prefix dependence, grouped factorized loss gradients,
+factorized adapter normalization, factorized checkpoint reload, and CUDA smoke
+when CUDA is available.
 
 ## Checkpoint Contents
 
@@ -414,6 +623,9 @@ ResMADE checkpoints include:
 - ResMADE configuration.
 - Resolved project configuration.
 - Schema and column metadata.
+- Factorization plan and factorization hash.
+- Output-head specifications.
+- ANPM configuration for factorized checkpoints.
 - Predicate vocabularies.
 - Output slices.
 - Join cardinality.
@@ -445,10 +657,15 @@ effective sample size:
   does not vendor NeuroCard's full Rust/index preparation stack.
 - Real JOB-light preparation and first smoke training must run on the shared
   cluster with dataset files and NeuroCard artifacts available.
-- Only synthetic oracle validation is included.
-- No ANPM.
-- No lossless column factorization.
-- No benchmark workload or JOB-light pipeline in this milestone.
+- Local validation in this workspace skipped torch-specific tests because
+  PyTorch is not installed here.
+- Direct input-output connections are disabled in factorized mode.
+- Indicators and fanouts are not factorized.
+- Factorized inference uses chunk enumeration, not optimized prefix dynamic
+  programming.
+- Two-sided ranges still use external inclusion-exclusion.
+- Factorized checkpoints require fresh training.
+- Full benchmark execution still depends on prepared cluster data.
 
 ## Troubleshooting
 
@@ -460,6 +677,8 @@ effective sample size:
   preparation artifacts into `dataset.prepared_directory`.
 - Non-positive fanout value: inspect sampler output; only known outer-padding
   neutral branches may canonicalize to fanout `1`.
+- Direct I/O validation error: set `model.direct_io_connections: false` when
+  `factorization.enabled: true`.
 
 ## Reproducibility
 
@@ -471,4 +690,5 @@ training should seed Python, NumPy, and PyTorch explicitly.
 
 See `ATTRIBUTION.md`. NeuroCard is published under Apache-2.0 according to its
 GitHub repository page. Duet and DistJoin are referenced as upstream research
-implementations; this milestone does not vendor or copy their source code.
+implementations; this milestone adapts DistJoin's bit-factorization and ANPM
+ideas without vendoring or copying full source files.

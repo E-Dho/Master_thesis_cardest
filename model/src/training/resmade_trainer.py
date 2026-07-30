@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
 
 from model.src.config import resolve_device
 from model.src.data.full_join_sampler import FullJoinBatch
+from model.src.model.anpm import ANPMConfig
 from model.src.model.checkpoint import save_resmade_checkpoint
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.predicates.generation import tokens_for_query_tables
@@ -22,13 +25,39 @@ from model.src.training.torch_losses import torch_weighted_per_head_cross_entrop
 class TrainingResult:
     checkpoint_path: Path
     parameter_count: int
+    parameter_size_bytes: int
+    backbone_parameter_count: int
+    anpm_parameter_count: int
     first_loss: float
     last_loss: float
+    total_sampled_tuples: int
+    nominal_rows_seen: int
+    training_seconds: float
+    metrics_path: Path
+    summary_path: Path
+    fanout_effective_sample_size: dict[str, dict[str, float]]
+    output_width_original: int
+    output_width_factorized: int
+    peak_gpu_memory_bytes: int | None
+    last_original_column_losses: dict[str, float]
+    last_factor_losses: dict[str, float]
+
+
+@dataclass(frozen=True)
+class TrainingStepResult:
+    loss: float
+    fanout_effective_sample_size: dict[str, float]
+    original_column_losses: dict[str, float]
+    factor_losses: dict[str, float]
 
 
 def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> PredicateResMADE:
     model_config = config["model"]
     vocabularies = PredicateVocabularies.from_metadata(metadata)
+    plan = getattr(metadata, "factorization_plan", None)
+    output_head_specs = None
+    if plan is not None and plan.enabled:
+        output_head_specs = plan.output_head_specs
     return PredicateResMADE(
         PredicateResMADEConfig(
             predicate_input_bins=vocabularies.input_bins,
@@ -41,6 +70,9 @@ def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> Predi
             embedding_size=int(model_config.get("embedding_size", 16)),
             residual_dropout=float(model_config.get("residual_dropout", 0.0)),
             fixed_ordering=bool(model_config.get("fixed_ordering", True)),
+            output_head_specs=output_head_specs,
+            factorization_plan=plan,
+            anpm_config=ANPMConfig.from_dict(config.get("anpm", {})),
         )
     )
 
@@ -66,10 +98,25 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     first_loss: float | None = None
     last_loss = float("nan")
     global_step = 0
+    batch_size = int(training["batch_size"])
+    output_directory = Path(logging.get("output_directory", "model/runs/resmade"))
+    output_directory.mkdir(parents=True, exist_ok=True)
+    metrics_path = output_directory / "training_metrics.jsonl"
+    summary_path = output_directory / "training_summary.json"
+    metrics_path.write_text("", encoding="utf-8")
+    fanout_ess_values: dict[str, list[float]] = {
+        metadata.columns[index].name: [] for index in metadata.fanout_indices()
+    }
+    last_original_column_losses: dict[str, float] = {}
+    last_factor_losses: dict[str, float] = {}
+    metrics_interval = int(training.get("validation_interval_steps", 0) or 0)
+    training_start = perf_counter()
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     for epoch in range(int(training["epochs"])):
         for step_in_epoch in range(int(training["steps_per_epoch"])):
-            batch = sample_source.batches(int(training["batch_size"]), seed=seed + global_step)
-            loss = _train_one_batch(
+            batch = sample_source.batches(batch_size, seed=seed + global_step)
+            step_result = _train_one_batch(
                 model,
                 optimizer,
                 batch,
@@ -78,25 +125,111 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 config,
                 device,
             )
+            loss = step_result.loss
             last_loss = loss
             if first_loss is None:
                 first_loss = loss
             global_step += 1
+            for fanout_name, fanout_ess in step_result.fanout_effective_sample_size.items():
+                fanout_ess_values[fanout_name].append(float(fanout_ess))
+            last_original_column_losses = step_result.original_column_losses
+            last_factor_losses = step_result.factor_losses
             interval = int(training.get("checkpoint_interval_steps", 0) or 0)
             if interval and global_step % interval == 0:
                 _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config)
+            if metrics_interval and global_step % metrics_interval == 0:
+                _append_metrics(
+                    metrics_path,
+                    {
+                        "step": global_step,
+                        "epoch": epoch,
+                        "step_in_epoch": step_in_epoch,
+                        "nominal_rows_seen": global_step * batch_size,
+                        "total_sampled_tuples": global_step * batch_size,
+                        "loss": loss,
+                        "fanout_effective_sample_size": step_result.fanout_effective_sample_size,
+                        "original_column_losses": step_result.original_column_losses,
+                        "factor_losses": step_result.factor_losses,
+                    },
+                )
         if int(training["steps_per_epoch"]) == 0:
             break
     checkpoint_path = _save_checkpoint(
         model, optimizer, int(training["epochs"]) - 1, global_step, metadata, vocabularies, config
     )
-    output_directory = Path(logging.get("output_directory", checkpoint_path.parent))
-    output_directory.mkdir(parents=True, exist_ok=True)
+    training_seconds = perf_counter() - training_start
+    parameter_size_bytes = int(sum(parameter.numel() * parameter.element_size() for parameter in model.parameters()))
+    anpm_parameter_count = int(
+        sum(parameter.numel() for parameter in model.anpm_decoders.parameters())
+    )
+    backbone_parameter_count = int(model.parameter_count() - anpm_parameter_count)
+    peak_gpu_memory_bytes = (
+        int(torch.cuda.max_memory_allocated())
+        if device == "cuda" and torch.cuda.is_available()
+        else None
+    )
+    plan = getattr(metadata, "factorization_plan", None)
+    output_width_original = (
+        int(plan.original_output_width)
+        if plan is not None and plan.original_output_width
+        else int(sum(metadata.data_output_bins))
+    )
+    output_width_factorized = (
+        int(plan.factorized_output_width)
+        if plan is not None and plan.factorized_output_width
+        else int(sum(metadata.data_output_bins))
+    )
+    fanout_ess_summary = {
+        fanout_name: {
+            "last": values[-1],
+            "mean": float(np.mean(values)),
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+        }
+        for fanout_name, values in fanout_ess_values.items()
+        if values
+    }
+    summary = {
+        "checkpoint": str(checkpoint_path),
+        "parameter_count": model.parameter_count(),
+        "parameter_size_bytes": parameter_size_bytes,
+        "backbone_parameter_count": backbone_parameter_count,
+        "anpm_parameter_count": anpm_parameter_count,
+        "first_loss": float(first_loss if first_loss is not None else float("nan")),
+        "last_loss": last_loss,
+        "optimizer_steps": global_step,
+        "batch_size": batch_size,
+        "total_sampled_tuples": global_step * batch_size,
+        "nominal_rows_seen": global_step * batch_size,
+        "training_seconds": training_seconds,
+        "fanout_effective_sample_size": fanout_ess_summary,
+        "output_width_original": output_width_original,
+        "output_width_factorized": output_width_factorized,
+        "peak_gpu_memory_bytes": peak_gpu_memory_bytes,
+        "last_original_column_losses": last_original_column_losses,
+        "last_factor_losses": last_factor_losses,
+        "metrics_path": str(metrics_path),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     return TrainingResult(
         checkpoint_path=checkpoint_path,
         parameter_count=model.parameter_count(),
+        parameter_size_bytes=parameter_size_bytes,
+        backbone_parameter_count=backbone_parameter_count,
+        anpm_parameter_count=anpm_parameter_count,
         first_loss=float(first_loss if first_loss is not None else float("nan")),
         last_loss=last_loss,
+        total_sampled_tuples=global_step * batch_size,
+        nominal_rows_seen=global_step * batch_size,
+        training_seconds=training_seconds,
+        metrics_path=metrics_path,
+        summary_path=summary_path,
+        fanout_effective_sample_size=fanout_ess_summary,
+        output_width_original=output_width_original,
+        output_width_factorized=output_width_factorized,
+        peak_gpu_memory_bytes=peak_gpu_memory_bytes,
+        last_original_column_losses=last_original_column_losses,
+        last_factor_losses=last_factor_losses,
     )
 
 
@@ -108,7 +241,7 @@ def _train_one_batch(
     vocabularies: PredicateVocabularies,
     config: dict[str, Any],
     device: str,
-) -> float:
+) -> TrainingStepResult:
     import torch
 
     token_rows = [
@@ -135,6 +268,7 @@ def _train_one_batch(
         targets,
         head_weights,
         metadata,
+        anpm_decoders=getattr(model, "anpm_decoders", None),
         head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
     )
     breakdown.total_loss.backward()
@@ -144,11 +278,23 @@ def _train_one_batch(
     optimizer.step()
     if not torch.isfinite(breakdown.total_loss):
         raise ValueError("training loss became non-finite")
+    fanout_effective_sample_sizes = {}
     for fanout_index in metadata.fanout_indices():
         fanout_ess = effective_sample_size(weights[:, fanout_index])
         if fanout_ess <= 0:
             raise ValueError("fanout effective sample size is non-positive")
-    return float(breakdown.total_loss.detach().cpu())
+        fanout_effective_sample_sizes[metadata.columns[fanout_index].name] = float(fanout_ess)
+    return TrainingStepResult(
+        loss=float(breakdown.total_loss.detach().cpu()),
+        fanout_effective_sample_size=fanout_effective_sample_sizes,
+        original_column_losses=breakdown.original_column_losses,
+        factor_losses=breakdown.factor_losses,
+    )
+
+
+def _append_metrics(path: Path, metrics: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(metrics, sort_keys=True) + "\n")
 
 
 def _save_checkpoint(
@@ -174,4 +320,3 @@ def _save_checkpoint(
         preparation_manifest_id=config.get("dataset", {}).get("name"),
     )
     return checkpoint_path
-

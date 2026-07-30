@@ -34,8 +34,11 @@ class OnePassEstimator:
         """Return |J| prod_i a_i, optionally accumulated as log|J|+sum log a_i."""
 
         start = perf_counter()
-        distributions = self.model.predict_distributions(tokens)
-        factors = factors_from_distributions(distributions, self.metadata.columns, tokens)
+        if hasattr(self.model, "predict_column_factors"):
+            factors = np.asarray(self.model.predict_column_factors(tokens), dtype=float)
+        else:
+            distributions = self.model.predict_distributions(tokens)
+            factors = factors_from_distributions(distributions, self.metadata.columns, tokens)
         if use_log_space_product:
             if self.metadata.full_join_cardinality == 0 or np.any(factors == 0):
                 estimate = 0.0
@@ -50,4 +53,3 @@ class OnePassEstimator:
         if estimate < 0 or not np.isfinite(estimate):
             raise ValueError(f"invalid cardinality estimate {estimate!r}")
         return EstimateResult(estimate, factors, latency)
-

@@ -17,6 +17,137 @@ class ColumnKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class OutputHeadSpec:
+    """One model output head, possibly representing a factor of an original column."""
+
+    name: str
+    source_column_index: int
+    factor_index: int | None
+    domain_size: int
+
+
+@dataclass(frozen=True)
+class FactorColumnMetadata:
+    """Metadata for one lossless bit factor of an original dictionary ID."""
+
+    name: str
+    original_column_index: int
+    factor_index: int
+    domain_size: int
+    bit_width: int
+    bit_offset: int
+    radix: int
+    is_last_factor: bool
+
+
+@dataclass(frozen=True)
+class OriginalColumnFactorization:
+    """Lossless mapping between one original column and its factor output heads."""
+
+    original_column_index: int
+    factor_column_indices: tuple[int, ...]
+    original_domain_size: int
+    factor_order: str
+    factor_domains: tuple[int, ...]
+    bit_widths: tuple[int, ...]
+    bit_offsets: tuple[int, ...]
+    radices: tuple[int, ...]
+    invalid_combination_count: int = 0
+
+
+@dataclass(frozen=True)
+class FactorizationPlan:
+    """Immutable schema-level plan for original-column-preserving factorization."""
+
+    enabled: bool = False
+    strategy: str = "none"
+    word_size_bits: int = 0
+    minimum_domain_size: int = 0
+    factor_order: str = "none"
+    blacklist_columns: tuple[str, ...] = ()
+    blacklist_kinds: tuple[str, ...] = ()
+    original_column_factorizations: tuple[OriginalColumnFactorization, ...] = ()
+    factor_columns: tuple[FactorColumnMetadata, ...] = ()
+    output_head_specs: tuple[OutputHeadSpec, ...] = ()
+    original_output_width: int = 0
+    factorized_output_width: int = 0
+    metadata_version: int = 1
+
+    def factorization_for_column(
+        self, original_column_index: int
+    ) -> OriginalColumnFactorization | None:
+        for factorization in self.original_column_factorizations:
+            if factorization.original_column_index == original_column_index:
+                return factorization
+        return None
+
+    def output_heads_for_column(self, original_column_index: int) -> tuple[int, ...]:
+        return tuple(
+            index
+            for index, spec in enumerate(self.output_head_specs)
+            if spec.source_column_index == original_column_index
+        )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, Any] | None) -> "FactorizationPlan":
+        if not data:
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            strategy=str(data.get("strategy", "none")),
+            word_size_bits=int(data.get("word_size_bits", 0)),
+            minimum_domain_size=int(data.get("minimum_domain_size", 0)),
+            factor_order=str(data.get("factor_order", "none")),
+            blacklist_columns=tuple(data.get("blacklist_columns", ())),
+            blacklist_kinds=tuple(data.get("blacklist_kinds", ())),
+            original_column_factorizations=tuple(
+                OriginalColumnFactorization(
+                    original_column_index=int(item["original_column_index"]),
+                    factor_column_indices=tuple(item["factor_column_indices"]),
+                    original_domain_size=int(item["original_domain_size"]),
+                    factor_order=str(item["factor_order"]),
+                    factor_domains=tuple(item["factor_domains"]),
+                    bit_widths=tuple(item["bit_widths"]),
+                    bit_offsets=tuple(item["bit_offsets"]),
+                    radices=tuple(item["radices"]),
+                    invalid_combination_count=int(item.get("invalid_combination_count", 0)),
+                )
+                for item in data.get("original_column_factorizations", ())
+            ),
+            factor_columns=tuple(
+                FactorColumnMetadata(
+                    name=str(item["name"]),
+                    original_column_index=int(item["original_column_index"]),
+                    factor_index=int(item["factor_index"]),
+                    domain_size=int(item["domain_size"]),
+                    bit_width=int(item["bit_width"]),
+                    bit_offset=int(item["bit_offset"]),
+                    radix=int(item["radix"]),
+                    is_last_factor=bool(item["is_last_factor"]),
+                )
+                for item in data.get("factor_columns", ())
+            ),
+            output_head_specs=tuple(
+                OutputHeadSpec(
+                    name=str(item["name"]),
+                    source_column_index=int(item["source_column_index"]),
+                    factor_index=(
+                        None if item.get("factor_index") is None else int(item["factor_index"])
+                    ),
+                    domain_size=int(item["domain_size"]),
+                )
+                for item in data.get("output_head_specs", ())
+            ),
+            original_output_width=int(data.get("original_output_width", 0)),
+            factorized_output_width=int(data.get("factorized_output_width", 0)),
+            metadata_version=int(data.get("metadata_version", 1)),
+        )
+
+
+@dataclass(frozen=True)
 class FactorizationMetadata:
     """Future-proof metadata for lossless factorization without enabling it."""
 
@@ -79,6 +210,7 @@ class ModelMetadata:
     column_order: str = "data_indicators_fanouts"
     upstream_attribution: dict[str, str] = field(default_factory=dict)
     schema_hash: str | None = None
+    factorization_plan: FactorizationPlan = field(default_factory=FactorizationPlan)
 
     def __post_init__(self) -> None:
         if self.full_join_cardinality < 0:
@@ -107,6 +239,12 @@ class ModelMetadata:
         return tuple(column.domain_size for column in self.columns)
 
     @property
+    def model_output_bins(self) -> tuple[int, ...]:
+        if self.factorization_plan.enabled:
+            return tuple(spec.domain_size for spec in self.factorization_plan.output_head_specs)
+        return self.data_output_bins
+
+    @property
     def predicate_input_bins(self) -> tuple[int, ...]:
         return tuple(column.predicate_domain_size for column in self.columns)
 
@@ -116,6 +254,17 @@ class ModelMetadata:
         start = 0
         for column in self.columns:
             stop = start + column.domain_size
+            slices.append((start, stop))
+            start = stop
+        return tuple(slices)
+
+    @property
+    def model_output_slices(self) -> tuple[tuple[int, int], ...]:
+        widths = self.model_output_bins
+        slices = []
+        start = 0
+        for width in widths:
+            stop = start + width
             slices.append((start, stop))
             start = stop
         return tuple(slices)
@@ -130,6 +279,9 @@ class ModelMetadata:
         data = asdict(self)
         for column in data["columns"]:
             column["kind"] = column["kind"].value
+        data["factorization_plan"] = self.factorization_plan.to_json_dict()
+        if not include_hash:
+            data["schema_hash"] = None
         if include_hash and data.get("schema_hash") is None:
             data["schema_hash"] = self.stable_schema_hash()
         return data
@@ -171,6 +323,9 @@ class ModelMetadata:
             column_order=data.get("column_order", "data_indicators_fanouts"),
             upstream_attribution=dict(data.get("upstream_attribution", {})),
             schema_hash=data.get("schema_hash"),
+            factorization_plan=FactorizationPlan.from_json_dict(
+                data.get("factorization_plan")
+            ),
         )
 
     def save(self, path: str | Path) -> None:

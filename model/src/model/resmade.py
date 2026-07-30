@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from model.src.data.schema import FactorizationPlan, OutputHeadSpec
+from model.src.model.anpm import ANPMColumnDecoder, ANPMConfig
 from model.src.model.masked_layers import MaskedLinear, MaskedResidualBlock, mask_from_degrees
 
 import torch
@@ -23,6 +25,9 @@ class PredicateResMADEConfig:
     embedding_size: int = 32
     residual_dropout: float = 0.0
     fixed_ordering: bool = True
+    output_head_specs: tuple[OutputHeadSpec, ...] | None = None
+    factorization_plan: FactorizationPlan | None = None
+    anpm_config: ANPMConfig | None = None
 
     def validate(self) -> None:
         if len(self.predicate_input_bins) != len(self.data_output_bins):
@@ -39,6 +44,111 @@ class PredicateResMADEConfig:
             raise ValueError("input_encoding must be 'embed' or 'one_hot'")
         if not self.fixed_ordering:
             raise ValueError("this milestone requires fixed_ordering=true")
+        specs = self.resolved_output_head_specs()
+        if not specs:
+            raise ValueError("at least one output head is required")
+        for spec in specs:
+            if spec.domain_size <= 0:
+                raise ValueError(f"output head {spec.name!r} has non-positive domain")
+            if spec.source_column_index < 0 or spec.source_column_index >= len(self.data_output_bins):
+                raise ValueError(
+                    f"output head {spec.name!r} references invalid original column "
+                    f"{spec.source_column_index}"
+                )
+        plan = self.factorization_plan
+        if plan is not None and plan.enabled and self.direct_io_connections:
+            raise ValueError(
+                "model.direct_io_connections=true is not supported with "
+                "factorization.enabled=true"
+            )
+        if plan is not None and plan.enabled and specs != plan.output_head_specs:
+            raise ValueError("factorized ResMADE output heads must match metadata plan")
+        anpm = self.anpm_config
+        if plan is not None and plan.enabled:
+            if anpm is None or not anpm.enabled:
+                raise ValueError("factorization.enabled=true requires anpm.enabled=true")
+            anpm.validate()
+
+    def resolved_output_head_specs(self) -> tuple[OutputHeadSpec, ...]:
+        """Return configured output heads or legacy one-head-per-column specs."""
+
+        if self.output_head_specs is not None:
+            return self.output_head_specs
+        return tuple(
+            OutputHeadSpec(f"column_{index}", index, None, domain_size)
+            for index, domain_size in enumerate(self.data_output_bins)
+        )
+
+    def to_json_dict(self) -> dict[str, object]:
+        """Serialize constructor settings without relying on dataclass pickling."""
+
+        return {
+            "predicate_input_bins": self.predicate_input_bins,
+            "data_output_bins": self.data_output_bins,
+            "hidden_sizes": self.hidden_sizes,
+            "residual_connections": self.residual_connections,
+            "direct_io_connections": self.direct_io_connections,
+            "activation": self.activation,
+            "input_encoding": self.input_encoding,
+            "embedding_size": self.embedding_size,
+            "residual_dropout": self.residual_dropout,
+            "fixed_ordering": self.fixed_ordering,
+            "output_head_specs": (
+                None
+                if self.output_head_specs is None
+                else [spec.__dict__ for spec in self.output_head_specs]
+            ),
+            "factorization_plan": (
+                None
+                if self.factorization_plan is None
+                else self.factorization_plan.to_json_dict()
+            ),
+            "anpm_config": (
+                None if self.anpm_config is None else self.anpm_config.to_json_dict()
+            ),
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, object]) -> "PredicateResMADEConfig":
+        """Load both new factorized configs and legacy unfactorized checkpoints."""
+
+        raw_specs = data.get("output_head_specs")
+        output_head_specs = None
+        if raw_specs is not None:
+            output_head_specs = tuple(
+                OutputHeadSpec(
+                    name=str(item["name"]),
+                    source_column_index=int(item["source_column_index"]),
+                    factor_index=(
+                        None if item.get("factor_index") is None else int(item["factor_index"])
+                    ),
+                    domain_size=int(item["domain_size"]),
+                )
+                for item in raw_specs  # type: ignore[union-attr]
+            )
+        raw_plan = data.get("factorization_plan")
+        raw_anpm = data.get("anpm_config")
+        return cls(
+            predicate_input_bins=tuple(data["predicate_input_bins"]),  # type: ignore[arg-type,index]
+            data_output_bins=tuple(data["data_output_bins"]),  # type: ignore[arg-type,index]
+            hidden_sizes=tuple(data["hidden_sizes"]),  # type: ignore[arg-type,index]
+            residual_connections=bool(data["residual_connections"]),  # type: ignore[index]
+            direct_io_connections=bool(data["direct_io_connections"]),  # type: ignore[index]
+            activation=str(data["activation"]),  # type: ignore[index]
+            input_encoding=str(data["input_encoding"]),  # type: ignore[index]
+            embedding_size=int(data["embedding_size"]),  # type: ignore[index]
+            residual_dropout=float(data["residual_dropout"]),  # type: ignore[index]
+            fixed_ordering=bool(data["fixed_ordering"]),  # type: ignore[index]
+            output_head_specs=output_head_specs,
+            factorization_plan=(
+                None
+                if raw_plan is None
+                else FactorizationPlan.from_json_dict(raw_plan)  # type: ignore[arg-type]
+            ),
+            anpm_config=(
+                None if raw_anpm is None else ANPMConfig.from_dict(raw_anpm)  # type: ignore[arg-type]
+            ),
+        )
 
 
 class PredicateResMADE(nn.Module):
@@ -50,10 +160,18 @@ class PredicateResMADE(nn.Module):
         self.config = config
         self.num_columns = len(config.predicate_input_bins)
         self.forward_calls = 0
+        self.output_head_specs = config.resolved_output_head_specs()
+        self.output_head_to_original_column = tuple(
+            spec.source_column_index for spec in self.output_head_specs
+        )
+        self.factorization_plan = config.factorization_plan or FactorizationPlan()
+        self.anpm_config = config.anpm_config or ANPMConfig()
         self.column_input_widths = self._column_input_widths(config)
         self.input_width = sum(self.column_input_widths)
-        self.output_width = sum(config.data_output_bins)
-        self.output_slices = self._output_slices(config.data_output_bins)
+        self.output_width = sum(spec.domain_size for spec in self.output_head_specs)
+        self.output_slices = self._output_slices(
+            tuple(spec.domain_size for spec in self.output_head_specs)
+        )
         self.input_degrees = self._expanded_input_degrees()
         hidden_degrees = self._hidden_degrees(config.hidden_sizes[0], self.num_columns)
         self.hidden_degrees = hidden_degrees
@@ -110,9 +228,10 @@ class PredicateResMADE(nn.Module):
             )
         else:
             self.direct_io_layer = None
+        self.anpm_decoders = self._build_anpm_decoders()
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """Return logits with shape [batch, sum_i data_output_bins[i]]."""
+        """Return logits with shape [batch, sum_j model_output_bins[j]]."""
 
         self.forward_calls += 1
         encoded_inputs = self.encode_inputs(token_ids)
@@ -146,7 +265,7 @@ class PredicateResMADE(nn.Module):
         return [logits[:, start:stop] for start, stop in self.output_slices]
 
     def predict_distributions(self, token_ids: torch.Tensor) -> list[torch.Tensor]:
-        """Return one separately normalized softmax distribution per column."""
+        """Return one normalized distribution per model output head."""
 
         logits = self(token_ids)
         return [torch.softmax(slice_logits, dim=1) for slice_logits in self.split_logits(logits)]
@@ -176,9 +295,24 @@ class PredicateResMADE(nn.Module):
 
     def _expanded_output_degrees(self) -> torch.Tensor:
         degrees = []
-        for column_index, width in enumerate(self.config.data_output_bins):
-            degrees.extend([column_index] * width)
+        for spec in self.output_head_specs:
+            degrees.extend([spec.source_column_index] * spec.domain_size)
         return torch.tensor(degrees, dtype=torch.long)
+
+    def _build_anpm_decoders(self) -> nn.ModuleDict:
+        decoders = nn.ModuleDict()
+        plan = self.factorization_plan
+        if not plan.enabled:
+            return decoders
+        if not self.anpm_config.enabled:
+            return decoders
+        for factorization in plan.original_column_factorizations:
+            decoders[str(factorization.original_column_index)] = ANPMColumnDecoder(
+                factor_domains=factorization.factor_domains,
+                embedding_size=self.anpm_config.previous_factor_embedding_size,
+                hidden_size=self.anpm_config.hidden_size,
+            )
+        return decoders
 
     @staticmethod
     def _hidden_degrees(hidden_size: int, num_columns: int) -> torch.Tensor:
@@ -198,4 +332,3 @@ class PredicateResMADE(nn.Module):
             slices.append((start, stop))
             start = stop
         return tuple(slices)
-

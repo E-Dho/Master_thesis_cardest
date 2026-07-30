@@ -28,6 +28,13 @@ def main() -> None:
     from model.src.data.schema import ModelMetadata
 
     model_metadata = ModelMetadata.from_json_dict(metadata)
+    requested_factorization = bool(config.get("factorization", {}).get("enabled", False))
+    if requested_factorization != model_metadata.factorization_plan.enabled:
+        raise SystemExit(
+            "checkpoint factorization mode does not match config: "
+            f"checkpoint={model_metadata.factorization_plan.enabled}, "
+            f"config={requested_factorization}"
+        )
     vocabularies = PredicateVocabularies.from_json_dict(payload["predicate_vocabularies"])
     tokens = tokens_for_query_tables(
         model_metadata,
@@ -42,8 +49,17 @@ def main() -> None:
     )
     forward_calls = model.forward_calls - forward_calls_before
     print(f"estimated_cardinality={result.estimated_cardinality:.6f}")
+    print(f"backbone_forward_seconds={wrapped.last_backbone_seconds:.8f}")
+    print(f"anpm_decode_seconds={wrapped.last_decode_seconds:.8f}")
     print(f"inference_latency_seconds={result.latency_seconds:.8f}")
     print(f"model_forward_calls={forward_calls}")
+    print(f"factorization_enabled={model_metadata.factorization_plan.enabled}")
+    if model_metadata.factorization_plan.enabled:
+        print(f"decode_chunk_size={model.anpm_config.decode_chunk_size}")
+        print(
+            "materialized_original_distributions="
+            f"{model.anpm_config.materialize_original_distribution_for_debug}"
+        )
     if config["dataset"]["type"] == "synthetic_full_join":
         dataset = build_synthetic_chain_dataset()
         true_inverse = ExactOracle(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 
 import numpy as np
 
@@ -47,10 +48,41 @@ class SamplerMetadataTest(unittest.TestCase):
             "model/configs/resmade_smoke.yaml",
             "model/configs/resmade_inv_fanout_example.yaml",
             "model/configs/job_light_resmade_inv_fanout.yaml",
+            "model/configs/resmade_factorized_smoke.yaml",
+            "model/configs/job_light_resmade_factorized_smoke.yaml",
+            "model/configs/job_light_resmade_factorized_anpm.yaml",
         ):
             validate_config(load_simple_yaml(path))
+
+    def test_factorized_config_rejects_direct_io_and_parses_block_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/config.yaml"
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "\n".join(
+                        [
+                            "model:",
+                            "  type: predicate_resmade",
+                            "  direct_io_connections: true",
+                            "factorization:",
+                            "  enabled: true",
+                            "  strategy: bitwise_lossless",
+                            "  blacklist_kinds:",
+                            "    - indicator",
+                            "    - fanout",
+                            "anpm:",
+                            "  enabled: true",
+                            "inference:",
+                            "  progressive_sampling: false",
+                            "  factorized_decoder: anpm",
+                        ]
+                    )
+                )
+            config = load_simple_yaml(path)
+        self.assertEqual(config["factorization"]["blacklist_kinds"], ["indicator", "fanout"])
+        with self.assertRaises(ValueError):
+            validate_config(config)
 
 
 if __name__ == "__main__":
     unittest.main()
-
