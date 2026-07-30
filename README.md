@@ -8,7 +8,7 @@ The project focuses on trajectory-data cardinality estimation: generating POL tr
 
 - `dataset_generation/`: scripts and notes for POL simulation runs, trajectory extraction, MobilityDB setup, and database loading.
 - `query_generation/`: config-driven workload generator for standard, temporal, spatial, and spatio-temporal COUNT queries.
-- `model/`: planned implementation area for learned cardinality-estimation models.
+- `model/`: model implementation and test results for the propossed solution.
 - `baselines/`: planned implementation area for classical and learned baseline estimators.
 
 Generated datasets, database files, query run outputs, visualizations, logs, and POL source checkouts are intentionally excluded from Git. POL is treated as an external dependency rather than vendored in this repository.
