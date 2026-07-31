@@ -43,6 +43,7 @@ python "$QUERY_GENERATION_DIR/query_generator.py" \
 
 END_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 END_SECONDS=$(date +%s)
+ELAPSED_SECONDS=$((END_SECONDS - START_SECONDS))
 
 python - "$OUTPUT_JSONL" > "$RUN_DIR/summary.json" <<'PY'
 import json
@@ -72,6 +73,22 @@ if bad_multi:
     raise SystemExit("entity_cardinality exceeded join_cardinality")
 PY
 
+GENERATED_QUERIES=$(python - "$OUTPUT_JSONL" <<'PY'
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(sum(1 for _ in handle))
+PY
+)
+AVG_SECONDS_PER_QUERY=$(python - "$ELAPSED_SECONDS" "$GENERATED_QUERIES" <<'PY'
+import sys
+
+elapsed = float(sys.argv[1])
+queries = int(sys.argv[2])
+print(f"{elapsed / queries:.6f}" if queries else "nan")
+PY
+)
+
 {
   echo "run_label=$RUN_LABEL"
   echo "slurm_job_id=${SLURM_JOB_ID:-unknown}"
@@ -80,7 +97,9 @@ PY
   echo "sample_cache_size=$SAMPLE_CACHE_SIZE"
   echo "start_utc=$START_UTC"
   echo "end_utc=$END_UTC"
-  echo "elapsed_seconds=$((END_SECONDS - START_SECONDS))"
+  echo "elapsed_seconds=$ELAPSED_SECONDS"
+  echo "generated_queries=$GENERATED_QUERIES"
+  echo "avg_seconds_per_query=$AVG_SECONDS_PER_QUERY"
   echo "output_jsonl=$OUTPUT_JSONL"
   echo "summary_json=$RUN_DIR/summary.json"
 } > "$METADATA"

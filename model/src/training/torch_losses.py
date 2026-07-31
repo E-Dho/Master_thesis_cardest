@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping
 
 from model.src.data.schema import ColumnKind, ModelMetadata
-from model.src.model.factorization import factorize_rows
+from model.src.model.factorization import factorize_rows, valid_factor_class_mask
 
 if TYPE_CHECKING:
     import torch
@@ -29,6 +29,7 @@ def torch_weighted_per_head_cross_entropy(
     *,
     anpm_decoders: Mapping[str, Any] | None = None,
     head_loss_reduction: str = "mean",
+    mask_invalid_factor_combinations: bool = True,
     epsilon: float = 1.0e-12,
 ) -> TorchLossBreakdown:
     """Torch WCE: L_i=sum_b w_bi CE(z_bi,y_bi)/(sum_b w_bi+eps)."""
@@ -48,6 +49,7 @@ def torch_weighted_per_head_cross_entropy(
             metadata,
             anpm_decoders=anpm_decoders,
             head_loss_reduction=head_loss_reduction,
+            mask_invalid_factor_combinations=mask_invalid_factor_combinations,
             epsilon=epsilon,
         )
 
@@ -97,6 +99,7 @@ def torch_factorized_grouped_cross_entropy(
     *,
     anpm_decoders: Mapping[str, Any] | None,
     head_loss_reduction: str = "mean",
+    mask_invalid_factor_combinations: bool = True,
     epsilon: float = 1.0e-12,
 ) -> TorchLossBreakdown:
     """Group teacher-forced factor CE before applying original-column weights."""
@@ -141,7 +144,16 @@ def torch_factorized_grouped_cross_entropy(
                 dim=1,
             )
             base_logits = [split_logits[head_index] for head_index in head_indices]
-            decoded_logits = decoder.training_logits(base_logits, true_factors)
+            valid_mask_provider = None
+            if mask_invalid_factor_combinations:
+                valid_mask_provider = lambda factor_index, prefix, f=factorization: (
+                    valid_factor_class_mask(f, factor_index, prefix)
+                )
+            decoded_logits = decoder.training_logits(
+                base_logits,
+                true_factors,
+                valid_mask_provider=valid_mask_provider,
+            )
             factor_terms = []
             for local_factor_index, factor_logits in enumerate(decoded_logits):
                 unweighted = functional.cross_entropy(

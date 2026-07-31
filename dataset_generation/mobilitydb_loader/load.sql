@@ -53,10 +53,20 @@ WHERE t.trip_id = l.trip_id;
 
 \echo Creating indexes
 CREATE INDEX agents_agent_id_idx ON pol.agents(agent_id);
+CREATE INDEX agents_age_idx ON pol.agents(age);
+CREATE INDEX agents_education_level_idx ON pol.agents("educationLevel");
+CREATE INDEX agents_interest_idx ON pol.agents(interest);
+CREATE INDEX agents_joviality_idx ON pol.agents(joviality);
+CREATE INDEX agents_family_size_idx ON pol.agents(family_size);
 CREATE INDEX trips_agent_id_idx ON pol.trips(agent_id);
+CREATE INDEX trips_trip_id_agent_id_idx ON pol.trips(trip_id, agent_id);
+CREATE INDEX trips_num_of_segments_trip_id_idx ON pol.trips(num_of_segments, trip_id);
+CREATE INDEX trips_num_segments_trip_agent_idx ON pol.trips(num_of_segments, trip_id, agent_id);
 CREATE INDEX trips_time_idx ON pol.trips(start_time, end_time);
 CREATE INDEX trips_trip_tgeom_gist_idx ON pol.trips USING gist(trip_tgeom);
 CREATE INDEX segments_trip_id_idx ON pol.segments(trip_id);
+CREATE INDEX segments_trip_id_segment_idx_idx ON pol.segments(trip_id, segment_idx);
+CREATE INDEX segments_segment_idx_trip_id_idx ON pol.segments(segment_idx, trip_id);
 CREATE INDEX segments_time_idx ON pol.segments(t_s, t_e);
 CREATE INDEX segments_segment_tgeom_gist_idx ON pol.segments USING gist(segment_tgeom);
 CREATE INDEX segments_segment_geom_gist_idx ON pol.segments USING gist(segment_geom);

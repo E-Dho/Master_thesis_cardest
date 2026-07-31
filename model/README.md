@@ -100,9 +100,49 @@ q_i(x | T_<i) = product_k q_{i,k}(z_k | T_<i, z_<k)
 ```
 
 Each factorized column owns a local ANPM decoder. The first factor uses the base
-ResMADE logits. Later factors add a learned offset from embeddings of preceding
-factor values, adapted from DistJoin's ANPM modulation pattern and confined to
-that one original column.
+ResMADE logits unchanged. Later factors use a faithful DistJoin-style
+generated-weight hypernetwork, confined to that one original column. The
+previous additive prefix-offset ablation remains available on the previous Git
+branch; this branch replaces it with generated low-rank transforms.
+
+The old ablation had the form:
+
+```text
+ell_additive(c, p) = b(c) + h(p)
+```
+
+The active decoder instead applies a prefix-generated transformation:
+
+```text
+ell_hyper(c, p) = G_p(b(c))
+```
+
+For factor `k > 0`, embeddings of preceding same-column factors are
+concatenated:
+
+```text
+e_k(p) = concat(E_0[z_0], ..., E_{k-1}[z_{k-1}])
+```
+
+Six small MLPs generate vectors for two low-rank matrices and biases:
+
+```text
+W_1(p) = a_1(p) b_1(p)^T
+W_2(p) = a_2(p) b_2(p)^T
+```
+
+With current factor domain size `D_k` and ANPM hidden size `H`, `W_1` has shape
+`D_k x H` and `W_2` has shape `H x D_k`. The factor logits are:
+
+```text
+h_k     = ReLU(b_k(c) W_1(p) + beta_1(p))
+ell_k   = ReLU(h_k W_2(p) + beta_2(p))
+```
+
+This mirrors DistJoin's two-stage generated low-rank ANPM path while preserving
+the repository's original-column-preserving ResMADE layout. Training uses
+teacher-forced true prefixes. Inference enumerates prefixes deterministically in
+chunks; no progressive factor sampling is introduced.
 
 ## Original Columns Versus Model Heads
 
@@ -150,9 +190,89 @@ s_i = sum_x q_i(x) phi_i(x)
 ```
 
 For factorized columns, valid original IDs are enumerated in chunks. Their
-factor paths are evaluated, invalid combinations are excluded by normalizing
-over valid IDs, and the existing original-domain predicate mask is applied.
-Two-sided ranges continue to use the external inclusion-exclusion path.
+factor paths are evaluated with the same prefix-conditioned ANPM decoder used
+during training. Invalid factor completions are masked before each factor
+softmax when `anpm.mask_invalid_combinations: true`, and the existing
+original-domain predicate mask is applied. Two-sided ranges continue to use the
+external inclusion-exclusion path.
+
+## Optimized ANPM Inference
+
+The first faithful DistJoin-style ANPM implementation matched the equations but
+was computationally inefficient for exact inference: it generated full
+rank-one matrices and evaluated factorized predicates by enumerating original
+IDs. The optimized class-space path keeps the same checkpoint and trained
+weights, but evaluates predicate masses through factor prefixes whenever
+possible.
+
+NeuroCard-style systems often rely on progressive sampling for inference. This
+project keeps deterministic sampling-free inference: exact predicate-specific
+prefix algorithms replace full original-domain enumeration for supported
+predicates, while arbitrary masks retain a correct fallback.
+
+## Rank-One Contractions
+
+The generated matrices are rank one:
+
+```text
+W_1(p) = a_1(p)b_1(p)^T
+W_2(p) = a_2(p)b_2(p)^T
+```
+
+The implementation now applies them with:
+
+```text
+x(a b^T) = (x dot a)b^T
+```
+
+This removes the production allocation of `[batch,D,H]` and `[batch,H,D]`
+matrices. It is checkpoint-compatible because the six generated vectors and all
+trained parameters are unchanged.
+
+## Unique Prefix Evaluation
+
+During fallback enumeration, repeated factor prefixes are deduplicated within a
+query. For a factorized domain such as `128 x 2048`, the second factor has at
+most `128` first-factor prefixes, not one distinct hypernetwork call per
+original ID. Prefix-conditioned distributions are cached only inside the
+query-local evaluator and detached from autograd.
+
+## Exact Equality and Range Inference
+
+For equality predicates, the original dictionary ID is factorized and only that
+single factor path is evaluated:
+
+```text
+P(X=v) = product_k P(Z_k=v_k | Z_<k=v_<k)
+```
+
+For one-sided ranges over factorized columns whose predicate semantics align
+with encoded-ID order, the evaluator uses a most-significant-factor prefix CDF:
+smaller current digits are accumulated with cumulative sums, and only the equal
+digit continues to the next factor. Existing two-sided ranges continue to use
+inclusion-exclusion over the optimized one-sided masses.
+
+## Fallback Original-Domain Enumeration
+
+If a factorized predicate cannot be represented by the optimized algorithms, or
+if encoded-ID interval order would not preserve the original predicate
+semantics, the adapter falls back to chunked original-ID enumeration. The
+fallback still uses rank-one contractions and unique-prefix evaluation.
+
+## Class-Space Versus Latent-Space ANPM
+
+The current optimized mode is class-space ANPM: each factor head still has width
+`D_k`, and existing class-space checkpoints load without conversion. A future
+latent-space mode would move the ANPM transform into a smaller encoded output
+space and project back to factor classes. That would be a new architecture and
+would require fresh training and distinct checkpoint compatibility metadata.
+
+## Factorized Inference Profiling
+
+`TorchANPMFactorizedOutputAdapter.last_factorized_profile` records query-local
+debug counters such as ANPM call count, largest ANPM batch, unique-prefix counts
+by factor, and fallback usage. The JOB-light workload summaries still report
+wall time, model latency, forward-call count, q-error, and status counts.
 
 ## Memory Reduction
 
@@ -604,7 +724,9 @@ anpm:
   enabled: true
   previous_factor_embedding_size: 64
   hidden_size: 64
+  mask_invalid_combinations: true
   decode_chunk_size: 4096
+  final_activation: relu
 ```
 
 `IdentityOutputAdapter` handles unfactorized outputs.

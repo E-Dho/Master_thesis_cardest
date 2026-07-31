@@ -45,20 +45,22 @@ class PredicateToken:
             return True
         if self.op == PredicateOp.EQUAL:
             return candidate == self.value
-        if self.op == PredicateOp.LESS_THAN:
-            return candidate < self.value
-        if self.op == PredicateOp.LESS_EQUAL:
-            return candidate <= self.value
-        if self.op == PredicateOp.GREATER_THAN:
-            return candidate > self.value
-        if self.op == PredicateOp.GREATER_EQUAL:
-            return candidate >= self.value
-        if self.op == PredicateOp.RANGE:
-            return self.value <= candidate <= self.upper
+        try:
+            if self.op == PredicateOp.LESS_THAN:
+                return candidate < self.value
+            if self.op == PredicateOp.LESS_EQUAL:
+                return candidate <= self.value
+            if self.op == PredicateOp.GREATER_THAN:
+                return candidate > self.value
+            if self.op == PredicateOp.GREATER_EQUAL:
+                return candidate >= self.value
+            if self.op == PredicateOp.RANGE:
+                return self.value <= candidate <= self.upper
+        except TypeError:
+            return False
         if self.op == PredicateOp.INV_FANOUT:
             raise ValueError("INV_FANOUT is a potential token, not a Boolean predicate")
         raise ValueError(f"unsupported predicate op {self.op!r}")
 
     def stable_key(self) -> tuple[Any, ...]:
         return (self.op.value, self.value, self.upper)
-

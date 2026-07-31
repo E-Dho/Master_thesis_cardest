@@ -270,6 +270,9 @@ def _train_one_batch(
         metadata,
         anpm_decoders=getattr(model, "anpm_decoders", None),
         head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
+        mask_invalid_factor_combinations=bool(
+            config.get("anpm", {}).get("mask_invalid_combinations", True)
+        ),
     )
     breakdown.total_loss.backward()
     clip_norm = config["training"].get("gradient_clip_norm")

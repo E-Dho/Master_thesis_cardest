@@ -311,6 +311,7 @@ class PredicateResMADE(nn.Module):
                 factor_domains=factorization.factor_domains,
                 embedding_size=self.anpm_config.previous_factor_embedding_size,
                 hidden_size=self.anpm_config.hidden_size,
+                final_activation=self.anpm_config.final_activation,
             )
         return decoders
 

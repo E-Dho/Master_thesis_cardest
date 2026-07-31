@@ -306,6 +306,7 @@ class QueryExecutor:
 
     def __enter__(self) -> "QueryExecutor":
         self._conn = self._psycopg.connect(**self._kwargs)
+        self._conn.autocommit = True
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

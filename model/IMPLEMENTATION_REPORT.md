@@ -1,6 +1,165 @@
-# Implementation Report
+# Faithful DistJoin-Style ANPM Hypernetwork Report
 
-## Reused Upstream Concepts
+Branch: `feature/faithful-distjoin-anpm-hypernetwork`
+
+The previous branch retains the additive prefix-offset ablation. This branch
+replaces it with a faithful DistJoin-style generated-weight ANPM.
+
+## Checkpoint-Compatible Inference Optimization
+
+Optimization branch: `feature/optimize-factorized-anpm-inference`
+
+The optimized class-space path preserves the trained DistJoin-style checkpoint
+and its Q-error. It changes only inference computation:
+
+- Replaced explicit `[batch,D,H]` and `[batch,H,D]` generated matrix
+  materialization with exact rank-one contractions.
+- Added a query-local factorized probability evaluator.
+- Deduplicated repeated factor prefixes during fallback enumeration.
+- Added wildcard, equality, one-sided range, and inclusive range scalar-mass
+  evaluators for factorized original columns.
+- Retained fallback original-domain enumeration for unsupported masks or domain
+  orders where encoded-ID intervals do not match predicate semantics.
+- Kept deterministic one-backbone-pass inference with no progressive sampling.
+
+### JOB-light Benchmark
+
+Checkpoint:
+
+```text
+model/runs/job_light_resmade_distjoin_anpm/checkpoint_step_3500.pt
+```
+
+Baseline faithful generated-weight inference:
+
+```text
+queries_scored=70
+median_q_error=2.722431
+p95_q_error=2615.157427
+max_q_error=5015.196988
+evaluation_wall_seconds=289.689952
+total_query_wall_seconds=289.466102
+total_model_latency_seconds=289.405067
+total_model_forward_calls=87
+```
+
+Optimized checkpoint-compatible inference:
+
+```text
+queries_scored=70
+median_q_error=2.722431
+p95_q_error=2615.157427
+max_q_error=5015.196988
+evaluation_wall_seconds=0.896969
+total_query_wall_seconds=0.667440
+total_model_latency_seconds=0.611591
+total_model_forward_calls=87
+```
+
+The speedup came from predicate-specific factorized masses plus rank-one
+contractions. Because JOB-light factorized predicates are equality/range cases,
+they avoid full original-domain enumeration after this change.
+
+Grouped wall times:
+
+| Group | Baseline Total | Optimized Total | Median Q-error |
+| --- | ---: | ---: | ---: |
+| Non-factorized normal | `0.519s` | `0.337s` | `1.698` |
+| Non-factorized inclusion-exclusion | `0.135s` | `0.137s` | `2.973` |
+| Factorized normal | `122.402s` | `0.083s` | `17.420` |
+| Factorized inclusion-exclusion | `166.410s` | `0.111s` | `35.003` |
+
+Peak inference memory before and after was not measured by the current
+JOB-light evaluator. The production code no longer materializes generated ANPM
+matrices; explicit matrix construction remains only in tests as a numerical
+reference.
+
+## Upstream Reference
+
+The implementation was adapted from the ANPM structure in
+`GIS-PuppetMaster/DistJoin` `model/made.py`, specifically the
+`modulation_embeds`, `modulation_offset_layers_*`, and `logits_for_col` path.
+Only the local generated-weight math was adapted; DistJoin's full MADE class was
+not copied.
+
+## Implemented Structure
+
+`ANPMColumnDecoder` now owns:
+
+- `previous_factor_embeddings`: embeddings for preceding same-column factor
+  values.
+- `factor_hypernetworks`: one hypernetwork for every factor after the first.
+
+Each later-factor hypernetwork generates six vectors:
+
+- `first_left`: `[batch, D_k]`
+- `first_right`: `[batch, H]`
+- `hidden_bias`: `[batch, H]`
+- `second_left`: `[batch, H]`
+- `second_right`: `[batch, D_k]`
+- `logit_bias`: `[batch, D_k]`
+
+The generated low-rank matrices are:
+
+```text
+W_1(p) = first_left(p) first_right(p)^T      [batch, D_k, H]
+W_2(p) = second_left(p) second_right(p)^T    [batch, H, D_k]
+```
+
+The current factor logits are transformed as:
+
+```text
+h_k   = ReLU(base_logits_k W_1(p) + hidden_bias(p))
+ell_k = ReLU(h_k W_2(p) + logit_bias(p))
+```
+
+Factor zero still returns the ResMADE base logits unchanged except for optional
+valid-class masking. Training remains teacher-forced and conditions factor `k`
+only on `z_<k`. Inference remains deterministic chunked prefix enumeration and
+does not introduce progressive sampling.
+
+## Invalid Combinations
+
+`valid_factor_class_mask` computes valid current-factor classes from the
+bitwise factorization plan. When `anpm.mask_invalid_combinations: true`,
+invalid classes are masked with `-inf` before softmax in both training and
+inference. All-invalid rows raise an explicit error.
+
+## Validation
+
+Local validation:
+
+```bash
+python3 -m py_compile model/src/model/anpm.py model/src/model/factorization.py \
+  model/src/model/output_adapter.py model/src/training/torch_losses.py \
+  model/tests/test_resmade_torch.py
+python3 -m unittest discover -s model/tests
+```
+
+Cluster validation in `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest`:
+
+```bash
+/work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python -m unittest model.tests.test_resmade_torch
+/work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python -m unittest discover -s model/tests
+/work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python -m model.scripts.train_resmade \
+  --config model/configs/resmade_factorized_smoke.yaml
+/work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python -m model.scripts.train_resmade \
+  --config model/configs/job_light_resmade_factorized_smoke.yaml
+```
+
+Observed results:
+
+- Focused PyTorch tests: `19` tests passed, `1` CUDA skip.
+- Full model tests: `49` tests passed, `1` CUDA skip.
+- Synthetic factorized smoke: completed 20 optimizer steps.
+- JOB-light factorized smoke: completed 2 optimizer steps.
+
+## Prior Prototype Report
+
+The following notes were retained from the previous implementation report for
+planning context.
+
+### Reused Upstream Concepts
 
 - NeuroCard: full-outer-join tuple layout, indicators, fanout semantics, and
   checkpointed column metadata.
@@ -12,7 +171,7 @@
 
 No upstream code was vendored or copied.
 
-## New Components
+### New Components
 
 - `model/src/data/schema.py`: column metadata and checkpoint metadata.
 - `model/src/data/full_join_sampler.py`: synthetic full-outer-join validation
@@ -44,7 +203,7 @@ No upstream code was vendored or copied.
 - `model/scripts/prepare_neurocard_data.py`, `inspect_sampler.py`,
   `train_resmade.py`, and `evaluate_resmade.py`: real-training CLI surface.
 
-## Mathematical Assumptions
+### Mathematical Assumptions
 
 - Fanout domains are strictly positive.
 - `INV_FANOUT` applies the known reciprocal mask `1/f`.
@@ -57,7 +216,7 @@ No upstream code was vendored or copied.
 - Invalid factor combinations are excluded from factorized inference by
   renormalizing over valid original IDs.
 
-## Test Coverage
+### Test Coverage
 
 Tests cover:
 
@@ -83,7 +242,7 @@ Tests cover:
   OOD literal classification, explicit indicators, positive complete fanouts,
   manifest validation, and factorization activation.
 
-## Limitations
+### Limitations
 
 - Local verification skipped torch-specific tests because PyTorch is not
   installed in this environment.
@@ -96,7 +255,7 @@ Tests cover:
 - Full benchmark-scale JOB-light factorized training still needs cluster
   scheduling and a PyTorch environment.
 
-## Factorized Output Widths
+### Factorized Output Widths
 
 The synthetic unit test with a 5000-value domain and 8-bit factors reduces one
 flat 5000-way head to factor heads `(32, 256)`, reducing that column's output
@@ -162,7 +321,7 @@ Fanout domains are dense positive ranges with neutral value `1`:
 `__fanout_movie_info=1..2937`, `__fanout_movie_keyword=1..540`, and
 `__fanout_movie_info_idx=1..4`.
 
-## OOD Literal Recheck
+### OOD Literal Recheck
 
 The previous smoke-domain query evaluation had 18
 `zero_due_to_missing_domain` query rows. Parsing those rows yields 19 missing
@@ -184,7 +343,7 @@ title:production_year > 2014 -> range_threshold_not_required_to_be_domain_member
 The cluster `preparation_stats.json` was updated with
 `ood_evaluation_literals=7` and `ood_evaluation_literal_occurrences=19`.
 
-## ANPM Extension Point
+### ANPM Extension Point
 
 The precise extension point is:
 
@@ -192,90 +351,6 @@ The precise extension point is:
 model/src/model/output_adapter.py
 ```
 
-`ANPMFactorizedOutputAdapter` now decodes factorized torch outputs back to
+`ANPMFactorizedOutputAdapter` decodes factorized torch outputs back to
 original-column predicate factors. A future optimization can replace chunked
 enumeration with prefix dynamic programming behind the same adapter API.
-
-## Local Verification
-
-```text
-python3 -m compileall -q model/src model/scripts model/tests
-python3 -m unittest discover -s model/tests
-```
-
-The local unittest run passed 30 tests with 1 PyTorch-dependent test module
-skipped.
-
-Cluster verification in the `geo-mlp` environment passed the PyTorch suite:
-
-```text
-python -m unittest discover -s model/tests
-# Ran 40 tests in 16.184s; OK (skipped=1)
-```
-
-Cluster complete-domain preparation was executed with:
-
-```text
-python -m model.scripts.prepare_neurocard_data \
-  --config model/configs/job_light_resmade_factorized_anpm.yaml \
-  --rebuild-domains \
-  --sample-rows 512
-```
-
-Cluster inspection was executed with:
-
-```text
-python -m model.scripts.inspect_sampler \
-  --config model/configs/job_light_resmade_factorized_anpm.yaml \
-  --sample-rows 2
-```
-
-The short JOB-light factorized smoke run was executed with:
-
-```text
-python -m model.scripts.train_resmade \
-  --config model/configs/job_light_resmade_factorized_smoke.yaml
-```
-
-It completed 2 optimizer steps with:
-
-```text
-checkpoint=model/runs/job_light_resmade_factorized_smoke/checkpoint_step_2.pt
-parameter_count=19228539
-parameter_size_bytes=76914156
-backbone_parameter_count=19083067
-anpm_parameter_count=145472
-training_seconds=5.371661
-total_sampled_tuples=128
-nominal_rows_seen=128
-output_width_original=374732
-output_width_factorized=9915
-```
-
-Last-step fanout effective sample sizes were:
-
-```text
-__fanout_cast_info=64.000000
-__fanout_movie_companies=39.459285
-__fanout_movie_info=17.112084
-__fanout_movie_keyword=2.779912
-__fanout_movie_info_idx=2.147076
-```
-
-The synthetic factorized ANPM smoke run completed 20 optimizer steps with:
-
-```text
-parameter_count=19821
-backbone_parameter_count=18807
-anpm_parameter_count=1014
-training_seconds=0.469950
-total_sampled_tuples=640
-```
-
-The paired evaluation used one backbone forward call and reported:
-
-```text
-backbone_forward_seconds=0.00881743
-anpm_decode_seconds=0.01548140
-model_forward_calls=1
-```

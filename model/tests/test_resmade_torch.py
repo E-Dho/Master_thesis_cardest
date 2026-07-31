@@ -18,14 +18,19 @@ import torch
 
 from model.src.config import load_simple_yaml
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
-from model.src.model.anpm import ANPMColumnDecoder, ANPMConfig
+from model.src.model.anpm import ANPMColumnDecoder, ANPMConfig, GeneratedANPMParameters
 from model.src.model.checkpoint import load_resmade_checkpoint, save_resmade_checkpoint
-from model.src.model.factorization import FactorizationConfig, apply_factorization_to_metadata
+from model.src.model.factorization import (
+    FactorizationConfig,
+    apply_factorization_to_metadata,
+    valid_factor_class_mask,
+)
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.predicates.torch_encoding import encode_tokens_tensor
-from model.src.predicates.operators import PredicateToken
+from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
 from model.src.inference.torch_estimator import TorchDistributionModel
+from model.src.model.output_adapter import TorchBackboneOutputs
 
 
 class ResMADETorchTest(unittest.TestCase):
@@ -182,6 +187,222 @@ class ResMADETorchTest(unittest.TestCase):
         logits_0 = decoder.conditional_logits(1, base, torch.tensor([[0], [1]]))
         self.assertFalse(torch.allclose(logits_0[0], logits_0[1]))
 
+    def test_distjoin_hypernetwork_shapes_and_batch_validation(self) -> None:
+        decoder = ANPMColumnDecoder(
+            factor_domains=(3, 5, 7),
+            embedding_size=4,
+            hidden_size=6,
+        )
+        prefix = torch.tensor([[0], [2]])
+        prefix_embedding = decoder._encode_prefix(1, prefix)
+        generated = decoder.generated_parameters(1, prefix_embedding)
+        self.assertEqual(generated.first_left.shape, (2, 5))
+        self.assertEqual(generated.first_right.shape, (2, 6))
+        self.assertEqual(generated.hidden_bias.shape, (2, 6))
+        self.assertEqual(generated.second_left.shape, (2, 6))
+        self.assertEqual(generated.second_right.shape, (2, 5))
+        self.assertEqual(generated.logit_bias.shape, (2, 5))
+        first_weight, second_weight = reference_low_rank_weight_matrices(generated)
+        self.assertEqual(first_weight.shape, (2, 5, 6))
+        self.assertEqual(second_weight.shape, (2, 6, 5))
+
+        expanded = decoder.conditional_logits(1, torch.randn(1, 5), prefix)
+        self.assertEqual(expanded.shape, (2, 5))
+        factor_two = decoder.conditional_logits(2, torch.randn(2, 7), torch.tensor([[0, 1], [2, 4]]))
+        self.assertEqual(factor_two.shape, (2, 7))
+        with self.assertRaises(ValueError):
+            decoder.conditional_logits(1, torch.randn(3, 5), prefix)
+
+    def test_distjoin_transform_matches_reference_equation(self) -> None:
+        decoder = ANPMColumnDecoder(
+            factor_domains=(3, 5, 7),
+            embedding_size=4,
+            hidden_size=6,
+        )
+        for factor_index, domain in [(1, 5), (2, 7)]:
+            prefix = torch.randint(0, 3, (2, factor_index))
+            if factor_index == 2:
+                prefix[:, 1] = torch.randint(0, 5, (2,))
+            base_logits = torch.randn(2, domain)
+            generated = decoder.generated_parameters(
+                factor_index,
+                decoder._encode_prefix(factor_index, prefix),
+            )
+            expected = reference_distjoin_transform(
+                base_logits,
+                generated,
+                final_activation="relu",
+            )
+            self.assertTrue(torch.allclose(decoder.distjoin_transform(base_logits, generated), expected))
+
+        one_row_prefix = torch.tensor([[1]])
+        one_row_base = torch.randn(1, 5)
+        one_row_params = decoder.generated_parameters(
+            1,
+            decoder._encode_prefix(1, one_row_prefix),
+        )
+        expected = reference_distjoin_transform(one_row_base, one_row_params)
+        self.assertTrue(torch.allclose(decoder.distjoin_transform(one_row_base, one_row_params), expected))
+
+    def test_rank_one_contraction_matches_explicit_matrix_gradients(self) -> None:
+        for final_activation in ("relu", "identity"):
+            torch.manual_seed(11)
+            decoder = ANPMColumnDecoder(
+                factor_domains=(4, 9),
+                embedding_size=5,
+                hidden_size=7,
+                final_activation=final_activation,
+            )
+            base = torch.randn(6, 9, requires_grad=True)
+            prefix = torch.tensor([[0], [1], [2], [3], [0], [2]])
+            parameters = decoder.generated_parameters(1, decoder._encode_prefix(1, prefix))
+            optimized = decoder.distjoin_transform(base, parameters)
+            reference = reference_distjoin_transform(
+                base,
+                parameters,
+                final_activation=final_activation,
+            )
+            torch.testing.assert_close(optimized, reference, rtol=1.0e-5, atol=1.0e-6)
+
+            optimized_loss = optimized.square().sum()
+            reference_loss = reference.square().sum()
+            optimized_grads = torch.autograd.grad(
+                optimized_loss,
+                [base, *list(decoder.parameters())],
+                retain_graph=True,
+                allow_unused=True,
+            )
+            reference_grads = torch.autograd.grad(
+                reference_loss,
+                [base, *list(decoder.parameters())],
+                allow_unused=True,
+            )
+            for optimized_grad, reference_grad in zip(optimized_grads, reference_grads):
+                if optimized_grad is None or reference_grad is None:
+                    self.assertIs(optimized_grad, reference_grad)
+                    continue
+                torch.testing.assert_close(
+                    optimized_grad,
+                    reference_grad,
+                    rtol=1.0e-5,
+                    atol=1.0e-6,
+                )
+
+    def test_hypernetwork_prefix_changes_context_transformation(self) -> None:
+        decoder = ANPMColumnDecoder(
+            factor_domains=(3, 4),
+            embedding_size=2,
+            hidden_size=3,
+            final_activation="identity",
+        )
+        with torch.no_grad():
+            decoder.previous_factor_embeddings[0].weight.copy_(
+                torch.tensor([[0.0, 0.0], [1.0, 0.5], [2.0, 1.0]])
+            )
+            for parameter in decoder.factor_hypernetworks[0].parameters():
+                parameter.fill_(0.2)
+        c1 = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        c2 = torch.tensor([[1.0, 1.0, 1.0, 1.0]])
+        p1 = torch.tensor([[0]])
+        p2 = torch.tensor([[2]])
+        delta = (
+            decoder.conditional_logits(1, c1, p1)
+            - decoder.conditional_logits(1, c1, p2)
+            - decoder.conditional_logits(1, c2, p1)
+            + decoder.conditional_logits(1, c2, p2)
+        )
+        self.assertGreater(float(delta.abs().max()), 1.0e-5)
+
+    def test_anpm_prefix_scope_and_out_of_domain_validation(self) -> None:
+        decoder = ANPMColumnDecoder(
+            factor_domains=(3, 5, 7),
+            embedding_size=4,
+            hidden_size=6,
+        )
+        true_factors = torch.tensor([[1, 0, 0], [1, 4, 6]])
+        base_logits = [
+            torch.randn(2, 3),
+            torch.randn(1, 5).expand(2, -1).clone(),
+            torch.randn(1, 7).expand(2, -1).clone(),
+        ]
+        decoded = decoder.training_logits(base_logits, true_factors)
+        self.assertTrue(torch.allclose(decoded[0], base_logits[0]))
+        self.assertTrue(torch.allclose(decoded[1][0], decoded[1][1]))
+        self.assertFalse(torch.allclose(decoded[2][0], decoded[2][1]))
+        with self.assertRaises(ValueError):
+            decoder.conditional_logits(1, torch.randn(1, 5), torch.tensor([[3]]))
+
+    def test_hypernetwork_gradients_reach_all_generators(self) -> None:
+        decoder = ANPMColumnDecoder(
+            factor_domains=(3, 5),
+            embedding_size=4,
+            hidden_size=6,
+        )
+        for parameter in decoder.parameters():
+            torch.nn.init.constant_(parameter, 0.1)
+        base_logits = torch.ones(3, 5, requires_grad=True)
+        prefix = torch.tensor([[0], [1], [2]])
+        loss = decoder.conditional_logits(1, base_logits, prefix).sum()
+        loss.backward()
+        self.assertIsNotNone(base_logits.grad)
+        self.assertGreater(float(base_logits.grad.abs().sum()), 0.0)
+        embedding_grad = decoder.previous_factor_embeddings[0].weight.grad
+        self.assertIsNotNone(embedding_grad)
+        self.assertGreater(float(embedding_grad.abs().sum()), 0.0)
+        hypernetwork = decoder.factor_hypernetworks[0]
+        for name, module in [
+            ("first_left", hypernetwork.first_left),
+            ("first_right", hypernetwork.first_right),
+            ("hidden_bias", hypernetwork.hidden_bias),
+            ("second_left", hypernetwork.second_left),
+            ("second_right", hypernetwork.second_right),
+            ("logit_bias", hypernetwork.logit_bias),
+        ]:
+            grads = [parameter.grad for parameter in module.parameters()]
+            self.assertTrue(all(grad is not None for grad in grads), name)
+            self.assertTrue(all(torch.all(torch.isfinite(grad)) for grad in grads), name)
+            self.assertGreater(sum(float(grad.abs().sum()) for grad in grads), 0.0, name)
+
+    def test_valid_factor_masks_zero_invalid_probabilities(self) -> None:
+        metadata = self._factorized_metadata()
+        factorization = metadata.factorization_plan.original_column_factorizations[0]
+        decoder = ANPMColumnDecoder(
+            factor_domains=factorization.factor_domains,
+            embedding_size=4,
+            hidden_size=6,
+        )
+        prefix0 = torch.empty(1, 0, dtype=torch.long)
+        mask0 = valid_factor_class_mask(factorization, 0, prefix0)
+        logits0 = decoder.conditional_logits(
+            0,
+            torch.zeros(1, factorization.factor_domains[0]),
+            prefix0,
+            valid_class_mask=mask0,
+        )
+        probs0 = torch.softmax(logits0, dim=1)
+        self.assertTrue(torch.all(probs0[0, ~mask0[0]] == 0.0))
+        self.assertAlmostEqual(float(probs0.sum()), 1.0, places=6)
+
+        prefix1 = torch.tensor([[2]])
+        mask1 = valid_factor_class_mask(factorization, 1, prefix1)
+        self.assertEqual(mask1.tolist(), [[True, True, True, True, False, False, False, False]])
+        logits1 = decoder.conditional_logits(
+            1,
+            torch.zeros(1, factorization.factor_domains[1]),
+            prefix1,
+            valid_class_mask=mask1,
+        )
+        probs1 = torch.softmax(logits1, dim=1)
+        self.assertTrue(torch.all(probs1[0, ~mask1[0]] == 0.0))
+        self.assertAlmostEqual(float(probs1.sum()), 1.0, places=6)
+        with self.assertRaises(ValueError):
+            decoder.conditional_logits(
+                1,
+                torch.zeros(1, factorization.factor_domains[1]),
+                prefix1,
+                valid_class_mask=torch.zeros_like(mask1),
+            )
+
     def test_factorized_adapter_normalizes_original_distribution(self) -> None:
         metadata = self._factorized_metadata()
         vocabularies = PredicateVocabularies.from_metadata(metadata)
@@ -193,6 +414,77 @@ class ResMADETorchTest(unittest.TestCase):
         factors = wrapped.predict_column_factors(tokens)
         self.assertGreaterEqual(factors[0], 0.0)
         self.assertLessEqual(factors[0], 1.0)
+
+    def test_factorized_equality_and_range_fast_paths_match_distribution(self) -> None:
+        metadata = self._factorized_metadata()
+        vocabularies = PredicateVocabularies.from_metadata(metadata)
+        model = self._factorized_model(metadata, vocabularies)
+        wrapped = TorchDistributionModel(model, metadata, vocabularies)
+        wildcard_tokens = [PredicateToken.wildcard(), PredicateToken.wildcard()]
+        distribution = wrapped.predict_distributions(wildcard_tokens)[0]
+        token_ids = encode_tokens_tensor([wildcard_tokens], vocabularies)
+        logits = model(token_ids)
+        outputs = TorchBackboneOutputs(
+            logits=logits,
+            split_logits=model.split_logits(logits),
+        )
+
+        def direct_factor(token: PredicateToken) -> float:
+            factor = wrapped.output_adapter.column_factor(
+                original_column_index=0,
+                backbone_outputs=outputs,
+                predicate_token=token,
+            )
+            return float(factor[0].detach().cpu())
+
+        for token, expected in [
+            (PredicateToken.equal(7), distribution[7]),
+            (PredicateToken(PredicateOp.LESS_EQUAL, 7), distribution[:8].sum()),
+            (PredicateToken(PredicateOp.LESS_THAN, 7), distribution[:7].sum()),
+            (PredicateToken(PredicateOp.GREATER_EQUAL, 7), distribution[7:].sum()),
+            (PredicateToken(PredicateOp.GREATER_THAN, 7), distribution[8:].sum()),
+        ]:
+            self.assertAlmostEqual(direct_factor(token), float(expected), places=5)
+
+        self.assertAlmostEqual(
+            direct_factor(PredicateToken.range(5, 12)),
+            float(distribution[5:13].sum()),
+            places=5,
+        )
+
+    def test_chunked_and_unchunked_factorized_inference_agree(self) -> None:
+        metadata = self._factorized_metadata()
+        vocabularies = PredicateVocabularies.from_metadata(metadata)
+        model = self._factorized_model(metadata, vocabularies)
+        tokens = [PredicateToken.wildcard(), PredicateToken.wildcard()]
+        wrapped = TorchDistributionModel(model, metadata, vocabularies)
+        chunked = wrapped.predict_distributions(tokens)[0]
+        wrapped.output_adapter.anpm_config = ANPMConfig(
+            enabled=True,
+            previous_factor_embedding_size=8,
+            hidden_size=8,
+            decode_chunk_size=100,
+        )
+        unchunked = wrapped.predict_distributions(tokens)[0]
+        self.assertTrue(np.allclose(chunked, unchunked, atol=1.0e-6))
+
+    def test_factorized_training_loss_is_finite_with_validity_masks(self) -> None:
+        metadata = self._factorized_metadata()
+        vocabularies = PredicateVocabularies.from_metadata(metadata)
+        model = self._factorized_model(metadata, vocabularies)
+        rows = torch.tensor([[0, 0], [19, 1], [7, 0], [13, 1]])
+        weights = torch.ones_like(rows, dtype=torch.float32)
+        tokens = [[PredicateToken.wildcard(), PredicateToken.wildcard()]]
+        logits = model(encode_tokens_tensor(tokens, vocabularies).expand(rows.shape[0], -1))
+        breakdown = torch_weighted_per_head_cross_entropy(
+            logits,
+            rows,
+            weights,
+            metadata,
+            anpm_decoders=model.anpm_decoders,
+        )
+        self.assertTrue(torch.isfinite(breakdown.total_loss))
+
 
     def test_factorized_checkpoint_roundtrip_preserves_predictions(self) -> None:
         metadata = self._factorized_metadata()
@@ -220,6 +512,21 @@ class ResMADETorchTest(unittest.TestCase):
             )
         self.assertTrue(torch.allclose(expected_logits, loaded(token_ids)))
         self.assertTrue(payload["metadata"]["factorization_plan"]["enabled"])
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_forward_backward_smoke(self) -> None:
+        model, source, vocabularies = self._model()
+        model = model.to("cuda")
+        tokens = [tokens_for_query_tables(source.metadata, {"A", "B"}, {"F_A_to_B"})]
+        token_ids = encode_tokens_tensor(tokens, vocabularies, device="cuda")
+        loss = model(token_ids).sum()
+        loss.backward()
+        self.assertTrue(
+            all(
+                parameter.grad is None or torch.all(torch.isfinite(parameter.grad))
+                for parameter in model.parameters()
+            )
+        )
 
     @staticmethod
     def _factorized_metadata() -> ModelMetadata:
@@ -262,15 +569,44 @@ class ResMADETorchTest(unittest.TestCase):
             )
         )
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
-    def test_cuda_forward_backward_smoke(self) -> None:
-        model, source, vocabularies = self._model()
-        model = model.to("cuda")
-        tokens = [tokens_for_query_tables(source.metadata, {"A", "B"}, {"F_A_to_B"})]
-        token_ids = encode_tokens_tensor(tokens, vocabularies, device="cuda")
-        loss = model(token_ids).sum()
-        loss.backward()
-        self.assertTrue(all(parameter.grad is None or torch.all(torch.isfinite(parameter.grad)) for parameter in model.parameters()))
+def reference_distjoin_transform(
+    base_logits: torch.Tensor,
+    parameters: GeneratedANPMParameters,
+    *,
+    final_activation: str = "relu",
+) -> torch.Tensor:
+    """Direct DistJoin ANPM equation used to test the production decoder."""
+
+    first_weight, second_weight = reference_low_rank_weight_matrices(parameters)
+    hidden = torch.relu(
+        torch.bmm(base_logits.unsqueeze(1), first_weight)
+        + parameters.hidden_bias.unsqueeze(1)
+    )
+    logits = (
+        torch.bmm(hidden, second_weight)
+        + parameters.logit_bias.unsqueeze(1)
+    ).squeeze(1)
+    if final_activation == "relu":
+        return torch.relu(logits)
+    if final_activation == "identity":
+        return logits
+    raise ValueError(final_activation)
+
+
+def reference_low_rank_weight_matrices(
+    parameters: GeneratedANPMParameters,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Test-only explicit W1/W2 materialization for parity checks."""
+
+    first_weight = torch.bmm(
+        parameters.first_left.unsqueeze(-1),
+        parameters.first_right.unsqueeze(1),
+    )
+    second_weight = torch.bmm(
+        parameters.second_left.unsqueeze(-1),
+        parameters.second_right.unsqueeze(1),
+    )
+    return first_weight, second_weight
 
 
 if __name__ == "__main__":

@@ -212,6 +212,46 @@ def factorize_rows(encoded_rows: Any, metadata: ModelMetadata) -> Any:
     return _factorize_rows_numpy(np.asarray(encoded_rows, dtype=int), metadata)
 
 
+def valid_factor_class_mask(
+    factorization: OriginalColumnFactorization,
+    factor_index: int,
+    prefix_factors: Any,
+) -> Any:
+    """Return valid current-factor classes for each teacher-forced prefix.
+
+    For the bitwise most-significant-first mapping, a candidate class is valid
+    when the partial decoded ID formed by `z_<k` and that candidate can still be
+    completed by some suffix into an original ID below `original_domain_size`.
+    The minimum suffix is all zeros, so validity is exactly
+    `partial_decoded_value < original_domain_size`.
+    """
+
+    import torch
+
+    factor_index = int(factor_index)
+    if factor_index < 0 or factor_index >= len(factorization.factor_domains):
+        raise ValueError("factor_index outside factorization")
+    if prefix_factors.ndim != 2 or prefix_factors.shape[1] != factor_index:
+        raise ValueError("prefix_factors must be [batch, factor_index]")
+    device = prefix_factors.device
+    batch_size = prefix_factors.shape[0]
+    partial = torch.zeros(batch_size, dtype=torch.long, device=device)
+    for prefix_index in range(factor_index):
+        values = prefix_factors[:, prefix_index].long()
+        domain = int(factorization.factor_domains[prefix_index])
+        if torch.any((values < 0) | (values >= domain)):
+            raise ValueError("prefix factor outside its domain")
+        partial = partial + (values << int(factorization.bit_offsets[prefix_index]))
+    domain = int(factorization.factor_domains[factor_index])
+    candidates = torch.arange(domain, dtype=torch.long, device=device)
+    candidate_values = candidates.unsqueeze(0) << int(
+        factorization.bit_offsets[factor_index]
+    )
+    return partial.unsqueeze(1) + candidate_values < int(
+        factorization.original_domain_size
+    )
+
+
 def factorization_plan_hash(plan: FactorizationPlan) -> str:
     """Hash a factorization plan for manifest/checkpoint compatibility checks."""
 

@@ -7,6 +7,7 @@ import numpy as np
 
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata, OriginalColumnFactorization
 from model.src.model.anpm import ANPMConfig
+from model.src.model.factorization import factorize_value, valid_factor_class_mask
 from model.src.predicates.encoding import reciprocal_fanout_mask, softmax
 from model.src.predicates.operators import PredicateOp, PredicateToken
 
@@ -130,6 +131,7 @@ class TorchANPMFactorizedOutputAdapter:
         self.anpm_decoders = anpm_decoders
         self.anpm_config = anpm_config
         self.identity_adapter = TorchIdentityOutputAdapter()
+        self.last_factorized_profile: dict[str, Any] = {}
 
     def original_distribution(
         self,
@@ -150,6 +152,7 @@ class TorchANPMFactorizedOutputAdapter:
                 backbone_outputs=backbone_outputs,
                 metadata=self.metadata,
             )
+        evaluator = self._evaluator(factorization, backbone_outputs)
         batch_size = backbone_outputs.logits.shape[0]
         device = backbone_outputs.logits.device
         dtype = backbone_outputs.logits.dtype
@@ -170,13 +173,10 @@ class TorchANPMFactorizedOutputAdapter:
             factor_values = _factor_tensor_for_id_chunk(
                 factorization, start, stop, device=device
             )
-            probabilities = self._probabilities_for_factor_values(
-                factorization,
-                factor_values,
-                backbone_outputs,
-            )
+            probabilities = evaluator.probabilities_for_factor_values(factor_values)
             distribution[:, start:stop] = probabilities
             valid_mass = valid_mass + probabilities.sum(dim=1)
+        self.last_factorized_profile = evaluator.profile
         return distribution / valid_mass.clamp_min(1.0e-12).unsqueeze(1)
 
     def column_factor(
@@ -206,6 +206,11 @@ class TorchANPMFactorizedOutputAdapter:
         dtype = backbone_outputs.logits.dtype
         if predicate_token.op == PredicateOp.WILDCARD:
             return torch.ones(batch_size, dtype=dtype, device=device)
+        evaluator = self._evaluator(factorization, backbone_outputs)
+        optimized = evaluator.predicate_mass(column, predicate_token)
+        if optimized is not None:
+            self.last_factorized_profile = evaluator.profile
+            return optimized
         numerator = torch.zeros(batch_size, dtype=dtype, device=device)
         valid_mass = torch.zeros(batch_size, dtype=dtype, device=device)
         for start in range(
@@ -218,11 +223,7 @@ class TorchANPMFactorizedOutputAdapter:
             factor_values = _factor_tensor_for_id_chunk(
                 factorization, start, stop, device=device
             )
-            probabilities = self._probabilities_for_factor_values(
-                factorization,
-                factor_values,
-                backbone_outputs,
-            )
+            probabilities = evaluator.probabilities_for_factor_values(factor_values)
             mask = _torch_predicate_mask_for_id_chunk(
                 column,
                 predicate_token,
@@ -233,78 +234,346 @@ class TorchANPMFactorizedOutputAdapter:
             )
             numerator = numerator + torch.matmul(probabilities, mask)
             valid_mass = valid_mass + probabilities.sum(dim=1)
+        evaluator.profile["fallback_enumeration_used"] = True
+        self.last_factorized_profile = evaluator.profile
         if self.anpm_config.mask_invalid_combinations:
             return numerator / valid_mass.clamp_min(1.0e-12)
         return numerator
 
-    def _probabilities_for_factor_values(
+    def _evaluator(
         self,
         factorization: OriginalColumnFactorization,
-        factor_values: Any,
         backbone_outputs: TorchBackboneOutputs,
-    ) -> Any:
-        """Evaluate product_k q(z_k | T_<i, z_<k) for one valid-ID chunk."""
-
-        import torch
-
+    ) -> "FactorizedColumnProbabilityEvaluator":
         decoder_key = str(factorization.original_column_index)
         if decoder_key not in self.anpm_decoders:
             raise ValueError(
                 "missing ANPM decoder for original column "
                 f"{factorization.original_column_index}"
             )
-        decoder = self.anpm_decoders[decoder_key]
-        batch_size = backbone_outputs.logits.shape[0]
-        chunk_size = factor_values.shape[0]
-        probabilities = torch.ones(
-            batch_size,
-            chunk_size,
-            dtype=backbone_outputs.logits.dtype,
-            device=backbone_outputs.logits.device,
+        return FactorizedColumnProbabilityEvaluator(
+            factorization=factorization,
+            decoder=self.anpm_decoders[decoder_key],
+            anpm_config=self.anpm_config,
+            backbone_outputs=backbone_outputs,
         )
-        for local_factor_index, head_index in enumerate(
-            factorization.factor_column_indices
-        ):
-            base_logits = backbone_outputs.split_logits[head_index]
-            if local_factor_index == 0:
-                factor_probabilities = torch.softmax(base_logits, dim=1)[
-                    :, factor_values[:, local_factor_index]
-                ]
-            else:
-                domain = factorization.factor_domains[local_factor_index]
-                expanded_base = (
-                    base_logits.unsqueeze(1)
-                    .expand(batch_size, chunk_size, domain)
-                    .reshape(batch_size * chunk_size, domain)
-                )
-                prefix = (
-                    factor_values[:, :local_factor_index]
-                    .unsqueeze(0)
-                    .expand(batch_size, chunk_size, local_factor_index)
-                    .reshape(batch_size * chunk_size, local_factor_index)
-                )
-                conditional_logits = decoder.conditional_logits(
-                    local_factor_index,
-                    expanded_base,
-                    prefix,
-                )
-                targets = (
-                    factor_values[:, local_factor_index]
-                    .unsqueeze(0)
-                    .expand(batch_size, chunk_size)
-                    .reshape(batch_size * chunk_size, 1)
-                )
-                factor_probabilities = (
-                    torch.softmax(conditional_logits, dim=1)
-                    .gather(1, targets)
-                    .reshape(batch_size, chunk_size)
-                )
-            probabilities = probabilities * factor_probabilities
-        return probabilities
 
 
 class ANPMFactorizedOutputAdapter(TorchANPMFactorizedOutputAdapter):
     """Public factorized adapter name for ANPM-backed torch inference."""
+
+
+class FactorizedColumnProbabilityEvaluator:
+    """Query-local exact probability evaluator for one factorized column.
+
+    The evaluator hides factor digits from the estimator. It reuses conditional
+    distributions for repeated prefixes within one query and exposes exact
+    original-column predicate masses for wildcard, equality, and one-sided range
+    predicates. Fallback enumeration remains available for arbitrary masks.
+    """
+
+    def __init__(
+        self,
+        *,
+        factorization: OriginalColumnFactorization,
+        decoder: Any,
+        anpm_config: ANPMConfig,
+        backbone_outputs: TorchBackboneOutputs,
+    ) -> None:
+        self.factorization = factorization
+        self.decoder = decoder
+        self.anpm_config = anpm_config
+        self.backbone_outputs = backbone_outputs
+        self._distribution_cache: dict[tuple[Any, ...], Any] = {}
+        self.profile: dict[str, Any] = {
+            "anpm_calls": 0,
+            "largest_anpm_batch": 0,
+            "fallback_enumeration_used": False,
+            "unique_prefixes_by_factor": {},
+        }
+
+    @property
+    def batch_size(self) -> int:
+        return int(self.backbone_outputs.logits.shape[0])
+
+    @property
+    def device(self) -> Any:
+        return self.backbone_outputs.logits.device
+
+    @property
+    def dtype(self) -> Any:
+        return self.backbone_outputs.logits.dtype
+
+    def predicate_mass(
+        self,
+        column: ColumnMetadata,
+        token: PredicateToken,
+    ) -> Any | None:
+        """Return optimized exact mass when the token has a prefix algorithm."""
+
+        import torch
+
+        if token.op == PredicateOp.WILDCARD:
+            return torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+        if token.op == PredicateOp.EQUAL:
+            encoded = _encoded_id_or_none(column, token.value)
+            if encoded is None:
+                return torch.zeros(self.batch_size, dtype=self.dtype, device=self.device)
+            return self.encoded_id_mass(encoded)
+        if token.op == PredicateOp.RANGE:
+            lower = _encoded_id_or_none(column, token.value)
+            upper = _encoded_id_or_none(column, token.upper)
+            if lower is None or upper is None:
+                return None
+            if not _encoded_interval_matches_predicate(column, token):
+                return None
+            return self.less_equal_mass(upper) - self.less_equal_mass(lower - 1)
+        if token.op == PredicateOp.LESS_EQUAL:
+            encoded = _encoded_id_or_none(column, token.value)
+            if encoded is None:
+                return None
+            if not _encoded_interval_matches_predicate(column, token):
+                return None
+            return self.less_equal_mass(encoded)
+        if token.op == PredicateOp.LESS_THAN:
+            encoded = _encoded_id_or_none(column, token.value)
+            if encoded is None:
+                return None
+            if not _encoded_interval_matches_predicate(column, token):
+                return None
+            return self.less_equal_mass(encoded - 1)
+        if token.op == PredicateOp.GREATER_EQUAL:
+            encoded = _encoded_id_or_none(column, token.value)
+            if encoded is None:
+                return None
+            if not _encoded_interval_matches_predicate(column, token):
+                return None
+            return 1.0 - self.less_equal_mass(encoded - 1)
+        if token.op == PredicateOp.GREATER_THAN:
+            encoded = _encoded_id_or_none(column, token.value)
+            if encoded is None:
+                return None
+            if not _encoded_interval_matches_predicate(column, token):
+                return None
+            return 1.0 - self.less_equal_mass(encoded)
+        return None
+
+    def encoded_id_mass(self, encoded_id: int) -> Any:
+        """Evaluate P(X=id) by following exactly one factor path."""
+
+        import torch
+
+        if encoded_id < 0 or encoded_id >= self.factorization.original_domain_size:
+            return torch.zeros(self.batch_size, dtype=self.dtype, device=self.device)
+        digits = factorize_value(encoded_id, self.factorization)
+        probability = torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+        prefix_digits: list[int] = []
+        for factor_index, digit in enumerate(digits):
+            prefix = torch.tensor(
+                [prefix_digits],
+                dtype=torch.long,
+                device=self.device,
+            )
+            distribution = self.conditional_distribution(factor_index, prefix)[:, 0, :]
+            probability = probability * distribution[:, int(digit)]
+            prefix_digits.append(int(digit))
+        return probability
+
+    def less_equal_mass(self, encoded_id: int) -> Any:
+        """Evaluate P(X <= encoded_id) by lexicographic factor-prefix CDF.
+
+        Factorization is most-significant-factor first, so an encoded-ID prefix
+        corresponds to a lexicographic prefix. At factor k, all classes smaller
+        than the threshold digit can be accumulated with one cumulative sum, and
+        only the equal digit needs to continue to the next factor.
+        """
+
+        import torch
+
+        if encoded_id < 0:
+            return torch.zeros(self.batch_size, dtype=self.dtype, device=self.device)
+        if encoded_id >= self.factorization.original_domain_size - 1:
+            return torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+        digits = factorize_value(encoded_id, self.factorization)
+        mass = torch.zeros(self.batch_size, dtype=self.dtype, device=self.device)
+        equal_prefix_mass = torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+        prefix_digits: list[int] = []
+        for factor_index, digit in enumerate(digits):
+            prefix = torch.tensor(
+                [prefix_digits],
+                dtype=torch.long,
+                device=self.device,
+            )
+            distribution = self.conditional_distribution(factor_index, prefix)[:, 0, :]
+            digit = int(digit)
+            if digit > 0:
+                mass = mass + equal_prefix_mass * distribution[:, :digit].sum(dim=1)
+            equal_prefix_mass = equal_prefix_mass * distribution[:, digit]
+            prefix_digits.append(digit)
+        return mass + equal_prefix_mass
+
+    def probabilities_for_factor_values(self, factor_values: Any) -> Any:
+        """Evaluate products for original-ID factor rows using unique prefixes."""
+
+        import torch
+
+        factor_values = factor_values.long()
+        chunk_size = int(factor_values.shape[0])
+        probabilities = torch.ones(
+            self.batch_size,
+            chunk_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        for factor_index in range(len(self.factorization.factor_domains)):
+            if factor_index == 0:
+                prefixes = torch.empty(1, 0, dtype=torch.long, device=self.device)
+                distribution = self.conditional_distribution(factor_index, prefixes)
+                selected = distribution[:, 0, :][:, factor_values[:, factor_index]]
+            else:
+                prefixes = factor_values[:, :factor_index]
+                unique_prefixes, inverse_indices = torch.unique(
+                    prefixes,
+                    dim=0,
+                    return_inverse=True,
+                )
+                self.profile["unique_prefixes_by_factor"][factor_index] = max(
+                    int(unique_prefixes.shape[0]),
+                    int(self.profile["unique_prefixes_by_factor"].get(factor_index, 0)),
+                )
+                distribution = self.conditional_distribution(factor_index, unique_prefixes)
+                gathered = distribution[:, inverse_indices, :]
+                targets = (
+                    factor_values[:, factor_index]
+                    .view(1, chunk_size, 1)
+                    .expand(self.batch_size, chunk_size, 1)
+                )
+                selected = gathered.gather(2, targets).squeeze(2)
+            probabilities = probabilities * selected
+        return probabilities
+
+    def conditional_distribution(self, factor_index: int, prefixes: Any) -> Any:
+        """Return q(z_k | z_<k) for unique prefixes, cached per query."""
+
+        import torch
+
+        prefixes = prefixes.to(device=self.device, dtype=torch.long)
+        key = _prefix_cache_key(factor_index, prefixes)
+        cached = self._distribution_cache.get(key)
+        if cached is not None:
+            return cached
+        head_index = self.factorization.factor_column_indices[factor_index]
+        base_logits = self.backbone_outputs.split_logits[head_index]
+        if factor_index == 0:
+            prefix_for_batch = torch.empty(
+                self.batch_size,
+                0,
+                dtype=torch.long,
+                device=self.device,
+            )
+            valid_class_mask = (
+                valid_factor_class_mask(self.factorization, factor_index, prefix_for_batch)
+                if self.anpm_config.mask_invalid_combinations
+                else None
+            )
+            logits = self.decoder.conditional_logits(
+                factor_index,
+                base_logits,
+                prefix_for_batch,
+                valid_class_mask=valid_class_mask,
+            )
+            distribution = torch.softmax(logits, dim=1).unsqueeze(1)
+        else:
+            prefix_count = int(prefixes.shape[0])
+            domain = self.factorization.factor_domains[factor_index]
+            expanded_base = (
+                base_logits.unsqueeze(1)
+                .expand(self.batch_size, prefix_count, domain)
+                .reshape(self.batch_size * prefix_count, domain)
+            )
+            expanded_prefixes = (
+                prefixes.unsqueeze(0)
+                .expand(self.batch_size, prefix_count, factor_index)
+                .reshape(self.batch_size * prefix_count, factor_index)
+            )
+            valid_class_mask = (
+                valid_factor_class_mask(self.factorization, factor_index, expanded_prefixes)
+                if self.anpm_config.mask_invalid_combinations
+                else None
+            )
+            logits = self.decoder.conditional_logits(
+                factor_index,
+                expanded_base,
+                expanded_prefixes,
+                valid_class_mask=valid_class_mask,
+            )
+            distribution = torch.softmax(logits, dim=1).reshape(
+                self.batch_size,
+                prefix_count,
+                domain,
+            )
+            self.profile["anpm_calls"] += 1
+            self.profile["largest_anpm_batch"] = max(
+                int(self.profile["largest_anpm_batch"]),
+                self.batch_size * prefix_count,
+            )
+        self._distribution_cache[key] = distribution.detach()
+        return self._distribution_cache[key]
+
+
+def _encoded_id_or_none(column: ColumnMetadata, value: Any) -> int | None:
+    try:
+        return column.encode_value(value)
+    except ValueError:
+        return None
+
+
+def _encoded_interval_matches_predicate(
+    column: ColumnMetadata,
+    token: PredicateToken,
+) -> bool:
+    """Check whether encoded-ID interval math preserves predicate semantics."""
+
+    return all(
+        token.satisfies(value) == _encoded_interval_contains(index, column, token)
+        for index, value in enumerate(column.domain)
+    )
+
+
+def _encoded_interval_contains(
+    index: int,
+    column: ColumnMetadata,
+    token: PredicateToken,
+) -> bool:
+    if token.op == PredicateOp.LESS_EQUAL:
+        encoded = _encoded_id_or_none(column, token.value)
+        return encoded is not None and index <= encoded
+    if token.op == PredicateOp.LESS_THAN:
+        encoded = _encoded_id_or_none(column, token.value)
+        return encoded is not None and index < encoded
+    if token.op == PredicateOp.GREATER_EQUAL:
+        encoded = _encoded_id_or_none(column, token.value)
+        return encoded is not None and index >= encoded
+    if token.op == PredicateOp.GREATER_THAN:
+        encoded = _encoded_id_or_none(column, token.value)
+        return encoded is not None and index > encoded
+    if token.op == PredicateOp.RANGE:
+        lower = _encoded_id_or_none(column, token.value)
+        upper = _encoded_id_or_none(column, token.upper)
+        return lower is not None and upper is not None and lower <= index <= upper
+    return False
+
+
+def _prefix_cache_key(factor_index: int, prefixes: Any) -> tuple[Any, ...]:
+    """Build a query-local cache key for immutable prefix tensors."""
+
+    detached = prefixes.detach().to(device="cpu", dtype=prefixes.dtype).contiguous()
+    return (
+        int(factor_index),
+        tuple(int(size) for size in detached.shape),
+        str(detached.dtype),
+        detached.numpy().tobytes(),
+    )
 
 
 def _factor_tensor_for_id_chunk(
