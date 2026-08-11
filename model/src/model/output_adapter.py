@@ -116,6 +116,38 @@ class TorchIdentityOutputAdapter:
             predicate_token,
         )
 
+    def interval_mass(
+        self,
+        *,
+        original_column_index: int,
+        backbone_outputs: TorchBackboneOutputs,
+        metadata: ModelMetadata,
+        lower_literal: Any | None,
+        upper_literal: Any | None,
+        lower_inclusive: bool,
+        upper_inclusive: bool,
+    ) -> Any:
+        """Return exact interval mass from one atomic original-column distribution."""
+
+        distribution = self.original_distribution(
+            original_column_index=original_column_index,
+            backbone_outputs=backbone_outputs,
+            metadata=metadata,
+        )
+        token = _interval_token(
+            lower_literal=lower_literal,
+            upper_literal=upper_literal,
+            lower_inclusive=lower_inclusive,
+            upper_inclusive=upper_inclusive,
+        )
+        return _checked_probability_mass(
+            _torch_column_factor_from_distribution(
+                distribution,
+                metadata.columns[original_column_index],
+                token,
+            )
+        )
+
 
 class TorchANPMFactorizedOutputAdapter:
     """Decode original-column factors from ANPM-conditioned factor heads."""
@@ -240,6 +272,78 @@ class TorchANPMFactorizedOutputAdapter:
             return numerator / valid_mass.clamp_min(1.0e-12)
         return numerator
 
+    def interval_mass(
+        self,
+        *,
+        original_column_index: int,
+        backbone_outputs: TorchBackboneOutputs,
+        lower_literal: Any | None,
+        upper_literal: Any | None,
+        lower_inclusive: bool,
+        upper_inclusive: bool,
+    ) -> Any:
+        """Return exact interval mass from one conditioned original-column state."""
+
+        column = self.metadata.columns[original_column_index]
+        factorization = self.metadata.factorization_plan.factorization_for_column(
+            original_column_index
+        )
+        if factorization is None:
+            return self.identity_adapter.interval_mass(
+                original_column_index=original_column_index,
+                backbone_outputs=backbone_outputs,
+                metadata=self.metadata,
+                lower_literal=lower_literal,
+                upper_literal=upper_literal,
+                lower_inclusive=lower_inclusive,
+                upper_inclusive=upper_inclusive,
+            )
+        token = _interval_token(
+            lower_literal=lower_literal,
+            upper_literal=upper_literal,
+            lower_inclusive=lower_inclusive,
+            upper_inclusive=upper_inclusive,
+        )
+        evaluator = self._evaluator(factorization, backbone_outputs)
+        optimized = evaluator.predicate_mass(column, token)
+        if optimized is not None:
+            self.last_factorized_profile = evaluator.profile
+            return _checked_probability_mass(optimized)
+
+        import torch
+
+        batch_size = backbone_outputs.logits.shape[0]
+        device = backbone_outputs.logits.device
+        dtype = backbone_outputs.logits.dtype
+        numerator = torch.zeros(batch_size, dtype=dtype, device=device)
+        valid_mass = torch.zeros(batch_size, dtype=dtype, device=device)
+        for start in range(
+            0, factorization.original_domain_size, self.anpm_config.decode_chunk_size
+        ):
+            stop = min(
+                start + self.anpm_config.decode_chunk_size,
+                factorization.original_domain_size,
+            )
+            factor_values = _factor_tensor_for_id_chunk(
+                factorization, start, stop, device=device
+            )
+            probabilities = evaluator.probabilities_for_factor_values(factor_values)
+            mask = _torch_predicate_mask_for_id_chunk(
+                column,
+                token,
+                start,
+                stop,
+                dtype=dtype,
+                device=device,
+            )
+            numerator = numerator + torch.matmul(probabilities, mask)
+            valid_mass = valid_mass + probabilities.sum(dim=1)
+        evaluator.profile["fallback_enumeration_used"] = True
+        self.last_factorized_profile = evaluator.profile
+        if self.anpm_config.mask_invalid_combinations:
+            return _checked_probability_mass(numerator / valid_mass.clamp_min(1.0e-12))
+        return _checked_probability_mass(numerator)
+
     def _evaluator(
         self,
         factorization: OriginalColumnFactorization,
@@ -327,7 +431,9 @@ class FactorizedColumnProbabilityEvaluator:
                 return None
             if not _encoded_interval_matches_predicate(column, token):
                 return None
-            return self.less_equal_mass(upper) - self.less_equal_mass(lower - 1)
+            lower_cdf = lower if not token.lower_inclusive else lower - 1
+            upper_cdf = upper if token.upper_inclusive else upper - 1
+            return self.less_equal_mass(upper_cdf) - self.less_equal_mass(lower_cdf)
         if token.op == PredicateOp.LESS_EQUAL:
             encoded = _encoded_id_or_none(column, token.value)
             if encoded is None:
@@ -560,7 +666,11 @@ def _encoded_interval_contains(
     if token.op == PredicateOp.RANGE:
         lower = _encoded_id_or_none(column, token.value)
         upper = _encoded_id_or_none(column, token.upper)
-        return lower is not None and upper is not None and lower <= index <= upper
+        if lower is None or upper is None:
+            return False
+        lower_ok = index >= lower if token.lower_inclusive else index > lower
+        upper_ok = index <= upper if token.upper_inclusive else index < upper
+        return lower_ok and upper_ok
     return False
 
 
@@ -643,3 +753,45 @@ def _torch_column_factor_from_distribution(
         device=distribution.device,
     )
     return torch.matmul(distribution, mask)
+
+
+def _interval_token(
+    *,
+    lower_literal: Any | None,
+    upper_literal: Any | None,
+    lower_inclusive: bool,
+    upper_inclusive: bool,
+) -> PredicateToken:
+    if lower_literal is not None and upper_literal is not None:
+        return PredicateToken(
+            PredicateOp.RANGE,
+            value=lower_literal,
+            upper=upper_literal,
+            lower_inclusive=lower_inclusive,
+            upper_inclusive=upper_inclusive,
+        )
+    if lower_literal is not None:
+        return PredicateToken(
+            PredicateOp.GREATER_EQUAL if lower_inclusive else PredicateOp.GREATER_THAN,
+            value=lower_literal,
+        )
+    if upper_literal is not None:
+        return PredicateToken(
+            PredicateOp.LESS_EQUAL if upper_inclusive else PredicateOp.LESS_THAN,
+            value=upper_literal,
+        )
+    return PredicateToken.wildcard()
+
+
+def _checked_probability_mass(mass: Any, *, tolerance: float = 1.0e-7) -> Any:
+    """Clamp only tiny probability-mass violations and reject larger ones."""
+
+    import torch
+
+    if torch.any(mass < -tolerance) or torch.any(mass > 1.0 + tolerance):
+        raise ValueError(
+            "interval probability mass outside [0,1]: "
+            f"min={float(mass.min().detach().cpu())}, "
+            f"max={float(mass.max().detach().cpu())}"
+        )
+    return mass.clamp(0.0, 1.0)

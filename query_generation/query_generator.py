@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import random
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -386,14 +387,14 @@ class QueryGenerator:
         self.generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def generate(self, categories: Sequence[Category], queries_per_category: int) -> List[Dict[str, Any]]:
-        records = []
+        return list(self.iter_generate(categories, queries_per_category))
+
+    def iter_generate(self, categories: Sequence[Category], queries_per_category: int) -> Iterable[Dict[str, Any]]:
         query_ordinal = 0
         for category in categories:
             for category_index in range(queries_per_category):
                 query_ordinal += 1
-                record = self.generate_one(category, query_ordinal, category_index)
-                records.append(record)
-        return records
+                yield self.generate_one(category, query_ordinal, category_index)
 
     def generate_one(self, category: Category, query_ordinal: int, category_index: int) -> Dict[str, Any]:
         table_ids = self.choose_tables(category)
@@ -709,6 +710,19 @@ def write_jsonl(path: Path, records: Sequence[Dict[str, Any]]) -> None:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
 
+def stream_jsonl(path: Path, records: Iterable[Dict[str, Any]], progress_interval: int = 100) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+            handle.flush()
+            count += 1
+            if progress_interval > 0 and count % progress_interval == 0:
+                print(f"generated {count} queries", file=sys.stderr, flush=True)
+    return count
+
+
 def parse_categories(config: Dict[str, Any], category_arg: Optional[str]) -> List[Category]:
     if not category_arg:
         return all_valid_categories(config)
@@ -733,6 +747,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--categories", help="Comma-separated dim.interval.relation categories. Omit for all valid categories.")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--sample-cache-size", type=int, default=2048, help="Live-row centers cached per ordered attribute in execute mode; use 0 to disable live center caching.")
+    parser.add_argument("--progress-interval", type=int, default=100, help="Write a progress line every N generated queries; use 0 to disable.")
     execute_group = parser.add_mutually_exclusive_group()
     execute_group.add_argument("--execute", dest="execute", action="store_true", default=None)
     execute_group.add_argument("--no-execute", dest="execute", action="store_false")
@@ -756,13 +771,12 @@ def main() -> None:
     if execute:
         with QueryExecutor(host=args.host, port=args.port, dbname=args.dbname, user=args.user) as executor:
             generator = QueryGenerator(config, args.seed, executor, sample_cache_size=args.sample_cache_size)
-            records = generator.generate(categories, args.queries_per_category)
+            written = stream_jsonl(Path(args.output), generator.iter_generate(categories, args.queries_per_category), args.progress_interval)
     else:
         generator = QueryGenerator(config, args.seed, None, sample_cache_size=args.sample_cache_size)
-        records = generator.generate(categories, args.queries_per_category)
+        written = stream_jsonl(Path(args.output), generator.iter_generate(categories, args.queries_per_category), args.progress_interval)
 
-    write_jsonl(Path(args.output), records)
-    print(f"wrote {len(records)} queries to {args.output}")
+    print(f"wrote {written} queries to {args.output}")
 
 
 if __name__ == "__main__":

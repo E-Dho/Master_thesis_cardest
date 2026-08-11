@@ -26,6 +26,7 @@ from model.src.model.factorization import (
     valid_factor_class_mask,
 )
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
+from model.src.training.resmade_trainer import build_resmade_from_config
 from model.src.predicates.torch_encoding import encode_tokens_tensor
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
@@ -60,6 +61,64 @@ class ResMADETorchTest(unittest.TestCase):
         for distribution, width in zip(distributions, source.metadata.data_output_bins):
             self.assertEqual(distribution.shape, (1, width))
             self.assertTrue(torch.allclose(distribution.sum(dim=1), torch.ones(1)))
+
+    def test_compositional_predicate_encoding_shares_literal_values(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["predicate_encoding"] = {
+            "mode": "compositional",
+            "operator_embedding_size": 4,
+            "value_embedding_size": 6,
+            "special_embedding_size": 3,
+            "merge_hidden_size": 8,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        vocabularies = PredicateVocabularies.from_metadata(source.metadata)
+        equal_id = vocabularies.encode_token(0, PredicateToken.equal("a1"))
+        le_id = vocabularies.encode_token(0, PredicateToken(PredicateOp.LESS_EQUAL, "a1"))
+        ge_id = vocabularies.encode_token(0, PredicateToken(PredicateOp.GREATER_EQUAL, "a1"))
+
+        value_lookup = model.token_value_ids_0.detach().cpu()
+        operator_lookup = model.token_operator_ids_0.detach().cpu()
+        self.assertEqual(int(value_lookup[equal_id]), int(value_lookup[le_id]))
+        self.assertEqual(int(value_lookup[equal_id]), int(value_lookup[ge_id]))
+        self.assertNotEqual(int(operator_lookup[equal_id]), int(operator_lookup[le_id]))
+        self.assertNotEqual(int(operator_lookup[equal_id]), int(operator_lookup[ge_id]))
+
+        token_rows = [[PredicateToken.equal("a1")] + [PredicateToken.wildcard()] * (len(source.metadata.columns) - 1)]
+        token_ids = encode_tokens_tensor(token_rows, vocabularies)
+        logits = model(token_ids)
+        logits.sum().backward()
+        self.assertGreater(float(model.operator_embedding.weight.grad.norm()), 0.0)
+        self.assertGreater(float(model.value_embeddings[0].weight.grad.norm()), 0.0)
+        self.assertGreater(float(model.special_embedding.weight.grad.norm()), 0.0)
+
+    def test_hybrid_predicate_encoding_adds_literal_specific_capacity(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["predicate_encoding"] = {
+            "mode": "hybrid",
+            "operator_embedding_size": 4,
+            "value_embedding_size": 6,
+            "special_embedding_size": 3,
+            "merge_hidden_size": 8,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        vocabularies = PredicateVocabularies.from_metadata(source.metadata)
+        self.assertEqual(len(model.literal_embeddings), len(source.metadata.columns))
+
+        equal_id = vocabularies.encode_token(0, PredicateToken.equal("a1"))
+        le_id = vocabularies.encode_token(0, PredicateToken(PredicateOp.LESS_EQUAL, "a1"))
+        value_lookup = model.token_value_ids_0.detach().cpu()
+        self.assertEqual(int(value_lookup[equal_id]), int(value_lookup[le_id]))
+
+        token_rows = [[PredicateToken.equal("a1")] + [PredicateToken.wildcard()] * (len(source.metadata.columns) - 1)]
+        token_ids = encode_tokens_tensor(token_rows, vocabularies)
+        logits = model(token_ids)
+        logits.sum().backward()
+        self.assertGreater(float(model.literal_embeddings[0].weight.grad[equal_id].norm()), 0.0)
+        self.assertGreater(float(model.operator_embedding.weight.grad.norm()), 0.0)
+        self.assertGreater(float(model.value_embeddings[0].weight.grad.norm()), 0.0)
 
     def test_autoregressive_no_current_or_future_leakage(self) -> None:
         model, source, vocabularies = self._model(residual=True, direct_io=True)
@@ -451,6 +510,34 @@ class ResMADETorchTest(unittest.TestCase):
             float(distribution[5:13].sum()),
             places=5,
         )
+
+    def test_native_interval_mass_uses_one_backbone_state(self) -> None:
+        metadata = self._factorized_metadata()
+        vocabularies = PredicateVocabularies.from_metadata(metadata)
+        model = self._factorized_model(metadata, vocabularies)
+        wrapped = TorchDistributionModel(model, metadata, vocabularies)
+        tokens = [PredicateToken.wildcard(), PredicateToken.wildcard()]
+        token_ids = encode_tokens_tensor([tokens], vocabularies)
+        logits = model(token_ids)
+        outputs = TorchBackboneOutputs(
+            logits=logits,
+            split_logits=model.split_logits(logits),
+        )
+        before = model.forward_calls
+        mass = wrapped.output_adapter.interval_mass(
+            original_column_index=0,
+            backbone_outputs=outputs,
+            lower_literal=5,
+            upper_literal=12,
+            lower_inclusive=False,
+            upper_inclusive=True,
+        )
+        after = model.forward_calls
+        distribution = wrapped.predict_distributions(tokens)[0]
+        self.assertEqual(after, before)
+        self.assertGreater(float(mass[0]), 0.0)
+        self.assertLessEqual(float(mass[0]), 1.0)
+        self.assertAlmostEqual(float(mass[0]), float(distribution[6:13].sum()), places=5)
 
     def test_chunked_and_unchunked_factorized_inference_agree(self) -> None:
         metadata = self._factorized_metadata()

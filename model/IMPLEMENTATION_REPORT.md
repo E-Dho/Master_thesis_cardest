@@ -74,6 +74,119 @@ JOB-light evaluator. The production code no longer materializes generated ANPM
 matrices; explicit matrix construction remains only in tests as a numerical
 reference.
 
+## Native Multi-Predicate Range Inference
+
+Baseline commit before this phase:
+`eadc077e011284e0e73eeb5b82030bbba34e1ec7`.
+
+Branch: `feature/native-ranges-live-sampling`.
+
+This phase addresses the JOB-light two-sided range failure caused by external
+complete-cardinality subtraction. The previous corrected fixed-fixture run
+estimated query 20 by running two separately conditioned complete queries:
+
+```text
+true_cardinality = 695701
+C_upper_hat      = 144842.47
+C_lower_hat      = 211711.12
+C_lower_hat > C_upper_hat
+clamped_estimate = 0
+q_error_epsilon  = 6.957e17
+```
+
+The new production evaluation path groups predicates by original column,
+normalizes each `ColumnPredicateSet`, returns zero explicitly for
+contradictions, runs one ResMADE backbone pass per query, and computes native
+interval mass from the resulting original-column distribution. External
+full-query subtraction is no longer the production path; it should only be kept
+as an explicitly named diagnostic baseline if needed for ablations.
+
+Changed components:
+
+- `model/src/predicates/operators.py`: interval predicate tokens now preserve
+  lower/upper inclusivity and serialize stable keys with those flags.
+- `model/src/predicates/vocabulary.py`: vocabularies load both legacy 3-field
+  token keys and new 5-field interval keys.
+- `model/src/predicates/sets.py`: canonical same-column predicate
+  normalization and contradiction detection.
+- `model/src/model/output_adapter.py`: native interval mass for unfactorized
+  and ANPM-factorized original columns, with one query-local evaluator/cache.
+- `model/scripts/evaluate_job_light_queries.py`: production JOB-light
+  evaluation uses one native model pass and emits tail diagnostics.
+- `model/src/evaluation/metrics.py`: supplementary floor-one Q-error.
+- `model/tests/test_native_ranges.py` and `model/tests/test_resmade_torch.py`:
+  native range normalization, legacy-key compatibility, zero-Q-error reporting,
+  and one-backbone-state interval mass coverage.
+
+Native JOB-light evaluation on the corrected fixed-fixture checkpoint:
+
+```text
+queries_scored=70
+status_counts={ok: 53, ok_native_range: 17}
+evaluation_wall_seconds=1.356
+total_model_forward_calls=70
+median_q_error=3.329
+p90_q_error=1218.701
+p95_q_error=2740.477
+p99_q_error=1745842.050
+max_q_error=2423520.177
+zero_estimate_count=0
+```
+
+Query 20 after native range estimation:
+
+```text
+status=ok_native_range
+true_cardinality=695701
+estimated_cardinality=28724.26
+q_error_epsilon=24.22
+model_forward_calls=1
+zero_estimate=false
+```
+
+Backbone call counts improved from `87` to `70` over the full 70-query
+JOB-light workload; query 20 changed from two model calls to one. Evaluation
+time changed from approximately `0.98s` for the external-subtraction corrected
+fixture evaluation to `1.36s` for the native range evaluator.
+
+Normal-query Q-errors were effectively unchanged:
+
+```text
+normal_median=2.547
+normal_p95=2456.594
+normal_max=13212.693
+```
+
+Native range query group:
+
+```text
+native_range_median=8.715
+native_range_p95=1637806.406
+native_range_max=2423520.177
+```
+
+The catastrophic query-20 monotonicity violation is gone, but the current
+native range group still has a long tail. The worst remaining queries are
+equality-plus-range cases with tiny nonzero estimates, not clamped zeros.
+
+Live sampler metrics for this phase:
+
+```text
+sampling_mode=fixture
+nominal_rows_seen=7168000
+fresh_sampler_rows=0
+fixture_rows_presented=7168000
+```
+
+Compositional predicate encoding metrics are not yet available. Training still
+uses `predicate_encoding.mode: categorical_legacy`, so the native two-sided
+range inference path conditions old checkpoints with a wildcard token for the
+ranged column and applies the interval constraint to the output distribution.
+
+Validation checkpoint selection is not yet implemented. The trainer records
+interval metrics and periodic checkpoints, but does not yet run held-out
+validation NLL/JOB-light evaluation or write `checkpoint_best.pt`.
+
 ## Upstream Reference
 
 The implementation was adapted from the ANPM structure in

@@ -5,6 +5,7 @@ from typing import Any
 
 from model.src.data.full_join_sampler import (
     FullJoinBatch,
+    LiveNeuroCardFullJoinSampleSource,
     NeuroCardFullJoinSampleSource,
     SyntheticFullJoinSampleSource,
 )
@@ -22,7 +23,22 @@ def sample_source_from_config(config: dict[str, Any]) -> object:
     if dataset_type == "synthetic_full_join":
         source = SyntheticFullJoinSampleSource()
     elif dataset_type == "neurocard_full_join":
-        source = NeuroCardFullJoinSampleSource(Path(dataset["prepared_directory"]))
+        sampling_mode = str(dataset.get("sampling_mode", "fixture"))
+        if sampling_mode == "live":
+            source = LiveNeuroCardFullJoinSampleSource(
+                Path(dataset["prepared_directory"]),
+                csv_directory=Path(dataset["csv_directory"]),
+                neurocard_path=dataset.get("neurocard_path"),
+                sampler_batch_size=int(
+                    dataset.get("sampler_batch_size", dataset.get("sample_batch_size", 16384))
+                ),
+                seed=int(dataset.get("sampler_seed", config.get("training", {}).get("seed", 0))),
+            )
+        else:
+            source = NeuroCardFullJoinSampleSource(
+                Path(dataset["prepared_directory"]),
+                sampling_mode=sampling_mode,
+            )
     else:
         raise ValueError(f"unsupported dataset.type {dataset_type!r}")
     factorization = FactorizationConfig.from_dict(config.get("factorization", {}))
@@ -54,4 +70,19 @@ class FactorizedMetadataSampleSource:
             encoded_values=batch.encoded_values,
             column_metadata=self._metadata.columns,
             raw_values=batch.raw_values,
+            fresh_rows_drawn=batch.fresh_rows_drawn,
+            fixture_rows_reused=batch.fixture_rows_reused,
         )
+
+    @property
+    def sampler_run_calls(self) -> int | None:
+        return getattr(self.base_source, "sampler_run_calls", None)
+
+    @property
+    def distinct_original_rows_seen_estimate(self) -> object:
+        return getattr(self.base_source, "distinct_original_rows_seen_estimate", None)
+
+    def discard_buffer(self) -> None:
+        discard = getattr(self.base_source, "discard_buffer", None)
+        if discard is not None:
+            discard()

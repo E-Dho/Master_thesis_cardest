@@ -1,8 +1,8 @@
 dataset:
   type: neurocard_full_join
-  name: job_light_distjoin_anpm
-  csv_directory: datasets/job
+  name: job_light_corrected_predicate_fixture_7m
   prepared_directory: data/neurocard_prepared/job_light
+  sampling_mode: fixture
   sample_batch_size: 2048
   num_workers: 0
 
@@ -83,5 +83,5 @@ inference:
   use_log_space_product: true
 
 logging:
-  output_directory: model/runs/job_light_resmade_distjoin_anpm
+  output_directory: model/runs/job_light_corrected_predicate_fixture_7m
   tensorboard: true

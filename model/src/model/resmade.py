@@ -23,6 +23,18 @@ class PredicateResMADEConfig:
     activation: str = "relu"
     input_encoding: str = "embed"
     embedding_size: int = 32
+    predicate_encoding_mode: str = "categorical_legacy"
+    operator_embedding_size: int = 8
+    value_embedding_size: int = 32
+    special_embedding_size: int = 8
+    merge_hidden_size: int = 64
+    token_operator_ids_by_column: tuple[tuple[int, ...], ...] | None = None
+    token_value_ids_by_column: tuple[tuple[int, ...], ...] | None = None
+    token_upper_ids_by_column: tuple[tuple[int, ...], ...] | None = None
+    token_special_ids_by_column: tuple[tuple[int, ...], ...] | None = None
+    value_bins_by_column: tuple[int, ...] | None = None
+    operator_bins: int = 8
+    special_bins: int = 4
     residual_dropout: float = 0.0
     fixed_ordering: bool = True
     output_head_specs: tuple[OutputHeadSpec, ...] | None = None
@@ -42,6 +54,52 @@ class PredicateResMADEConfig:
             raise ValueError("residual hidden layers must have compatible dimensions")
         if self.input_encoding not in {"embed", "one_hot"}:
             raise ValueError("input_encoding must be 'embed' or 'one_hot'")
+        if self.predicate_encoding_mode not in {
+            "categorical_legacy",
+            "compositional",
+            "hybrid",
+        }:
+            raise ValueError(
+                "predicate_encoding_mode must be categorical_legacy, compositional, or hybrid"
+            )
+        if self.predicate_encoding_mode in {"compositional", "hybrid"}:
+            if self.input_encoding != "embed":
+                raise ValueError(
+                    "compositional/hybrid predicate encoding requires input_encoding=embed"
+                )
+            feature_tables = (
+                self.token_operator_ids_by_column,
+                self.token_value_ids_by_column,
+                self.token_upper_ids_by_column,
+                self.token_special_ids_by_column,
+            )
+            if any(table is None for table in feature_tables):
+                raise ValueError(
+                    "compositional/hybrid predicate encoding requires token feature tables"
+                )
+            if self.value_bins_by_column is None:
+                raise ValueError(
+                    "compositional/hybrid predicate encoding requires value_bins_by_column"
+                )
+            if len(self.value_bins_by_column) != len(self.predicate_input_bins):
+                raise ValueError("value_bins_by_column must align with predicate_input_bins")
+            for table in feature_tables:
+                assert table is not None
+                if len(table) != len(self.predicate_input_bins):
+                    raise ValueError("token feature tables must align with predicate_input_bins")
+                for column_index, values in enumerate(table):
+                    if len(values) != self.predicate_input_bins[column_index]:
+                        raise ValueError(
+                            "token feature table width must match predicate_input_bins"
+                        )
+            for size_name, size in [
+                ("operator_embedding_size", self.operator_embedding_size),
+                ("value_embedding_size", self.value_embedding_size),
+                ("special_embedding_size", self.special_embedding_size),
+                ("merge_hidden_size", self.merge_hidden_size),
+            ]:
+                if size <= 0:
+                    raise ValueError(f"{size_name} must be positive")
         if not self.fixed_ordering:
             raise ValueError("this milestone requires fixed_ordering=true")
         specs = self.resolved_output_head_specs()
@@ -91,6 +149,18 @@ class PredicateResMADEConfig:
             "activation": self.activation,
             "input_encoding": self.input_encoding,
             "embedding_size": self.embedding_size,
+            "predicate_encoding_mode": self.predicate_encoding_mode,
+            "operator_embedding_size": self.operator_embedding_size,
+            "value_embedding_size": self.value_embedding_size,
+            "special_embedding_size": self.special_embedding_size,
+            "merge_hidden_size": self.merge_hidden_size,
+            "token_operator_ids_by_column": self.token_operator_ids_by_column,
+            "token_value_ids_by_column": self.token_value_ids_by_column,
+            "token_upper_ids_by_column": self.token_upper_ids_by_column,
+            "token_special_ids_by_column": self.token_special_ids_by_column,
+            "value_bins_by_column": self.value_bins_by_column,
+            "operator_bins": self.operator_bins,
+            "special_bins": self.special_bins,
             "residual_dropout": self.residual_dropout,
             "fixed_ordering": self.fixed_ordering,
             "output_head_specs": (
@@ -137,6 +207,30 @@ class PredicateResMADEConfig:
             activation=str(data["activation"]),  # type: ignore[index]
             input_encoding=str(data["input_encoding"]),  # type: ignore[index]
             embedding_size=int(data["embedding_size"]),  # type: ignore[index]
+            predicate_encoding_mode=str(data.get("predicate_encoding_mode", "categorical_legacy")),
+            operator_embedding_size=int(data.get("operator_embedding_size", 8)),
+            value_embedding_size=int(data.get("value_embedding_size", 32)),
+            special_embedding_size=int(data.get("special_embedding_size", 8)),
+            merge_hidden_size=int(data.get("merge_hidden_size", 64)),
+            token_operator_ids_by_column=_tuple_table_or_none(
+                data.get("token_operator_ids_by_column")
+            ),
+            token_value_ids_by_column=_tuple_table_or_none(
+                data.get("token_value_ids_by_column")
+            ),
+            token_upper_ids_by_column=_tuple_table_or_none(
+                data.get("token_upper_ids_by_column")
+            ),
+            token_special_ids_by_column=_tuple_table_or_none(
+                data.get("token_special_ids_by_column")
+            ),
+            value_bins_by_column=(
+                None
+                if data.get("value_bins_by_column") is None
+                else tuple(int(value) for value in data["value_bins_by_column"])  # type: ignore[index]
+            ),
+            operator_bins=int(data.get("operator_bins", 8)),
+            special_bins=int(data.get("special_bins", 4)),
             residual_dropout=float(data["residual_dropout"]),  # type: ignore[index]
             fixed_ordering=bool(data["fixed_ordering"]),  # type: ignore[index]
             output_head_specs=output_head_specs,
@@ -176,11 +270,66 @@ class PredicateResMADE(nn.Module):
         hidden_degrees = self._hidden_degrees(config.hidden_sizes[0], self.num_columns)
         self.hidden_degrees = hidden_degrees
 
-        if config.input_encoding == "embed":
+        if config.input_encoding == "embed" and config.predicate_encoding_mode == "categorical_legacy":
             self.embeddings = nn.ModuleList(
                 [nn.Embedding(num_embeddings=bins, embedding_dim=config.embedding_size)
                  for bins in config.predicate_input_bins]
             )
+        elif config.input_encoding == "embed":
+            self.embeddings = nn.ModuleList()
+            if config.predicate_encoding_mode == "hybrid":
+                self.literal_embeddings = nn.ModuleList(
+                    [
+                        nn.Embedding(
+                            num_embeddings=bins,
+                            embedding_dim=config.embedding_size,
+                        )
+                        for bins in config.predicate_input_bins
+                    ]
+                )
+            else:
+                self.literal_embeddings = nn.ModuleList()
+            self.operator_embedding = nn.Embedding(
+                config.operator_bins, config.operator_embedding_size
+            )
+            assert config.value_bins_by_column is not None
+            self.value_embeddings = nn.ModuleList(
+                [
+                    nn.Embedding(num_embeddings=bins, embedding_dim=config.value_embedding_size)
+                    for bins in config.value_bins_by_column
+                ]
+            )
+            self.special_embedding = nn.Embedding(
+                config.special_bins, config.special_embedding_size
+            )
+            merge_input = (
+                config.operator_embedding_size
+                + 2 * config.value_embedding_size
+                + config.special_embedding_size
+            )
+            self.predicate_merge_networks = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(merge_input, config.merge_hidden_size),
+                        self._make_activation(config.activation),
+                        nn.Linear(config.merge_hidden_size, config.embedding_size),
+                    )
+                    for _ in config.predicate_input_bins
+                ]
+            )
+            assert config.token_operator_ids_by_column is not None
+            assert config.token_value_ids_by_column is not None
+            assert config.token_upper_ids_by_column is not None
+            assert config.token_special_ids_by_column is not None
+            for name, table in [
+                ("token_operator_ids", config.token_operator_ids_by_column),
+                ("token_value_ids", config.token_value_ids_by_column),
+                ("token_upper_ids", config.token_upper_ids_by_column),
+                ("token_special_ids", config.token_special_ids_by_column),
+            ]:
+                padded = [torch.tensor(values, dtype=torch.long) for values in table]
+                for column_index, values in enumerate(padded):
+                    self.register_buffer(f"{name}_{column_index}", values)
         else:
             self.embeddings = nn.ModuleList()
 
@@ -249,9 +398,39 @@ class PredicateResMADE(nn.Module):
         if token_ids.ndim != 2 or token_ids.shape[1] != self.num_columns:
             raise ValueError("token_ids must have shape [batch, number_of_columns]")
         pieces = []
-        if self.config.input_encoding == "embed":
+        if self.config.input_encoding == "embed" and self.config.predicate_encoding_mode == "categorical_legacy":
             for column_index, embedding in enumerate(self.embeddings):
                 pieces.append(embedding(token_ids[:, column_index]))
+        elif self.config.input_encoding == "embed":
+            for column_index, value_embedding in enumerate(self.value_embeddings):
+                column_token_ids = token_ids[:, column_index]
+                operator_ids = getattr(self, f"token_operator_ids_{column_index}")[
+                    column_token_ids
+                ]
+                value_ids = getattr(self, f"token_value_ids_{column_index}")[
+                    column_token_ids
+                ]
+                upper_ids = getattr(self, f"token_upper_ids_{column_index}")[
+                    column_token_ids
+                ]
+                special_ids = getattr(self, f"token_special_ids_{column_index}")[
+                    column_token_ids
+                ]
+                merged = torch.cat(
+                    [
+                        self.operator_embedding(operator_ids),
+                        value_embedding(value_ids),
+                        value_embedding(upper_ids),
+                        self.special_embedding(special_ids),
+                    ],
+                    dim=1,
+                )
+                encoded = self.predicate_merge_networks[column_index](merged)
+                if self.config.predicate_encoding_mode == "hybrid":
+                    encoded = encoded + self.literal_embeddings[column_index](
+                        column_token_ids
+                    )
+                pieces.append(encoded)
         else:
             for column_index, bins in enumerate(self.config.predicate_input_bins):
                 pieces.append(
@@ -333,3 +512,9 @@ class PredicateResMADE(nn.Module):
             slices.append((start, stop))
             start = stop
         return tuple(slices)
+
+
+def _tuple_table_or_none(data: object) -> tuple[tuple[int, ...], ...] | None:
+    if data is None:
+        return None
+    return tuple(tuple(int(value) for value in values) for values in data)  # type: ignore[union-attr]

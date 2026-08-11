@@ -1,9 +1,13 @@
 dataset:
   type: neurocard_full_join
-  name: job_light_distjoin_anpm
+  name: job_light_native_ranges_live_validation_smoke
   csv_directory: datasets/job
   prepared_directory: data/neurocard_prepared/job_light
-  sample_batch_size: 2048
+  sampling_mode: live
+  sampler_batch_size: 4096
+  sample_batch_size: 512
+  sampler_seed: 0
+  neurocard_path: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard
   num_workers: 0
 
 schema:
@@ -66,16 +70,24 @@ predicate_encoding:
 training:
   seed: 0
   device: auto
-  batch_size: 2048
+  batch_size: 512
   learning_rate: 0.0001
   optimizer: adam
   epochs: 1
-  steps_per_epoch: 3500
+  steps_per_epoch: 2
   gradient_clip_norm: 5.0
-  checkpoint_interval_steps: 500
-  validation_interval_steps: 250
+  checkpoint_interval_steps: 1
+  validation_interval_steps: 1
   head_loss_reduction: sum
   mixed_precision: false
+
+validation:
+  enabled: true
+  interval_steps: 1
+  fresh_sampler_batches: 1
+  batch_size: 512
+  selection_metric: validation_weighted_nll
+  minimize: true
 
 inference:
   progressive_sampling: false
@@ -83,5 +95,5 @@ inference:
   use_log_space_product: true
 
 logging:
-  output_directory: model/runs/job_light_resmade_distjoin_anpm
+  output_directory: model/runs/job_light_native_ranges_live_validation_smoke
   tensorboard: true

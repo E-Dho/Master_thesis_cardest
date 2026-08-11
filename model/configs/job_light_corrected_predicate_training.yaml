@@ -1,9 +1,10 @@
 dataset:
   type: neurocard_full_join
-  name: job_light_distjoin_anpm
-  csv_directory: datasets/job
+  name: job_light_corrected_predicate_training
   prepared_directory: data/neurocard_prepared/job_light
+  sampling_mode: live
   sample_batch_size: 2048
+  sampler_refresh_batches: 1
   num_workers: 0
 
 schema:
@@ -69,7 +70,10 @@ training:
   batch_size: 2048
   learning_rate: 0.0001
   optimizer: adam
-  epochs: 1
+  lr_scheduler: cosine
+  warmup_steps: 1000
+  epochs: 10
+  early_stopping_patience: 3
   steps_per_epoch: 3500
   gradient_clip_norm: 5.0
   checkpoint_interval_steps: 500
@@ -77,11 +81,18 @@ training:
   head_loss_reduction: sum
   mixed_precision: false
 
+validation:
+  enabled: true
+  interval_steps: 250
+  sampler_batches: 10
+  job_light_queries: null
+  selection_metric: p95_q_error
+  minimize: true
+
 inference:
   progressive_sampling: false
   factorized_decoder: anpm
   use_log_space_product: true
 
 logging:
-  output_directory: model/runs/job_light_resmade_distjoin_anpm
-  tensorboard: true
+  output_directory: model/runs/job_light_corrected_predicate_training

@@ -85,6 +85,20 @@ def validate_config(config: dict[str, Any]) -> None:
     if inference.get("progressive_sampling", False):
         raise ValueError("this milestone requires inference.progressive_sampling=false")
     model = config.get("model", {})
+    dataset = config.get("dataset", {})
+    sampling_mode = str(dataset.get("sampling_mode", "fixture"))
+    if sampling_mode not in {"fixture", "live", "materialized_large_sample"}:
+        raise ValueError(
+            "dataset.sampling_mode must be fixture, live, or materialized_large_sample"
+        )
+    if sampling_mode == "live":
+        if "csv_directory" not in dataset:
+            raise ValueError("dataset.sampling_mode=live requires dataset.csv_directory")
+        sampler_batch_size = int(
+            dataset.get("sampler_batch_size", dataset.get("sample_batch_size", 0))
+        )
+        if sampler_batch_size <= 0:
+            raise ValueError("dataset.sampler_batch_size must be positive in live mode")
     if model.get("type") == "predicate_resmade" and not model.get("fixed_ordering", True):
         raise ValueError("predicate_resmade requires model.fixed_ordering=true")
     if factorization_config.enabled:
@@ -97,6 +111,68 @@ def validate_config(config: dict[str, Any]) -> None:
         decoder = str(inference.get("factorized_decoder", "anpm"))
         if decoder != "anpm":
             raise ValueError("only inference.factorized_decoder=anpm is supported")
+    predicate_generation = config.get("predicate_generation", {})
+    probabilities = (
+        float(predicate_generation.get("wildcard_probability", 0.2)),
+        float(predicate_generation.get("equality_probability", 0.4)),
+        float(predicate_generation.get("lower_bound_probability", 0.2)),
+        float(predicate_generation.get("upper_bound_probability", 0.2)),
+        float(predicate_generation.get("native_range_probability", 0.0)),
+    )
+    if any(probability < 0.0 for probability in probabilities):
+        raise ValueError("predicate_generation probabilities must be nonnegative")
+    if sum(probabilities) <= 0.0:
+        raise ValueError("predicate_generation probabilities must have positive total")
+    per_row_contexts = int(predicate_generation.get("per_row_contexts", 1))
+    if per_row_contexts <= 0:
+        raise ValueError("predicate_generation.per_row_contexts must be positive")
+    table_subset_sampling = str(predicate_generation.get("table_subset_sampling", "full"))
+    if table_subset_sampling not in {"full", "connected"}:
+        raise ValueError(
+            "predicate_generation.table_subset_sampling must be 'full' or 'connected'"
+        )
+    predicate_encoding = config.get("predicate_encoding", {})
+    encoding_mode = str(predicate_encoding.get("mode", "categorical_legacy"))
+    if encoding_mode not in {"categorical_legacy", "compositional", "hybrid"}:
+        raise ValueError(
+            "predicate_encoding.mode must be categorical_legacy, compositional, or hybrid"
+        )
+    if encoding_mode in {"compositional", "hybrid"}:
+        model = config.get("model", {})
+        if str(model.get("input_encoding", "embed")) != "embed":
+            raise ValueError(
+                "predicate_encoding.mode=compositional/hybrid requires "
+                "model.input_encoding=embed"
+            )
+        for key in [
+            "operator_embedding_size",
+            "value_embedding_size",
+            "special_embedding_size",
+            "merge_hidden_size",
+        ]:
+            if int(predicate_encoding.get(key, 1) or 0) <= 0:
+                raise ValueError(f"predicate_encoding.{key} must be positive")
+    validation = config.get("validation", {})
+    if validation.get("enabled", False):
+        interval_steps = int(
+            validation.get(
+                "interval_steps",
+                config.get("training", {}).get("validation_interval_steps", 0),
+            )
+            or 0
+        )
+        if interval_steps <= 0:
+            raise ValueError("validation.enabled=true requires validation.interval_steps > 0")
+        if int(validation.get("fresh_sampler_batches", 0) or 0) <= 0:
+            raise ValueError(
+                "validation.enabled=true requires validation.fresh_sampler_batches > 0"
+            )
+        metric = str(validation.get("selection_metric", "validation_weighted_nll"))
+        if metric not in {"validation_nll", "validation_weighted_nll"}:
+            raise ValueError(
+                "validation.selection_metric must be validation_nll or "
+                "validation_weighted_nll in this milestone"
+            )
 
 
 def resolve_device(config: dict[str, Any]) -> str:

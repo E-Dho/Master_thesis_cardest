@@ -1,9 +1,13 @@
 dataset:
   type: neurocard_full_join
-  name: job_light_distjoin_anpm
+  name: job_light_compositional_csetup_30m_7m
   csv_directory: datasets/job
   prepared_directory: data/neurocard_prepared/job_light
+  sampling_mode: live
+  sampler_batch_size: 16384
   sample_batch_size: 2048
+  sampler_seed: 0
+  neurocard_path: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard
   num_workers: 0
 
 schema:
@@ -12,7 +16,7 @@ schema:
 
 model:
   type: predicate_resmade
-  hidden_sizes: [512, 512, 512, 512]
+  hidden_sizes: [1024, 1024, 1024, 1024]
   residual_connections: true
   direct_io_connections: false
   activation: relu
@@ -60,8 +64,13 @@ predicate_generation:
   seed: 0
 
 predicate_encoding:
-  mode: categorical_legacy
+  mode: compositional
+  operator_embedding_size: 8
+  value_embedding_size: 32
+  special_embedding_size: 8
+  merge_hidden_size: 64
   max_predicates_per_column: 1
+  multi_predicate_merge: mlp
 
 training:
   seed: 0
@@ -83,5 +92,5 @@ inference:
   use_log_space_product: true
 
 logging:
-  output_directory: model/runs/job_light_resmade_distjoin_anpm
+  output_directory: model/runs/job_light_compositional_csetup_30m_7m
   tensorboard: true

@@ -11,6 +11,14 @@ def q_error(estimated: float, true: float, *, epsilon: float = 1.0e-12) -> float
     return max(estimated / true, true / estimated)
 
 
+def q_error_floor_one(estimated: float, true: float) -> float:
+    """Symmetric q-error after flooring both values at one."""
+
+    estimated = max(float(estimated), 1.0)
+    true = max(float(true), 1.0)
+    return max(estimated / true, true / estimated)
+
+
 def q_error_summary(estimates: list[float], truths: list[float]) -> dict[str, float]:
     errors = np.array([q_error(e, t) for e, t in zip(estimates, truths)], dtype=float)
     return {
@@ -20,4 +28,3 @@ def q_error_summary(estimates: list[float], truths: list[float]) -> dict[str, fl
         "p99": float(np.percentile(errors, 99)),
         "max": float(np.max(errors)),
     }
-

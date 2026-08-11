@@ -20,6 +20,8 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
     result = train_resmade_sample_source(source, config)
     print(f"checkpoint={result.checkpoint_path}")
+    if result.best_checkpoint_path is not None:
+        print(f"best_checkpoint={result.best_checkpoint_path}")
     print(f"parameter_count={result.parameter_count}")
     print(f"parameter_size_bytes={result.parameter_size_bytes}")
     print(f"backbone_parameter_count={result.backbone_parameter_count}")
@@ -45,6 +47,8 @@ def main() -> None:
         )
     print(f"metrics_path={result.metrics_path}")
     print(f"summary_path={result.summary_path}")
+    if result.validation_summary.get("enabled"):
+        print(f"validation_summary={json.dumps(result.validation_summary, sort_keys=True)}")
     for fanout_name, stats in result.fanout_effective_sample_size.items():
         print(
             f"fanout_effective_sample_size[{fanout_name}]="

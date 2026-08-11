@@ -192,9 +192,11 @@ s_i = sum_x q_i(x) phi_i(x)
 For factorized columns, valid original IDs are enumerated in chunks. Their
 factor paths are evaluated with the same prefix-conditioned ANPM decoder used
 during training. Invalid factor completions are masked before each factor
-softmax when `anpm.mask_invalid_combinations: true`, and the existing
-original-domain predicate mask is applied. Two-sided ranges continue to use the
-external inclusion-exclusion path.
+softmax when `anpm.mask_invalid_combinations: true`, and original-column
+predicate masks are applied through the output adapter. Production JOB-light
+two-sided ranges now use native interval mass from one conditioned
+original-column state rather than subtracting two independent full-query
+cardinality estimates.
 
 ## Optimized ANPM Inference
 
@@ -249,8 +251,9 @@ P(X=v) = product_k P(Z_k=v_k | Z_<k=v_<k)
 For one-sided ranges over factorized columns whose predicate semantics align
 with encoded-ID order, the evaluator uses a most-significant-factor prefix CDF:
 smaller current digits are accumulated with cumulative sums, and only the equal
-digit continues to the next factor. Existing two-sided ranges continue to use
-inclusion-exclusion over the optimized one-sided masses.
+digit continues to the next factor. Two-sided ranges use the same query-local
+factor probability evaluator and compute interval mass as CDF differences
+inside one normalized column distribution.
 
 ## Fallback Original-Domain Enumeration
 
@@ -453,8 +456,10 @@ branches, duplicate join keys, and correlated fanouts.
 For JOB-light, the real-data path is a NeuroCard-backed preparation step that
 loads complete base-table dictionaries, complete join-key fanout metadata, and
 an optional sampled full-outer-join fixture into
-`data/neurocard_prepared/job_light/`. Training then reads the manifest-backed
-fixture through `NeuroCardFullJoinSampleSource`.
+`data/neurocard_prepared/job_light/`. Smoke training can read the
+manifest-backed fixture through `NeuroCardFullJoinSampleSource`; production
+training should use live Exact Weight sampling once the external NeuroCard
+sampler is connected.
 
 ## NeuroCard Sampler Preparation
 
@@ -477,6 +482,166 @@ old smoke-domain manifest fails with a rebuild hint.
 The adapter boundary is `NeuroCardFullJoinSampleSource`. It expects the prepared
 manifest to contain canonical `ModelMetadata` and join cardinality. It does not
 estimate `|J|` from sampled row count.
+
+## Predicate-Conditioned Training Contexts
+
+Earlier ResMADE training used one fixed virtual token row for every sampled
+tuple: ordinary columns were wildcard, every table indicator was forced to
+`I_T = 1`, and every fanout column used `INV_FANOUT`. That meant query
+predicate embeddings, wildcard indicator embeddings, and wildcard fanout
+embeddings were not trained under the contexts used by JOB-light evaluation.
+
+Training now uses `PredicateTrainingContextGenerator` to produce row-specific
+query contexts. For every sampled full-join tuple, generated predicates must be
+true for that tuple, included-table indicators must match rows where the table
+is present, and fanout tokens are selected from the same included/excluded table
+semantics used by evaluation.
+
+## Row-Satisfied Predicate Generation
+
+The generator supports a configurable mixture of wildcard, equality, lower-bound
+range, and upper-bound range tokens under the current categorical predicate
+vocabulary. Equality uses the sampled value. Lower-bound predicates choose a
+domain threshold less than or equal to the sampled value and emit `>= threshold`.
+Upper-bound predicates choose a threshold greater than or equal to the sampled
+value and emit `<= threshold`. Sentinel values such as outer padding remain
+wildcard unless explicit null predicates are added later.
+
+## Connected Table-Subset Sampling
+
+`predicate_generation.table_subset_sampling: connected` samples nonempty
+connected subsets of the join graph inferred from fanout sources like `A->B`.
+For a sampled row, candidate subsets are restricted to tables whose indicator is
+`1`; the generator never trains an `I_T = 1` token against a row where `I_T = 0`.
+Omitted table indicators are wildcard.
+
+## Live NeuroCard Exact Weight Training
+
+`sample_rows.npy` is a deterministic smoke or validation fixture, not a
+production training population. The data layer now exposes explicit
+`dataset.sampling_mode` values: `fixture`, `materialized_large_sample`, and
+`live`. Fixture modes report `fixture_rows_reused`; live mode is reserved for a
+NeuroCard `FactorizedSampler`/`FactorizedSamplerIterDataset` integration and
+fails closed until those external artifacts are wired against the fixed
+complete-domain manifest.
+
+## Indicator and Fanout Token Semantics
+
+Included table indicators use `EQUAL(1)` and omitted table indicators use
+wildcard. For fanout columns, the child table determines the token: if the child
+table participates in the query, the fanout is wildcard; if the child table is
+omitted, the fanout uses `INV_FANOUT` to remove duplication. Cumulative
+inverse-fanout weights still follow the upstream convention where previous
+active fanouts weight later heads and the current fanout never weights its own
+head.
+
+## Predicate Token Coverage
+
+Training writes `predicate_token_coverage`, `generated_predicate_contexts`,
+`rejected_unsatisfied_contexts`, `fresh_sampler_rows`, and `fixture_rows_reused`
+to `training_metrics.jsonl` and `training_summary.json`. These counters make it
+visible when an evaluation token type was never observed during training.
+
+## Native Multiple Predicates Per Column
+
+JOB-light evaluation now groups SQL predicates by original database column and
+normalizes each group before inference. `ColumnPredicateSet` supports wildcard,
+single-predicate, equality, lower-bound, upper-bound, and two-bound interval
+cases. It preserves inclusivity for closed, open, and half-open intervals and
+detects contradictions such as incompatible equalities or empty ranges
+explicitly. Contradictory query columns return a zero estimate with status
+`zero_due_to_contradiction` rather than being silently overwritten.
+
+The current trained checkpoints still use the categorical legacy input
+vocabulary with one input token per original column. For compatibility, native
+two-sided range evaluation conditions that column with `WILDCARD` and applies
+the interval constraint to the output distribution from the same model pass.
+The checkpoint-incompatible multi-slot predicate input encoder remains a later
+training milestone.
+
+## Native Two-Sided Range Estimation
+
+Production JOB-light evaluation no longer estimates two-sided ranges by
+subtracting two independently conditioned complete-query cardinalities. A range
+such as `l < X <= u` is normalized into one interval token and evaluated as one
+column factor from one ResMADE backbone state:
+
+```text
+P(l < X <= u | T_<i) = F(u | T_<i) - F(l | T_<i)
+```
+
+For factorized columns, both CDF terms share the same
+`FactorizedColumnProbabilityEvaluator`, the same prefix cache, and the same
+backbone output. For unfactorized columns, the adapter builds one decoded-domain
+interval mask and sums the softmax probability mass under that mask.
+
+## Why External Cardinality Subtraction Was Removed
+
+The old inclusion-exclusion path computed two full cardinality estimates under
+two different predicate-token rows and subtracted them. JOB-light query 20 made
+the failure concrete:
+
+```text
+true_cardinality = 695701
+C_upper_hat      = 144842.47
+C_lower_hat      = 211711.12
+C_lower_hat > C_upper_hat
+```
+
+Clamping `C_upper_hat - C_lower_hat` to zero produced an epsilon Q-error of
+about `6.957e17`. The replacement only subtracts CDF values within one
+normalized column distribution, so monotonicity is enforced at the probability
+mass level instead of assumed between independent full-query estimates.
+
+On the corrected fixed-fixture checkpoint, native evaluation scored all
+`70/70` JOB-light queries with `70` model forward calls. Query 20 changed from
+the clamped-zero failure to an estimate of `28724.26` with Q-error `24.22`.
+
+## Range Bound Resolution
+
+Range thresholds do not need to be dictionary literals. Bounds are resolved
+against decoded comparable domain values, excluding SQL null sentinels,
+outer-padding sentinels, and incomparable values from ordered comparisons.
+Interval mass is checked with a `1e-7` tolerance: tiny numerical drift is
+clamped, while larger negative or greater-than-one masses raise an explicit
+diagnostic error.
+
+## Compositional Predicate Encoding
+
+The shipped training configs remain in
+`predicate_encoding.mode: categorical_legacy`. The compatibility path stores
+the requested `predicate_encoding` configuration surface, but the architecture
+still allocates independent categorical embeddings for `EQUAL(v)`,
+`LESS_EQUAL(v)`, and `GREATER_EQUAL(v)`. A future
+`predicate_encoding.mode: compositional` checkpoint should share operator,
+value, factor-digit, and range-rank representations rather than allocating a
+separate learned vector for every operator/literal pair.
+
+## Validation and Best-Checkpoint Selection
+
+The trainer records interval metrics and checkpoints, but full validation NLL,
+held-out JOB-light query evaluation, and `checkpoint_best.pt` selection are not
+yet implemented. The new configuration fields document the intended validation
+contract for the next training milestone.
+
+## Zero-Estimate Q-Error Reporting
+
+JOB-light query-level CSVs now include both the continuity metric
+`q_error_epsilon` and the supplementary `q_error_floor_one`, plus a
+`zero_estimate` flag. Summary JSONs include `zero_estimate_count` and
+floor-one percentiles so pathological zero predictions are visible without
+changing the historical headline epsilon Q-error.
+
+## JOB-light Tail Diagnostics
+
+The JOB-light evaluator records per-query status, true and estimated
+cardinality, epsilon and floor-one Q-error, zero-estimate status, native range
+count, whether legacy external subtraction was used, predicate/table counts,
+predicate columns/operators, inverse-fanout columns, per-column probability
+factors, log factors, model forward calls, and latency. Summary JSONs include
+status counts, normal-query and native-range groups, and the worst 20 queries
+with their diagnostics. Finer bucketed summaries by all tail dimensions remain
+planned.
 
 ## Complete Domains Versus Smoke Samples
 
@@ -793,8 +958,8 @@ The in-repo ResMADE evaluation command reports:
 
 For the synthetic dataset it also reports true cardinality and q-error from the
 exact oracle. JOB-light query-workload summaries with median/p90/p95 q-error
-are currently produced by the cluster-side workload evaluation artifacts rather
-than a standalone checked-in CLI.
+are produced by `model/scripts/evaluate_job_light_queries.py` in the cluster
+environment that has the JOB-light CSVs and checkpoint artifacts.
 
 The training utilities expose fanout-head weight statistics, including
 effective sample size:
@@ -806,7 +971,8 @@ effective sample size:
 ## Known Limitations
 
 - The NeuroCard adapter is a manifest/sample-source boundary; this repository
-  does not vendor NeuroCard's full Rust/index preparation stack.
+  does not vendor NeuroCard's full Rust/index preparation stack, and live
+  Exact Weight sampling still needs the external NeuroCard sampler connection.
 - Complete JOB-light preparation and smoke training have been run on the shared
   cluster; reproducing them still requires the cluster dataset files and
   upstream NeuroCard checkout/environment.
@@ -816,10 +982,12 @@ effective sample size:
   until dedicated factor-head masks are implemented.
 - Indicators and fanouts are intentionally not factorized; only ordinary data
   columns are factorized.
-- Factorized inference uses chunk enumeration, not optimized prefix dynamic
-  programming.
-- Two-sided ranges are handled outside the backbone by inclusion-exclusion, so
-  they require multiple model calls.
+- Native two-sided range evaluation is implemented for JOB-light inference, but
+  existing categorical checkpoints condition the ranged column with wildcard.
+  Training a true multi-predicate input encoder is still checkpoint
+  incompatible future work.
+- Compositional predicate encoding and real validation/checkpoint selection are
+  planned follow-up milestones.
 - Factorized checkpoints require fresh training.
 - Evaluation against stored JOB-light query workloads is still a cluster-side
   workflow rather than a self-contained local command in this repository.

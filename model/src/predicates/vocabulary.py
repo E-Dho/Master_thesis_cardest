@@ -14,9 +14,25 @@ def token_to_key(token: PredicateToken) -> str:
     return json.dumps(token.stable_key(), sort_keys=True)
 
 
+def token_to_legacy_key(token: PredicateToken) -> str:
+    """Serialize the pre-native-range token key used by older checkpoints."""
+
+    return json.dumps((token.op.value, token.value, token.upper), sort_keys=True)
+
+
 def key_to_token(key: str) -> PredicateToken:
-    op_value, value, upper = json.loads(key)
-    return PredicateToken(PredicateOp(op_value), value=value, upper=upper)
+    pieces = json.loads(key)
+    if len(pieces) == 3:
+        op_value, value, upper = pieces
+        return PredicateToken(PredicateOp(op_value), value=value, upper=upper)
+    op_value, value, upper, lower_inclusive, upper_inclusive = pieces
+    return PredicateToken(
+        PredicateOp(op_value),
+        value=value,
+        upper=upper,
+        lower_inclusive=bool(lower_inclusive),
+        upper_inclusive=bool(upper_inclusive),
+    )
 
 
 def default_predicate_tokens(column: ColumnMetadata) -> tuple[PredicateToken, ...]:
@@ -59,9 +75,13 @@ class PredicateVocabularies:
         try:
             return self.token_keys_by_column[column_index].index(key)
         except ValueError as exc:
-            raise ValueError(
-                f"token {token!r} is outside predicate vocabulary for column {column_index}"
-            ) from exc
+            legacy_key = token_to_legacy_key(token)
+            try:
+                return self.token_keys_by_column[column_index].index(legacy_key)
+            except ValueError:
+                raise ValueError(
+                    f"token {token!r} is outside predicate vocabulary for column {column_index}"
+                ) from exc
 
     def encode_rows(self, token_rows: list[list[PredicateToken]]) -> list[list[int]]:
         """Encode virtual query tuples as integer token IDs."""
@@ -81,4 +101,3 @@ class PredicateVocabularies:
     @classmethod
     def from_json_dict(cls, data: dict[str, Any]) -> "PredicateVocabularies":
         return cls(tuple(tuple(values) for values in data["token_keys_by_column"]))
-

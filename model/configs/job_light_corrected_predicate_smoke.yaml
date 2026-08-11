@@ -1,9 +1,9 @@
 dataset:
   type: neurocard_full_join
-  name: job_light_distjoin_anpm
-  csv_directory: datasets/job
+  name: job_light_corrected_predicate_smoke
   prepared_directory: data/neurocard_prepared/job_light
-  sample_batch_size: 2048
+  sampling_mode: fixture
+  sample_batch_size: 64
   num_workers: 0
 
 schema:
@@ -12,13 +12,13 @@ schema:
 
 model:
   type: predicate_resmade
-  hidden_sizes: [512, 512, 512, 512]
+  hidden_sizes: [64, 64]
   residual_connections: true
   direct_io_connections: false
   activation: relu
   input_encoding: embed
   output_encoding: one_hot
-  embedding_size: 32
+  embedding_size: 8
   residual_dropout: 0.0
   fixed_ordering: true
 
@@ -33,8 +33,8 @@ factorization:
 
 anpm:
   enabled: true
-  previous_factor_embedding_size: 64
-  hidden_size: 64
+  previous_factor_embedding_size: 16
+  hidden_size: 16
   teacher_force_during_training: true
   mask_invalid_combinations: true
   decode_chunk_size: 4096
@@ -65,15 +65,15 @@ predicate_encoding:
 
 training:
   seed: 0
-  device: auto
-  batch_size: 2048
-  learning_rate: 0.0001
+  device: cpu
+  batch_size: 64
+  learning_rate: 0.0003
   optimizer: adam
   epochs: 1
-  steps_per_epoch: 3500
+  steps_per_epoch: 30
   gradient_clip_norm: 5.0
-  checkpoint_interval_steps: 500
-  validation_interval_steps: 250
+  checkpoint_interval_steps: 0
+  validation_interval_steps: 10
   head_loss_reduction: sum
   mixed_precision: false
 
@@ -83,5 +83,5 @@ inference:
   use_log_space_product: true
 
 logging:
-  output_directory: model/runs/job_light_resmade_distjoin_anpm
-  tensorboard: true
+  output_directory: model/runs/job_light_corrected_predicate_smoke
+  tensorboard: false

@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 from dataclasses import dataclass
+from math import exp, log
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -12,12 +13,16 @@ import numpy as np
 
 from model.src.config import load_simple_yaml, validate_config
 from model.src.data.schema import ColumnKind, ModelMetadata
-from model.src.evaluation.metrics import q_error
+from model.src.evaluation.metrics import q_error, q_error_floor_one
 from model.src.inference.estimator import OnePassEstimator
 from model.src.inference.torch_estimator import TorchDistributionModel
 from model.src.model.checkpoint import load_resmade_checkpoint
+from model.src.model.output_adapter import TorchBackboneOutputs
 from model.src.predicates.generation import tokens_for_query_tables
+from model.src.predicates.generation import inverse_fanouts_for_table_subset
 from model.src.predicates.operators import PredicateOp, PredicateToken
+from model.src.predicates.sets import ColumnPredicateSet
+from model.src.predicates.torch_encoding import encode_tokens_tensor
 from model.src.predicates.vocabulary import PredicateVocabularies
 
 OP_MAP = {
@@ -75,15 +80,19 @@ def main() -> None:
         if not line.strip():
             continue
         included, predicates, true_cardinality = parse_query(line)
-        status, estimate, calls, query_wall, model_latency, inverse, branches, detail = eval_query(
+        query_eval = eval_query(
             estimator,
             wrapped,
             model,
+            vocabularies,
             metadata,
             included,
             predicates,
         )
+        status, estimate, calls, query_wall, model_latency, inverse, branches, detail = query_eval[:8]
+        factors, native_range_count, predicate_columns, predicate_operators = query_eval[8:]
         qe = q_error(estimate, true_cardinality)
+        qe_floor_one = q_error_floor_one(estimate, true_cardinality)
         rows.append(
             {
                 "query_id": query_id,
@@ -93,10 +102,23 @@ def main() -> None:
                 "true_cardinality": true_cardinality,
                 "estimated_cardinality": estimate,
                 "q_error": qe,
+                "q_error_epsilon": qe,
+                "q_error_floor_one": qe_floor_one,
+                "zero_estimate": estimate == 0.0,
+                "native_range_count": native_range_count,
+                "legacy_external_subtraction_used": False,
+                "number_of_predicates": len(predicates),
+                "number_of_tables": len(included),
+                "predicate_columns": ",".join(predicate_columns),
+                "predicate_operators": ",".join(predicate_operators),
                 "model_latency_seconds": model_latency,
                 "query_wall_seconds": query_wall,
                 "model_forward_calls": calls,
                 "inverse_fanouts": inverse,
+                "per_column_factors": ";".join(f"{value:.12g}" for value in factors),
+                "log_per_column_factors": ";".join(
+                    "-inf" if value <= 0.0 else f"{log(value):.12g}" for value in factors
+                ),
                 "branch_estimates": branches,
                 "missing_domain_predicates": detail if status == "zero_due_to_missing_domain" else "",
                 "unsupported_predicates": detail if status == "unsupported" else "",
@@ -206,6 +228,11 @@ def build_token(metadata: ModelMetadata, predicate: RawPredicate) -> TokenBuild:
     return TokenBuild(None, unsupported=f"unsupported_op:{predicate.op}")
 
 
+def raw_predicate_token(predicate: RawPredicate) -> PredicateToken:
+    op = OP_MAP[predicate.op]
+    return PredicateToken(op, value=predicate.literal)
+
+
 def _range_token_or_wildcard(
     domain: list[Any],
     op: PredicateOp,
@@ -230,72 +257,198 @@ def eval_query(
     estimator: OnePassEstimator,
     wrapped: TorchDistributionModel,
     model: Any,
+    vocabularies: PredicateVocabularies,
     metadata: ModelMetadata,
     included_tables: set[str],
     predicates: list[RawPredicate],
-) -> tuple[str, float, int, float, float, str, str, str]:
+) -> tuple[str, float, int, float, float, str, str, str, np.ndarray, int, list[str], list[str]]:
+    return eval_query_native(
+        wrapped,
+        model,
+        vocabularies,
+        metadata,
+        included_tables,
+        predicates,
+    )
+
+
+def eval_query_native(
+    wrapped: TorchDistributionModel,
+    model: Any,
+    vocabularies: PredicateVocabularies,
+    metadata: ModelMetadata,
+    included_tables: set[str],
+    predicates: list[RawPredicate],
+) -> tuple[str, float, int, float, float, str, str, str, np.ndarray, int, list[str], list[str]]:
+    import torch
+
     by_col: dict[str, list[RawPredicate]] = {}
     for predicate in predicates:
         by_col.setdefault(predicate.column, []).append(predicate)
-    two_sided = None
-    for column, col_preds in by_col.items():
-        lowers = [predicate for predicate in col_preds if predicate.op in {">", ">="}]
-        uppers = [predicate for predicate in col_preds if predicate.op in {"<", "<="}]
-        if lowers and uppers:
-            two_sided = (column, lowers[0], uppers[0])
-            break
-
-    if two_sided is None:
-        ordinary, missing, unsupported = build_ordinary(metadata, predicates)
-        if unsupported:
-            return "unsupported", 0.0, 0, 0.0, 0.0, "", "", ";".join(sorted(set(unsupported)))
-        if missing:
-            return "zero_due_to_missing_domain", 0.0, 0, 0.0, 0.0, "", "", ";".join(sorted(set(missing)))
-        estimate, calls, wall, model_latency, inverse = estimate_once(
-            estimator, wrapped, model, metadata, included_tables, ordinary
-        )
-        return "ok", estimate, calls, wall, model_latency, ",".join(sorted(inverse)), "", ""
-
-    two_col, lower, upper = two_sided
-    base_predicates = [predicate for predicate in predicates if predicate.column != two_col or predicate is upper]
-    ordinary, missing, unsupported = build_ordinary(metadata, base_predicates)
+    output_tokens: dict[str, PredicateToken] = {}
+    conditioning_tokens: dict[str, PredicateToken] = {}
+    missing = []
+    unsupported = []
+    native_range_count = 0
+    for column_name, col_preds in by_col.items():
+        try:
+            column = metadata.columns[metadata.column_index(column_name)]
+        except KeyError:
+            unsupported.append(f"unknown_column:{column_name}")
+            continue
+        if column.kind != ColumnKind.DATA:
+            unsupported.append(f"non_data_predicate:{column_name}")
+            continue
+        if any(predicate.op == "=" for predicate in col_preds):
+            for predicate in col_preds:
+                if predicate.op == "=":
+                    canonical = matching_domain_value(column.domain, predicate.literal)
+                    if canonical is _MISSING:
+                        missing.append(column_name)
+                    break
+        try:
+            predicate_set = ColumnPredicateSet(
+                tuple(raw_predicate_token(predicate) for predicate in col_preds)
+            )
+            normalized = predicate_set.normalize(max_predicates=2)
+        except (TypeError, ValueError) as exc:
+            unsupported.append(f"{column_name}:{exc}")
+            continue
+        if normalized.contradiction:
+            zero_factors = np.zeros(len(metadata.columns), dtype=float)
+            return (
+                "zero_due_to_contradiction",
+                0.0,
+                0,
+                0.0,
+                0.0,
+                ",".join(sorted(inverse_fanouts_for_table_subset(metadata, included_tables))),
+                "",
+                column_name,
+                zero_factors,
+                int(normalized.is_native_range),
+                sorted(by_col),
+                sorted(predicate.op for predicate in predicates),
+            )
+        output_token = normalized.output_token()
+        if output_token.op != PredicateOp.WILDCARD:
+            output_tokens[column_name] = output_token
+        if normalized.is_native_range:
+            native_range_count += 1
+            conditioning_tokens[column_name] = PredicateToken.wildcard()
+        elif output_token.op != PredicateOp.WILDCARD:
+            built = build_token(metadata, col_preds[0])
+            if built.unsupported:
+                unsupported.append(f"{column_name}:{built.unsupported}")
+            elif built.zero:
+                missing.append(column_name)
+            elif built.token is not None:
+                conditioning_tokens[column_name] = built.token
     if unsupported:
-        return "unsupported", 0.0, 0, 0.0, 0.0, "", "", ";".join(sorted(set(unsupported)))
+        return _empty_eval("unsupported", ";".join(sorted(set(unsupported))), metadata, predicates, included_tables)
     if missing:
-        return "zero_due_to_missing_domain", 0.0, 0, 0.0, 0.0, "", "", ";".join(sorted(set(missing)))
-    upper_est, upper_calls, upper_wall, upper_model, inverse = estimate_once(
-        estimator, wrapped, model, metadata, included_tables, ordinary
+        return _empty_eval("zero_due_to_missing_domain", ";".join(sorted(set(missing))), metadata, predicates, included_tables)
+
+    inverse_fanouts = set(inverse_fanouts_for_table_subset(metadata, included_tables))
+    tokens = tokens_for_query_tables(metadata, included_tables, inverse_fanouts, conditioning_tokens)
+    before = model.forward_calls
+    start = perf_counter()
+    token_ids = encode_tokens_tensor([tokens], vocabularies, device=wrapped.device)
+    model.eval()
+    with torch.no_grad():
+        backbone_start = perf_counter()
+        logits = model(token_ids)
+        wrapped.last_backbone_seconds = perf_counter() - backbone_start
+        outputs = TorchBackboneOutputs(
+            logits=logits,
+            split_logits=model.split_logits(logits),
+        )
+        decode_start = perf_counter()
+        factor_values = []
+        for column_index, column in enumerate(metadata.columns):
+            output_token = output_tokens.get(column.name, tokens[column_index])
+            if output_token.op == PredicateOp.RANGE:
+                if metadata.factorization_plan.enabled:
+                    factor = wrapped.output_adapter.interval_mass(
+                        original_column_index=column_index,
+                        backbone_outputs=outputs,
+                        lower_literal=output_token.value,
+                        upper_literal=output_token.upper,
+                        lower_inclusive=output_token.lower_inclusive,
+                        upper_inclusive=output_token.upper_inclusive,
+                    )
+                else:
+                    factor = wrapped.output_adapter.interval_mass(
+                        original_column_index=column_index,
+                        backbone_outputs=outputs,
+                        metadata=metadata,
+                        lower_literal=output_token.value,
+                        upper_literal=output_token.upper,
+                        lower_inclusive=output_token.lower_inclusive,
+                        upper_inclusive=output_token.upper_inclusive,
+                    )
+            elif metadata.factorization_plan.enabled:
+                factor = wrapped.output_adapter.column_factor(
+                    original_column_index=column_index,
+                    backbone_outputs=outputs,
+                    predicate_token=output_token,
+                )
+            else:
+                factor = wrapped.output_adapter.column_factor(
+                    original_column_index=column_index,
+                    backbone_outputs=outputs,
+                    metadata=metadata,
+                    predicate_token=output_token,
+                )
+            factor_values.append(float(factor[0].detach().cpu()))
+        wrapped.last_decode_seconds = perf_counter() - decode_start
+    factors = np.array(factor_values, dtype=float)
+    calls = model.forward_calls - before
+    if metadata.full_join_cardinality == 0 or np.any(factors == 0):
+        estimate = 0.0
+    else:
+        estimate = exp(log(metadata.full_join_cardinality) + float(np.sum(np.log(factors))))
+    wall = perf_counter() - start
+    if estimate < 0 or not np.isfinite(estimate):
+        raise ValueError(f"invalid cardinality estimate {estimate!r}")
+    status = "ok_native_range" if native_range_count else "ok"
+    model_latency = float((wrapped.last_backbone_seconds or 0.0) + (wrapped.last_decode_seconds or 0.0))
+    return (
+        status,
+        estimate,
+        calls,
+        wall,
+        model_latency,
+        ",".join(sorted(inverse_fanouts)),
+        "",
+        "",
+        factors,
+        native_range_count,
+        sorted(by_col),
+        sorted(predicate.op for predicate in predicates),
     )
 
-    subtract_pred = lower_complement(lower)
-    subtract_ordinary = dict(ordinary)
-    built = build_token(metadata, subtract_pred)
-    if built.unsupported:
-        return "unsupported", 0.0, upper_calls, upper_wall, upper_model, ",".join(sorted(inverse)), "", built.unsupported
-    if built.zero:
-        lower_est = 0.0
-        lower_calls = 0
-        lower_wall = 0.0
-        lower_model = 0.0
-    else:
-        if built.token is None:
-            subtract_ordinary.pop(two_col, None)
-        else:
-            subtract_ordinary[two_col] = built.token
-        lower_est, lower_calls, lower_wall, lower_model, _ = estimate_once(
-            estimator, wrapped, model, metadata, included_tables, subtract_ordinary
-        )
-    estimate = max(0.0, upper_est - lower_est)
-    branches = f"upper={upper_est};lower={lower_est}"
+
+def _empty_eval(
+    status: str,
+    detail: str,
+    metadata: ModelMetadata,
+    predicates: list[RawPredicate],
+    included_tables: set[str],
+) -> tuple[str, float, int, float, float, str, str, str, np.ndarray, int, list[str], list[str]]:
     return (
-        "ok_inclusion_exclusion",
-        estimate,
-        upper_calls + lower_calls,
-        upper_wall + lower_wall,
-        upper_model + lower_model,
-        ",".join(sorted(inverse)),
-        branches,
+        status,
+        0.0,
+        0,
+        0.0,
+        0.0,
+        ",".join(sorted(inverse_fanouts_for_table_subset(metadata, included_tables))),
         "",
+        detail,
+        np.zeros(len(metadata.columns), dtype=float),
+        0,
+        sorted({predicate.column for predicate in predicates}),
+        sorted(predicate.op for predicate in predicates),
     )
 
 
@@ -313,6 +466,9 @@ def build_ordinary(
         elif built.zero:
             missing.append(predicate.column)
         elif built.token is not None:
+            if predicate.column in ordinary:
+                unsupported.append(f"multiple_predicates:{predicate.column}")
+                continue
             ordinary[predicate.column] = built.token
     return ordinary, missing, unsupported
 
@@ -325,11 +481,7 @@ def estimate_once(
     included_tables: set[str],
     ordinary: dict[str, PredicateToken],
 ) -> tuple[float, int, float, float, set[str]]:
-    inverse_fanouts = {
-        column.name
-        for column in metadata.columns
-        if column.kind == ColumnKind.FANOUT and column.table not in included_tables
-    }
+    inverse_fanouts = set(inverse_fanouts_for_table_subset(metadata, included_tables))
     tokens = tokens_for_query_tables(metadata, included_tables, inverse_fanouts, ordinary)
     before = model.forward_calls
     result = estimator.estimate(tokens, use_log_space_product=True)
@@ -349,14 +501,17 @@ def summarize(
 ) -> dict[str, Any]:
     scored = [
         row for row in rows
-        if row["status"] in {"ok", "ok_inclusion_exclusion", "zero_due_to_missing_domain"}
+        if row["status"] in {"ok", "ok_native_range", "zero_due_to_missing_domain", "zero_due_to_contradiction"}
     ]
-    ok_rows = [row for row in rows if row["status"] in {"ok", "ok_inclusion_exclusion"}]
+    ok_rows = [row for row in rows if row["status"] in {"ok", "ok_native_range"}]
     status_counts: dict[str, int] = {}
     for row in rows:
         status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
     all_q = [float(row["q_error"]) for row in scored]
+    all_q_floor_one = [float(row["q_error_floor_one"]) for row in scored]
     ok_q = [float(row["q_error"]) for row in ok_rows]
+    native_q = [float(row["q_error"]) for row in rows if int(row["native_range_count"]) > 0]
+    normal_q = [float(row["q_error"]) for row in rows if int(row["native_range_count"]) == 0 and row["status"] == "ok"]
     parameter_size = sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
     return {
         "checkpoint": str(checkpoint),
@@ -377,6 +532,8 @@ def summarize(
         "queries_total": len(rows),
         "queries_scored": len(scored),
         "queries_ok_or_inclusion_exclusion": len(ok_rows),
+        "queries_ok_or_native_range": len(ok_rows),
+        "zero_estimate_count": sum(1 for row in rows if str(row["zero_estimate"]) == "True"),
         "results_path": str(results_path),
         "status_counts": status_counts,
         "summary_path": str(summary_path),
@@ -385,10 +542,24 @@ def summarize(
         "all_scored_p95_q_error": _percentile(all_q, 95),
         "all_scored_p99_q_error": _percentile(all_q, 99),
         "all_scored_max_q_error": max(all_q) if all_q else None,
+        "all_scored_median_q_error_floor_one": _percentile(all_q_floor_one, 50),
+        "all_scored_p95_q_error_floor_one": _percentile(all_q_floor_one, 95),
+        "all_scored_max_q_error_floor_one": max(all_q_floor_one) if all_q_floor_one else None,
         "ok_median_q_error": _percentile(ok_q, 50),
         "ok_p90_q_error": _percentile(ok_q, 90),
         "ok_p95_q_error": _percentile(ok_q, 95),
         "ok_max_q_error": max(ok_q) if ok_q else None,
+        "native_range_median_q_error": _percentile(native_q, 50),
+        "native_range_p95_q_error": _percentile(native_q, 95),
+        "native_range_max_q_error": max(native_q) if native_q else None,
+        "normal_median_q_error": _percentile(normal_q, 50),
+        "normal_p95_q_error": _percentile(normal_q, 95),
+        "normal_max_q_error": max(normal_q) if normal_q else None,
+        "worst_20_queries": sorted(
+            rows,
+            key=lambda row: float(row["q_error"]),
+            reverse=True,
+        )[:20],
     }
 
 
