@@ -14,7 +14,8 @@ from model.src.predicates.generation import (
     tokens_for_query_tables,
     token_coverage,
 )
-from model.src.predicates.operators import PredicateOp
+from model.src.predicates.operators import PredicateOp, PredicateToken
+from model.src.predicates.vocabulary import PredicateVocabularies
 from model.src.training.losses import cumulative_inverse_fanout_weights
 
 
@@ -108,6 +109,168 @@ class PredicateTrainingContextTest(unittest.TestCase):
         self.assertEqual(
             unseen_required_token_types(training, requirements),
             ["x:less_equal"],
+        )
+
+    def test_duet_batch_bounds_uses_one_shared_context(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:3]
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "duet_batch_bounds",
+                "wildcard_probability": 1.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "table_subset_sampling": "connected",
+                "per_row_contexts": 1,
+            }
+        )
+        contexts, repeated_rows, stats = generator.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(7),
+        )
+
+        self.assertEqual(stats.generated_contexts, 3)
+        self.assertEqual(repeated_rows.shape[0], 3)
+        self.assertEqual(len({context.tokens for context in contexts}), 1)
+        for context, row in zip(contexts, repeated_rows):
+            self.assertTrue(context_satisfies_row(context, row, source.metadata))
+
+    def test_duet_batch_lower_bounds_are_no_greater_than_batch_min(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:3]
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "duet_batch_bounds",
+                "wildcard_probability": 0.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 1.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "table_subset_sampling": "full",
+            }
+        )
+        contexts, _, _ = generator.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(3),
+        )
+        token = contexts[0].ordinary_predicates["B.value"]
+        batch_values = [source.metadata.columns[1].domain[int(row[1])] for row in rows]
+        self.assertEqual(token.op, PredicateOp.GREATER_EQUAL)
+        self.assertLessEqual(token.value, min(batch_values))
+
+    def test_duet_batch_upper_bounds_are_no_less_than_batch_max(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:3]
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "duet_batch_bounds",
+                "wildcard_probability": 0.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 1.0,
+                "native_range_probability": 0.0,
+                "table_subset_sampling": "full",
+            }
+        )
+        contexts, _, _ = generator.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(4),
+        )
+        token = contexts[0].ordinary_predicates["B.value"]
+        batch_values = [source.metadata.columns[1].domain[int(row[1])] for row in rows]
+        self.assertEqual(token.op, PredicateOp.LESS_EQUAL)
+        self.assertGreaterEqual(token.value, max(batch_values))
+
+    def test_duet_batch_native_range_toggle_controls_range_tokens(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:3]
+        base_config = {
+            "enabled": True,
+            "strategy": "duet_batch_bounds",
+            "wildcard_probability": 0.0,
+            "equality_probability": 0.0,
+            "lower_bound_probability": 0.0,
+            "upper_bound_probability": 0.0,
+            "native_range_probability": 1.0,
+            "table_subset_sampling": "full",
+        }
+        off_contexts, _, _ = PredicateTrainingContextGenerator(
+            {**base_config, "enable_native_range_tokens": False}
+        ).generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(5),
+        )
+        self.assertNotIn(
+            PredicateOp.RANGE,
+            {token.op for token in off_contexts[0].ordinary_predicates.values()},
+        )
+
+        on_contexts, _, _ = PredicateTrainingContextGenerator(
+            {**base_config, "enable_native_range_tokens": True}
+        ).generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(5),
+        )
+        self.assertIn(
+            PredicateOp.RANGE,
+            {token.op for token in on_contexts[0].ordinary_predicates.values()},
+        )
+        coverage = token_coverage([on_contexts[0].tokens], source.metadata)
+        self.assertGreater(
+            sum(column_counts[PredicateOp.RANGE.value] for column_counts in coverage.values()),
+            0,
+        )
+
+    def test_duet_batch_context_has_positive_fanout_ess_and_no_indicator_contradictions(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:3]
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "duet_batch_bounds",
+                "wildcard_probability": 1.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "table_subset_sampling": "connected",
+            }
+        )
+        contexts, repeated_rows, stats = generator.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(8),
+        )
+        self.assertEqual(stats.included_indicator_contradictions, 0)
+        tokens = [list(context.tokens) for context in contexts]
+        weights = cumulative_inverse_fanout_weights(repeated_rows, tokens, source.metadata)
+        for fanout_index in source.metadata.fanout_indices():
+            self.assertGreater(float(weights[:, fanout_index].sum()), 0.0)
+
+    def test_native_range_vocab_is_configured_explicitly(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        default_vocab = PredicateVocabularies.from_metadata(source.metadata)
+        with self.assertRaises(ValueError):
+            default_vocab.encode_token(1, PredicateToken.range("b1", "b2"))
+
+        range_vocab = PredicateVocabularies.from_metadata(
+            source.metadata,
+            include_native_ranges=True,
+            native_range_max_domain_size=16,
+        )
+        self.assertIsInstance(
+            range_vocab.encode_token(1, PredicateToken.range("b1", "b2")),
+            int,
         )
 
 

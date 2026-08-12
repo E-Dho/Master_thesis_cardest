@@ -35,7 +35,12 @@ def key_to_token(key: str) -> PredicateToken:
     )
 
 
-def default_predicate_tokens(column: ColumnMetadata) -> tuple[PredicateToken, ...]:
+def default_predicate_tokens(
+    column: ColumnMetadata,
+    *,
+    include_native_ranges: bool = False,
+    native_range_max_domain_size: int = 512,
+) -> tuple[PredicateToken, ...]:
     """Build a conservative predicate-token domain for one modeled column."""
 
     if column.kind == ColumnKind.FANOUT:
@@ -47,6 +52,11 @@ def default_predicate_tokens(column: ColumnMetadata) -> tuple[PredicateToken, ..
         tokens.append(PredicateToken.equal(value))
         tokens.append(PredicateToken(PredicateOp.LESS_EQUAL, value=value))
         tokens.append(PredicateToken(PredicateOp.GREATER_EQUAL, value=value))
+    if include_native_ranges and len(column.domain) <= native_range_max_domain_size:
+        comparable_values = _comparable_domain_values(column.domain)
+        for lower_index, lower in enumerate(comparable_values):
+            for upper in comparable_values[lower_index:]:
+                tokens.append(PredicateToken.range(lower, upper))
     return tuple(tokens)
 
 
@@ -57,13 +67,28 @@ class PredicateVocabularies:
     token_keys_by_column: tuple[tuple[str, ...], ...]
 
     @classmethod
-    def from_metadata(cls, metadata: ModelMetadata) -> "PredicateVocabularies":
+    def from_metadata(
+        cls,
+        metadata: ModelMetadata,
+        *,
+        include_native_ranges: bool = False,
+        native_range_max_domain_size: int = 512,
+    ) -> "PredicateVocabularies":
         token_columns = []
         for column in metadata.columns:
             if column.predicate_domain is not None:
                 token_columns.append(tuple(str(value) for value in column.predicate_domain))
             else:
-                token_columns.append(tuple(token_to_key(token) for token in default_predicate_tokens(column)))
+                token_columns.append(
+                    tuple(
+                        token_to_key(token)
+                        for token in default_predicate_tokens(
+                            column,
+                            include_native_ranges=include_native_ranges,
+                            native_range_max_domain_size=native_range_max_domain_size,
+                        )
+                    )
+                )
         return cls(tuple(token_columns))
 
     @property
@@ -101,3 +126,19 @@ class PredicateVocabularies:
     @classmethod
     def from_json_dict(cls, data: dict[str, Any]) -> "PredicateVocabularies":
         return cls(tuple(tuple(values) for values in data["token_keys_by_column"]))
+
+
+def _comparable_domain_values(domain: tuple[Any, ...]) -> list[Any]:
+    values = []
+    for value in domain:
+        if isinstance(value, str) and value.startswith("__"):
+            continue
+        try:
+            _ = value <= value
+        except TypeError:
+            continue
+        values.append(value)
+    try:
+        return sorted(values)
+    except TypeError:
+        return []

@@ -68,13 +68,13 @@ _TOKEN_COVERAGE_KEYS = (
 
 
 class PredicateTrainingContextGenerator:
-    """Generate query contexts whose predicates are true for each sampled row.
+    """Generate query contexts whose predicates are true for sampled rows.
 
     Training must expose the predicate-conditioned network to the same token
-    semantics used at evaluation time. For each encoded full-join tuple this
-    generator samples a connected table subset, assigns indicators/fanouts from
-    that subset, and samples ordinary predicates whose Boolean predicate is
-    satisfied by the tuple's decoded column value.
+    semantics used at evaluation time. The default strategy samples one
+    row-satisfied context per encoded full-join tuple. The Duet-style strategy
+    samples one shared context from batch-level bounds and applies it to every
+    row in the optimizer batch.
     """
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
@@ -89,6 +89,19 @@ class PredicateTrainingContextGenerator:
         self.lower_bound_probability = float(self.config.get("lower_bound_probability", 0.2))
         self.upper_bound_probability = float(self.config.get("upper_bound_probability", 0.2))
         self.native_range_probability = float(self.config.get("native_range_probability", 0.0))
+        self.strategy = str(self.config.get("strategy", "row_satisfied"))
+        if self.strategy not in {"row_satisfied", "duet_batch_bounds"}:
+            raise ValueError(
+                "predicate_generation.strategy must be row_satisfied or duet_batch_bounds"
+            )
+        self.enable_native_range_tokens = bool(
+            self.config.get("enable_native_range_tokens", False)
+        )
+        self.native_range_max_domain_size = int(
+            self.config.get("native_range_max_domain_size", 512)
+        )
+        if self.native_range_max_domain_size <= 0:
+            raise ValueError("predicate_generation.native_range_max_domain_size must be positive")
         probabilities = (
             self.wildcard_probability,
             self.equality_probability,
@@ -114,6 +127,12 @@ class PredicateTrainingContextGenerator:
         """Generate contexts and row targets, repeating rows per context."""
 
         encoded_rows = np.asarray(encoded_rows, dtype=int)
+        if self.strategy == "duet_batch_bounds" and not self.legacy_fixed_context:
+            return self._generate_duet_batch_bounds(
+                encoded_rows=encoded_rows,
+                metadata=metadata,
+                rng=rng,
+            )
         contexts: list[GeneratedTrainingContext] = []
         repeated_rows: list[np.ndarray] = []
         rejected = 0
@@ -145,6 +164,62 @@ class PredicateTrainingContextGenerator:
                 rejected_unsatisfied_contexts=rejected,
                 included_indicator_contradictions=contradictions,
             ),
+        )
+
+    def _generate_duet_batch_bounds(
+        self,
+        *,
+        encoded_rows: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
+        """Generate shared Duet-style contexts from batch-level value bounds."""
+
+        contexts: list[GeneratedTrainingContext] = []
+        repeated_rows: list[np.ndarray] = []
+        rejected = 0
+        for _ in range(self.per_row_contexts if self.enabled else 1):
+            context = self._generate_one_for_batch(encoded_rows, metadata, rng)
+            for row in encoded_rows:
+                if not context_satisfies_row(context, row, metadata):
+                    rejected += 1
+                    continue
+                contexts.append(context)
+                repeated_rows.append(row)
+        if not contexts:
+            raise ValueError("predicate generation rejected every sampled context")
+        return (
+            contexts,
+            np.stack(repeated_rows, axis=0),
+            PredicateGenerationStats(
+                generated_contexts=len(contexts),
+                rejected_unsatisfied_contexts=rejected,
+                included_indicator_contradictions=0,
+            ),
+        )
+
+    def _generate_one_for_batch(
+        self,
+        encoded_rows: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> GeneratedTrainingContext:
+        included_tables = self._sample_batch_included_tables(encoded_rows, metadata, rng)
+        inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
+        ordinary = self._ordinary_predicates_for_batch(encoded_rows, metadata, rng)
+        tokens = tuple(
+            tokens_for_query_tables(
+                metadata,
+                set(included_tables),
+                set(inverse_fanouts),
+                dict(ordinary),
+            )
+        )
+        return GeneratedTrainingContext(
+            tokens=tokens,
+            included_tables=frozenset(included_tables),
+            inverse_fanout_columns=frozenset(inverse_fanouts),
+            ordinary_predicates=ordinary,
         )
 
     def _generate_one(
@@ -215,6 +290,33 @@ class PredicateTrainingContextGenerator:
         index = int(rng.integers(0, len(candidates)))
         return frozenset(candidates[index])
 
+    def _sample_batch_included_tables(
+        self,
+        encoded_rows: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> frozenset[str]:
+        present_by_row = [present_tables_for_row(row, metadata) for row in encoded_rows]
+        if not present_by_row:
+            return frozenset()
+        common_present = set(present_by_row[0])
+        for present in present_by_row[1:]:
+            common_present &= set(present)
+        if not common_present:
+            return frozenset()
+        if self.table_subset_sampling == "full" or not self.enabled:
+            return frozenset(common_present)
+        if self.table_subset_sampling != "connected":
+            raise ValueError(
+                f"unsupported predicate_generation.table_subset_sampling "
+                f"{self.table_subset_sampling!r}"
+            )
+        candidates = connected_table_subsets(metadata, allowed_tables=frozenset(common_present))
+        if not candidates:
+            return frozenset(common_present)
+        index = int(rng.integers(0, len(candidates)))
+        return frozenset(candidates[index])
+
     def _ordinary_predicates(
         self,
         encoded_row: np.ndarray,
@@ -228,6 +330,36 @@ class PredicateTrainingContextGenerator:
                 continue
             value = column.domain[int(encoded_row[column_index])]
             token = self._sample_satisfied_predicate(caches[column_index], value, rng)
+            if token.op != PredicateOp.WILDCARD:
+                ordinary[column.name] = token
+        return ordinary
+
+    def _ordinary_predicates_for_batch(
+        self,
+        encoded_rows: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> dict[str, PredicateToken]:
+        ordinary: dict[str, PredicateToken] = {}
+        caches = self._column_caches(metadata)
+        for column_index, column in enumerate(metadata.columns):
+            if column.kind != ColumnKind.DATA:
+                continue
+            cache = caches[column_index]
+            if cache is None:
+                continue
+            values = [
+                column.domain[int(row[column_index])]
+                for row in encoded_rows
+            ]
+            if any(value not in cache.comparable_set for value in values):
+                continue
+            token = self._sample_batch_satisfied_predicate(
+                cache,
+                column_domain_size=column.domain_size,
+                values=values,
+                rng=rng,
+            )
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
         return ordinary
@@ -264,6 +396,153 @@ class PredicateTrainingContextGenerator:
             threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
             return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
         return PredicateToken.wildcard()
+
+    def _sample_batch_satisfied_predicate(
+        self,
+        cache: _ColumnPredicateCache,
+        *,
+        column_domain_size: int,
+        values: list[Any],
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        comparable_values = cache.comparable_values
+        batch_min = min(values)
+        batch_max = max(values)
+        roll = float(rng.random() * self._probability_total)
+        if roll < self.wildcard_probability:
+            return PredicateToken.wildcard()
+        roll -= self.wildcard_probability
+        if roll < self.equality_probability:
+            if all(value == values[0] for value in values):
+                return PredicateToken.equal(values[0])
+            return self._sample_batch_range_style_predicate(
+                comparable_values,
+                batch_min=batch_min,
+                batch_max=batch_max,
+                column_domain_size=column_domain_size,
+                rng=rng,
+            )
+        roll -= self.equality_probability
+        if roll < self.lower_bound_probability:
+            return self._sample_batch_lower_bound(
+                comparable_values,
+                batch_min=batch_min,
+                rng=rng,
+            )
+        roll -= self.lower_bound_probability
+        if roll < self.upper_bound_probability:
+            return self._sample_batch_upper_bound(
+                comparable_values,
+                batch_max=batch_max,
+                rng=rng,
+            )
+        return self._sample_batch_range_style_predicate(
+            comparable_values,
+            batch_min=batch_min,
+            batch_max=batch_max,
+            column_domain_size=column_domain_size,
+            rng=rng,
+        )
+
+    def _sample_batch_range_style_predicate(
+        self,
+        comparable_values: tuple[Any, ...],
+        *,
+        batch_min: Any,
+        batch_max: Any,
+        column_domain_size: int,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        range_allowed = (
+            self.enable_native_range_tokens
+            and self.native_range_probability > 0.0
+            and column_domain_size <= self.native_range_max_domain_size
+        )
+        choices: list[tuple[str, float]] = [
+            ("lower", max(0.0, self.lower_bound_probability)),
+            ("upper", max(0.0, self.upper_bound_probability)),
+        ]
+        if range_allowed:
+            choices.append(("range", max(0.0, self.native_range_probability)))
+        total = sum(weight for _, weight in choices)
+        if total <= 0.0:
+            choices = [("lower", 1.0), ("upper", 1.0)]
+            total = 2.0
+        roll = float(rng.random() * total)
+        for name, weight in choices:
+            if roll < weight:
+                if name == "lower":
+                    return self._sample_batch_lower_bound(
+                        comparable_values,
+                        batch_min=batch_min,
+                        rng=rng,
+                    )
+                if name == "upper":
+                    return self._sample_batch_upper_bound(
+                        comparable_values,
+                        batch_max=batch_max,
+                        rng=rng,
+                    )
+                return self._sample_batch_native_range(
+                    comparable_values,
+                    batch_min=batch_min,
+                    batch_max=batch_max,
+                    rng=rng,
+                )
+            roll -= weight
+        return self._sample_batch_upper_bound(
+            comparable_values,
+            batch_max=batch_max,
+            rng=rng,
+        )
+
+    @staticmethod
+    def _sample_batch_lower_bound(
+        comparable_values: tuple[Any, ...],
+        *,
+        batch_min: Any,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        stop = bisect_right(comparable_values, batch_min)
+        if stop <= 0:
+            return PredicateToken.wildcard()
+        threshold = comparable_values[int(rng.integers(0, stop))]
+        return PredicateToken(PredicateOp.GREATER_EQUAL, value=threshold)
+
+    @staticmethod
+    def _sample_batch_upper_bound(
+        comparable_values: tuple[Any, ...],
+        *,
+        batch_max: Any,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        start = bisect_left(comparable_values, batch_max)
+        if start >= len(comparable_values):
+            return PredicateToken.wildcard()
+        threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
+        return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
+
+    def _sample_batch_native_range(
+        self,
+        comparable_values: tuple[Any, ...],
+        *,
+        batch_min: Any,
+        batch_max: Any,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        lower = self._sample_batch_lower_bound(
+            comparable_values,
+            batch_min=batch_min,
+            rng=rng,
+        )
+        upper = self._sample_batch_upper_bound(
+            comparable_values,
+            batch_max=batch_max,
+            rng=rng,
+        )
+        if lower.op == PredicateOp.WILDCARD or upper.op == PredicateOp.WILDCARD:
+            return PredicateToken.wildcard()
+        return PredicateToken.range(lower.value, upper.value)
 
     def _column_caches(
         self,
@@ -605,6 +884,9 @@ def _literal_key(value: Any, upper: Any) -> str:
 def _available_literal_token_count(domain: tuple[Any, ...], op: PredicateOp) -> int:
     if op in {PredicateOp.EQUAL, PredicateOp.LESS_EQUAL, PredicateOp.GREATER_EQUAL}:
         return len(domain)
+    if op == PredicateOp.RANGE:
+        value_count = len(comparable_domain_values(domain))
+        return value_count * (value_count + 1) // 2
     return 0
 
 

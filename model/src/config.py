@@ -123,6 +123,18 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("predicate_generation probabilities must be nonnegative")
     if sum(probabilities) <= 0.0:
         raise ValueError("predicate_generation probabilities must have positive total")
+    strategy = str(predicate_generation.get("strategy", "row_satisfied"))
+    if strategy not in {"row_satisfied", "duet_batch_bounds"}:
+        raise ValueError(
+            "predicate_generation.strategy must be row_satisfied or duet_batch_bounds"
+        )
+    native_range_max_domain_size = int(
+        predicate_generation.get("native_range_max_domain_size", 512)
+    )
+    if native_range_max_domain_size <= 0:
+        raise ValueError(
+            "predicate_generation.native_range_max_domain_size must be positive"
+        )
     per_row_contexts = int(predicate_generation.get("per_row_contexts", 1))
     if per_row_contexts <= 0:
         raise ValueError("predicate_generation.per_row_contexts must be positive")

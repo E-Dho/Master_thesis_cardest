@@ -76,7 +76,7 @@ class TrainingStepResult:
 def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> PredicateResMADE:
     model_config = config["model"]
     predicate_encoding = config.get("predicate_encoding", {})
-    vocabularies = PredicateVocabularies.from_metadata(metadata)
+    vocabularies = predicate_vocabularies_from_config(metadata, config)
     plan = getattr(metadata, "factorization_plan", None)
     output_head_specs = None
     if plan is not None and plan.enabled:
@@ -109,6 +109,26 @@ def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> Predi
             factorization_plan=plan,
             anpm_config=ANPMConfig.from_dict(config.get("anpm", {})),
         )
+    )
+
+
+def predicate_vocabularies_from_config(
+    metadata: object,
+    config: dict[str, Any],
+) -> PredicateVocabularies:
+    """Build predicate vocabularies, including optional native training ranges."""
+
+    predicate_generation = config.get("predicate_generation", {})
+    include_native_ranges = bool(
+        predicate_generation.get("enable_native_range_tokens", False)
+    )
+    native_range_max_domain_size = int(
+        predicate_generation.get("native_range_max_domain_size", 512)
+    )
+    return PredicateVocabularies.from_metadata(
+        metadata,
+        include_native_ranges=include_native_ranges,
+        native_range_max_domain_size=native_range_max_domain_size,
     )
 
 
@@ -172,7 +192,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     torch.manual_seed(seed)
     device = resolve_device(config)
     metadata = sample_source.metadata
-    vocabularies = PredicateVocabularies.from_metadata(metadata)
+    vocabularies = predicate_vocabularies_from_config(metadata, config)
     model = build_resmade_from_config(metadata, config).to(device)
     optimizer_name = str(training.get("optimizer", "adam")).lower()
     optimizer_class = torch.optim.AdamW if optimizer_name == "adamw" else torch.optim.Adam
