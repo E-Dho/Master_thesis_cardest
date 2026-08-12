@@ -58,15 +58,29 @@ class PredicateResMADEConfig:
             "categorical_legacy",
             "compositional",
             "hybrid",
+            "two_slot",
         }:
             raise ValueError(
-                "predicate_encoding_mode must be categorical_legacy, compositional, or hybrid"
+                "predicate_encoding_mode must be categorical_legacy, compositional, hybrid, or two_slot"
             )
-        if self.predicate_encoding_mode in {"compositional", "hybrid"}:
+        if self.predicate_encoding_mode in {"compositional", "hybrid", "two_slot"}:
             if self.input_encoding != "embed":
                 raise ValueError(
-                    "compositional/hybrid predicate encoding requires input_encoding=embed"
+                    "compositional/hybrid/two_slot predicate encoding requires input_encoding=embed"
                 )
+        if self.predicate_encoding_mode == "two_slot":
+            if self.value_bins_by_column is None:
+                raise ValueError("two_slot predicate encoding requires value_bins_by_column")
+            if len(self.value_bins_by_column) != len(self.predicate_input_bins):
+                raise ValueError("value_bins_by_column must align with predicate_input_bins")
+            for size_name, size in [
+                ("operator_embedding_size", self.operator_embedding_size),
+                ("value_embedding_size", self.value_embedding_size),
+                ("merge_hidden_size", self.merge_hidden_size),
+            ]:
+                if size <= 0:
+                    raise ValueError(f"{size_name} must be positive")
+        if self.predicate_encoding_mode in {"compositional", "hybrid"}:
             feature_tables = (
                 self.token_operator_ids_by_column,
                 self.token_value_ids_by_column,
@@ -275,6 +289,33 @@ class PredicateResMADE(nn.Module):
                 [nn.Embedding(num_embeddings=bins, embedding_dim=config.embedding_size)
                  for bins in config.predicate_input_bins]
             )
+        elif config.input_encoding == "embed" and config.predicate_encoding_mode == "two_slot":
+            self.embeddings = nn.ModuleList()
+            self.literal_embeddings = nn.ModuleList()
+            self.operator_embedding = nn.Embedding(
+                config.operator_bins, config.operator_embedding_size
+            )
+            assert config.value_bins_by_column is not None
+            self.value_embeddings = nn.ModuleList(
+                [
+                    nn.Embedding(num_embeddings=bins, embedding_dim=config.value_embedding_size)
+                    for bins in config.value_bins_by_column
+                ]
+            )
+            merge_input = 2 * (
+                config.operator_embedding_size + config.value_embedding_size
+            )
+            self.predicate_merge_networks = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(merge_input, config.merge_hidden_size),
+                        self._make_activation(config.activation),
+                        nn.Linear(config.merge_hidden_size, config.embedding_size),
+                    )
+                    for _ in config.predicate_input_bins
+                ]
+            )
+            self.special_embedding = nn.Embedding(1, config.special_embedding_size)
         elif config.input_encoding == "embed":
             self.embeddings = nn.ModuleList()
             if config.predicate_encoding_mode == "hybrid":
@@ -395,13 +436,30 @@ class PredicateResMADE(nn.Module):
     def encode_inputs(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Encode predicate-token IDs using per-column embeddings or one-hot blocks."""
 
-        if token_ids.ndim != 2 or token_ids.shape[1] != self.num_columns:
-            raise ValueError("token_ids must have shape [batch, number_of_columns]")
         pieces = []
         if self.config.input_encoding == "embed" and self.config.predicate_encoding_mode == "categorical_legacy":
+            if token_ids.ndim != 2 or token_ids.shape[1] != self.num_columns:
+                raise ValueError("token_ids must have shape [batch, number_of_columns]")
             for column_index, embedding in enumerate(self.embeddings):
                 pieces.append(embedding(token_ids[:, column_index]))
+        elif self.config.input_encoding == "embed" and self.config.predicate_encoding_mode == "two_slot":
+            if token_ids.ndim != 3 or token_ids.shape[1] != self.num_columns or token_ids.shape[2] != 4:
+                raise ValueError("two_slot token_ids must have shape [batch, columns, 4]")
+            for column_index, value_embedding in enumerate(self.value_embeddings):
+                slot_values = token_ids[:, column_index, :]
+                merged = torch.cat(
+                    [
+                        self.operator_embedding(slot_values[:, 0]),
+                        value_embedding(slot_values[:, 1]),
+                        self.operator_embedding(slot_values[:, 2]),
+                        value_embedding(slot_values[:, 3]),
+                    ],
+                    dim=1,
+                )
+                pieces.append(self.predicate_merge_networks[column_index](merged))
         elif self.config.input_encoding == "embed":
+            if token_ids.ndim != 2 or token_ids.shape[1] != self.num_columns:
+                raise ValueError("token_ids must have shape [batch, number_of_columns]")
             for column_index, value_embedding in enumerate(self.value_embeddings):
                 column_token_ids = token_ids[:, column_index]
                 operator_ids = getattr(self, f"token_operator_ids_{column_index}")[
@@ -432,6 +490,8 @@ class PredicateResMADE(nn.Module):
                     )
                 pieces.append(encoded)
         else:
+            if token_ids.ndim != 2 or token_ids.shape[1] != self.num_columns:
+                raise ValueError("token_ids must have shape [batch, number_of_columns]")
             for column_index, bins in enumerate(self.config.predicate_input_bins):
                 pieces.append(
                     torch.nn.functional.one_hot(

@@ -15,9 +15,8 @@ def encode_tokens_tensor(
     *,
     device: str | "torch.device" = "cpu",
 ) -> "torch.Tensor":
-    """Encode token rows as a LongTensor with shape [batch, columns]."""
+    """Encode token rows as categorical IDs or two-slot predicate tensors."""
 
     import torch
 
     return torch.tensor(vocabularies.encode_rows(token_rows), dtype=torch.long, device=device)
-

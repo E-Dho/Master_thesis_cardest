@@ -120,6 +120,33 @@ class ResMADETorchTest(unittest.TestCase):
         self.assertGreater(float(model.operator_embedding.weight.grad.norm()), 0.0)
         self.assertGreater(float(model.value_embeddings[0].weight.grad.norm()), 0.0)
 
+    def test_two_slot_native_range_conditions_later_logits(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["predicate_encoding"] = {
+            "mode": "two_slot",
+            "operator_embedding_size": 4,
+            "value_embedding_size": 6,
+            "merge_hidden_size": 8,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        vocabularies = PredicateVocabularies.from_metadata(
+            source.metadata,
+            encoding_mode="two_slot",
+        )
+        wildcard = [PredicateToken.wildcard()] * len(source.metadata.columns)
+        ranged = list(wildcard)
+        ranged[0] = PredicateToken.range("a1", "a2")
+        logits_wildcard = model(encode_tokens_tensor([wildcard], vocabularies))
+        logits_range = model(encode_tokens_tensor([ranged], vocabularies))
+        later_start, later_stop = source.metadata.model_output_slices[1]
+        self.assertFalse(
+            torch.allclose(
+                logits_wildcard[:, later_start:later_stop],
+                logits_range[:, later_start:later_stop],
+            )
+        )
+
     def test_autoregressive_no_current_or_future_leakage(self) -> None:
         model, source, vocabularies = self._model(residual=True, direct_io=True)
         tokens_a = tokens_for_query_tables(source.metadata, {"A"}, {"F_A_to_B"})

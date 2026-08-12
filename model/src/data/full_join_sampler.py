@@ -361,6 +361,9 @@ def build_synthetic_chain_dataset() -> SyntheticDataset:
     metadata = ModelMetadata(
         columns=columns,
         full_join_cardinality=float(len(rows)),
+        join_root="A",
+        join_tables=("A", "B", "C"),
+        join_edges=(("A", "B"), ("B", "C")),
         upstream_attribution={
             "NeuroCard": "full-outer-join tuples, indicators, and fanout semantics",
             "Duet": "predicate-conditioned virtual-token inference",

@@ -148,6 +148,13 @@ def build_complete_metadata(
         columns=tuple(columns),
         full_join_cardinality=float(spec.join_cardinality),
         upstream_attribution=dict(spec.upstream_attribution),
+        join_root=spec.join_root,
+        join_tables=tuple(spec.join_tables),
+        join_edges=tuple(
+            (spec.join_root, table_name)
+            for table_name in spec.join_tables
+            if table_name != spec.join_root
+        ),
     )
 
 

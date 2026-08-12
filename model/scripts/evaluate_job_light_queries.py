@@ -14,10 +14,6 @@ import numpy as np
 from model.src.config import load_simple_yaml, validate_config
 from model.src.data.schema import ColumnKind, ModelMetadata
 from model.src.evaluation.metrics import q_error, q_error_floor_one
-from model.src.inference.estimator import OnePassEstimator
-from model.src.inference.torch_estimator import TorchDistributionModel
-from model.src.model.checkpoint import load_resmade_checkpoint
-from model.src.model.output_adapter import TorchBackboneOutputs
 from model.src.predicates.generation import tokens_for_query_tables
 from model.src.predicates.generation import inverse_fanouts_for_table_subset
 from model.src.predicates.operators import PredicateOp, PredicateToken
@@ -67,6 +63,10 @@ def main() -> None:
     queries_path = Path(args.queries)
     results_path = Path(args.results)
     summary_path = Path(args.summary)
+
+    from model.src.inference.estimator import OnePassEstimator
+    from model.src.inference.torch_estimator import TorchDistributionModel
+    from model.src.model.checkpoint import load_resmade_checkpoint
 
     model, payload = load_resmade_checkpoint(checkpoint, map_location="cpu")
     metadata = ModelMetadata.from_json_dict(payload["metadata"])
@@ -228,6 +228,37 @@ def build_token(metadata: ModelMetadata, predicate: RawPredicate) -> TokenBuild:
     return TokenBuild(None, unsupported=f"unsupported_op:{predicate.op}")
 
 
+def build_normalized_token(
+    metadata: ModelMetadata,
+    column_name: str,
+    predicates: list[RawPredicate],
+) -> TokenBuild:
+    """Canonicalize all SQL predicates on a column against model domains."""
+
+    tokens = []
+    missing = []
+    for predicate in predicates:
+        built = build_token(metadata, predicate)
+        if built.unsupported:
+            return built
+        if built.zero:
+            missing.append(predicate.column)
+            continue
+        if built.token is not None:
+            tokens.append(built.token)
+    if missing:
+        return TokenBuild(None, zero=True, missing_column=column_name)
+    if not tokens:
+        return TokenBuild(PredicateToken.wildcard(), all_values=True)
+    try:
+        normalized = ColumnPredicateSet(tuple(tokens)).normalize(max_predicates=2)
+    except (TypeError, ValueError) as exc:
+        return TokenBuild(None, unsupported=f"{column_name}:{exc}")
+    if normalized.contradiction:
+        return TokenBuild(None, zero=True, missing_column=column_name)
+    return TokenBuild(normalized.output_token())
+
+
 def raw_predicate_token(predicate: RawPredicate) -> PredicateToken:
     op = OP_MAP[predicate.op]
     return PredicateToken(op, value=predicate.literal)
@@ -281,6 +312,7 @@ def eval_query_native(
     predicates: list[RawPredicate],
 ) -> tuple[str, float, int, float, float, str, str, str, np.ndarray, int, list[str], list[str]]:
     import torch
+    from model.src.model.output_adapter import TorchBackboneOutputs
 
     by_col: dict[str, list[RawPredicate]] = {}
     for predicate in predicates:
@@ -306,14 +338,15 @@ def eval_query_native(
                     if canonical is _MISSING:
                         missing.append(column_name)
                     break
-        try:
-            predicate_set = ColumnPredicateSet(
-                tuple(raw_predicate_token(predicate) for predicate in col_preds)
-            )
-            normalized = predicate_set.normalize(max_predicates=2)
-        except (TypeError, ValueError) as exc:
-            unsupported.append(f"{column_name}:{exc}")
+        built_normalized = build_normalized_token(metadata, column_name, col_preds)
+        if built_normalized.unsupported:
+            unsupported.append(built_normalized.unsupported)
             continue
+        if built_normalized.zero:
+            missing.append(column_name)
+            continue
+        assert built_normalized.token is not None
+        normalized = ColumnPredicateSet((built_normalized.token,)).normalize(max_predicates=2)
         if normalized.contradiction:
             zero_factors = np.zeros(len(metadata.columns), dtype=float)
             return (
@@ -333,17 +366,9 @@ def eval_query_native(
         output_token = normalized.output_token()
         if output_token.op != PredicateOp.WILDCARD:
             output_tokens[column_name] = output_token
+            conditioning_tokens[column_name] = output_token
         if normalized.is_native_range:
             native_range_count += 1
-            conditioning_tokens[column_name] = PredicateToken.wildcard()
-        elif output_token.op != PredicateOp.WILDCARD:
-            built = build_token(metadata, col_preds[0])
-            if built.unsupported:
-                unsupported.append(f"{column_name}:{built.unsupported}")
-            elif built.zero:
-                missing.append(column_name)
-            elif built.token is not None:
-                conditioning_tokens[column_name] = built.token
     if unsupported:
         return _empty_eval("unsupported", ";".join(sorted(set(unsupported))), metadata, predicates, included_tables)
     if missing:
