@@ -15,7 +15,11 @@ from model.src.model.factorization import (
 )
 
 
-def sample_source_from_config(config: dict[str, Any]) -> object:
+def sample_source_from_config(
+    config: dict[str, Any],
+    *,
+    startup_callback: object | None = None,
+) -> object:
     """Construct a sample source without coupling trainers to concrete classes."""
 
     dataset = config.get("dataset", {})
@@ -33,6 +37,7 @@ def sample_source_from_config(config: dict[str, Any]) -> object:
                     dataset.get("sampler_batch_size", dataset.get("sample_batch_size", 16384))
                 ),
                 seed=int(dataset.get("sampler_seed", config.get("training", {}).get("seed", 0))),
+                startup_callback=startup_callback,
             )
         else:
             source = NeuroCardFullJoinSampleSource(

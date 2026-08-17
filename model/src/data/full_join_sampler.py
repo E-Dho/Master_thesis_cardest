@@ -181,6 +181,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         neurocard_path: str | Path | None = None,
         sampler_batch_size: int = 16384,
         seed: int = 0,
+        startup_callback: Any | None = None,
     ) -> None:
         super().__init__(prepared_directory, sampling_mode="live")
         self.csv_directory = Path(csv_directory).resolve()
@@ -197,6 +198,15 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         self._buffer_cursor = 0
         self._sampler: Any | None = None
         self._factorized_sampler_module: Any | None = None
+        self._startup_callback = startup_callback
+        self._startup_event(
+            "neurocard_path_resolved",
+            {
+                "csv_directory": str(self.csv_directory),
+                "neurocard_path": str(self.neurocard_path),
+                "neurocard_workdir": str(self.neurocard_workdir),
+            },
+        )
         self._load_neurocard_sampler()
 
     def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
@@ -242,8 +252,16 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
             import factorized_sampler  # type: ignore
             import join_utils  # type: ignore
 
+            self._startup_event("neurocard_imports_loaded")
             cfg = experiments.JOB_LIGHT_BASE
             spec = join_utils.get_join_spec(cfg)
+            self._startup_event(
+                "join_spec_loaded",
+                {
+                    "join_root": getattr(spec, "join_root", None),
+                    "join_tables": list(getattr(spec, "join_tables", ())),
+                },
+            )
             tables = [
                 datasets.LoadImdb(
                     table,
@@ -253,6 +271,19 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 )
                 for table in spec.join_tables
             ]
+            self._startup_event(
+                "tables_loaded",
+                {
+                    "table_count": len(tables),
+                    "tables": list(getattr(spec, "join_tables", ())),
+                },
+            )
+            self._startup_event(
+                "factorized_sampler_construction_started",
+                {
+                    "sampler_batch_size": max(self.sampler_batch_size, 1),
+                },
+            )
             self._sampler = factorized_sampler.FactorizedSampler(
                 tables,
                 spec,
@@ -260,12 +291,24 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 rng=np.random.default_rng(self.seed),
                 disambiguate_column_names=True,
             )
+            self._startup_event(
+                "factorized_sampler_constructed",
+                {
+                    "live_join_cardinality": int(self._sampler.join_card),
+                },
+            )
             if int(self._sampler.join_card) != int(self.join_cardinality):
                 raise ValueError(
                     f"live sampler join cardinality {self._sampler.join_card} does not "
                     f"match manifest join cardinality {self.join_cardinality}"
                 )
             self._factorized_sampler_module = factorized_sampler
+            self._startup_event(
+                "live_sampler_ready",
+                {
+                    "manifest_join_cardinality": int(self.join_cardinality),
+                },
+            )
 
     def _draw_sampler_batch(self) -> int:
         from model.src.data.complete_domain_preparation import encode_sample_dataframe
@@ -280,6 +323,14 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         self.sampler_run_calls += 1
         self.sample_batches_generated += 1
         return int(self._buffer.shape[0])
+
+    def _startup_event(
+        self,
+        name: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self._startup_callback is not None:
+            self._startup_callback(name, payload or {})
 
 
 def _resolve_neurocard_package(explicit_path: str | Path | None) -> Path:
