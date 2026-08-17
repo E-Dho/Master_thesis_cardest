@@ -25,6 +25,11 @@ def main() -> None:
         help="Optionally draw this many rows after source construction.",
     )
     parser.add_argument("--allow-non-live", action="store_true")
+    parser.add_argument(
+        "--manual-constructor-debug",
+        action="store_true",
+        help="Run NeuroCard FactorizedSampler constructor steps manually with flags.",
+    )
     args = parser.parse_args()
 
     started = perf_counter()
@@ -66,6 +71,11 @@ def main() -> None:
             },
             started,
         )
+
+        if args.manual_constructor_debug:
+            _manual_constructor_debug(config, output_dir, started)
+            _write_flag(output_dir, "99_startup_check_complete", {}, started)
+            return
 
         source_started = perf_counter()
         source = sample_source_from_config(
@@ -141,6 +151,140 @@ def _write_flag(
     temporary.replace(path)
     print(f"startup_flag[{name}]={path}", flush=True)
     return path
+
+
+def _manual_constructor_debug(
+    config: dict[str, Any],
+    output_dir: Path,
+    started: float,
+) -> None:
+    import sys
+    import numpy as np
+
+    from model.src.data.full_join_sampler import _pushd, _resolve_neurocard_package
+
+    dataset = config["dataset"]
+    neurocard_path = _resolve_neurocard_package(dataset.get("neurocard_path"))
+    csv_directory = Path(dataset["csv_directory"]).resolve()
+    sampler_batch_size = int(dataset.get("sampler_batch_size", dataset.get("sample_batch_size", 16384)))
+    seed = int(dataset.get("sampler_seed", config.get("training", {}).get("seed", 0)))
+    if str(neurocard_path) not in sys.path:
+        sys.path.insert(0, str(neurocard_path))
+
+    with _pushd(neurocard_path.parent):
+        _write_flag(
+            output_dir,
+            "10_manual_imports_started",
+            {
+                "neurocard_path": str(neurocard_path),
+                "neurocard_workdir": str(neurocard_path.parent),
+            },
+            started,
+        )
+        import datasets  # type: ignore
+        import experiments  # type: ignore
+        import factorized_sampler  # type: ignore
+        import join_utils  # type: ignore
+        from factorized_sampler_lib import prepare_utils  # type: ignore
+
+        _write_flag(output_dir, "11_manual_imports_loaded", {}, started)
+        cfg = experiments.JOB_LIGHT_BASE
+        spec = join_utils.get_join_spec(cfg)
+        _write_flag(
+            output_dir,
+            "12_manual_join_spec_loaded",
+            {
+                "join_name": getattr(spec, "join_name", None),
+                "join_root": getattr(spec, "join_root", None),
+                "join_tables": list(getattr(spec, "join_tables", ())),
+            },
+            started,
+        )
+        loaded_tables = []
+        for table in spec.join_tables:
+            _write_flag(output_dir, f"13_load_table_started_{table}", {}, started)
+            loaded = datasets.LoadImdb(
+                table,
+                data_dir=str(csv_directory) + "/",
+                use_cols=cfg["use_cols"],
+                try_load_parsed=True,
+            )
+            loaded_tables.append(loaded)
+            _write_flag(
+                output_dir,
+                f"14_load_table_done_{table}",
+                {
+                    "columns": list(loaded.data.columns),
+                    "rows": int(len(loaded.data)),
+                },
+                started,
+            )
+
+        _write_flag(output_dir, "15_prepare_started", {}, started)
+        if prepare_utils.check_required_files(spec):
+            _write_flag(
+                output_dir,
+                "15_prepare_cache_hit",
+                {
+                    "join_name": getattr(spec, "join_name", None),
+                },
+                started,
+            )
+        else:
+            prepare_utils.prepare(spec)
+        _write_flag(output_dir, "16_prepare_done", {}, started)
+
+        dt_actors = []
+        for table in loaded_tables:
+            _write_flag(output_dir, f"17_data_actor_started_{table.name}", {}, started)
+            actor = factorized_sampler.DataTableActor(
+                table.name,
+                spec.join_keys[table.name],
+                table.data,
+                spec.join_name,
+            )
+            dt_actors.append(actor)
+            _write_flag(output_dir, f"18_data_actor_done_{table.name}", {}, started)
+
+        jcts = {}
+        for table in spec.join_tables:
+            _write_flag(output_dir, f"19_load_jct_started_{table}", {}, started)
+            jct = factorized_sampler.load_jct(table, spec.join_name)
+            jcts[table] = jct
+            _write_flag(
+                output_dir,
+                f"20_load_jct_done_{table}",
+                {
+                    "rows": int(len(jct)),
+                    "columns": list(jct.columns),
+                },
+                started,
+            )
+
+        jct_actors = {}
+        for table, jct in jcts.items():
+            _write_flag(output_dir, f"21_jct_actor_started_{table}", {}, started)
+            actor = factorized_sampler.JoinCountTableActor(table, jct, spec)
+            jct_actors[table] = actor
+            _write_flag(output_dir, f"22_jct_actor_done_{table}", {}, started)
+
+        ordering = factorized_sampler._make_sampling_table_ordering(loaded_tables, spec.join_root)
+        root = spec.join_root
+        join_card = jct_actors[root].jct[f"{root}.weight"].sum()
+        _write_flag(
+            output_dir,
+            "23_manual_constructor_equivalent_done",
+            {
+                "data_actor_count": len(dt_actors),
+                "jct_actor_count": len(jct_actors),
+                "sampling_tables_ordering": list(ordering),
+                "join_cardinality": int(join_card),
+                "sampler_batch_size": sampler_batch_size,
+                "seed": seed,
+            },
+            started,
+        )
+        _ = np.random.default_rng(seed)
 
 
 if __name__ == "__main__":

@@ -251,6 +251,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
             import experiments  # type: ignore
             import factorized_sampler  # type: ignore
             import join_utils  # type: ignore
+            from factorized_sampler_lib import prepare_utils  # type: ignore
 
             self._startup_event("neurocard_imports_loaded")
             cfg = experiments.JOB_LIGHT_BASE
@@ -262,6 +263,14 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                     "join_tables": list(getattr(spec, "join_tables", ())),
                 },
             )
+            if prepare_utils.check_required_files(spec):
+                self._startup_event(
+                    "prepare_cache_hit",
+                    {
+                        "join_name": getattr(spec, "join_name", None),
+                    },
+                )
+                factorized_sampler.prepare_utils.prepare = lambda join_spec: None
             tables = [
                 datasets.LoadImdb(
                     table,
