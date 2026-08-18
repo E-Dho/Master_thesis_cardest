@@ -63,6 +63,7 @@ class TrainingResult:
     fresh_sampler_rows: int
     fixture_rows_reused: int
     validation_summary: dict[str, Any]
+    early_stopping_summary: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,23 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         validation_config.get("selection_metric", "validation_weighted_nll")
     )
     minimize_selection = bool(validation_config.get("minimize", True))
+    early_stopping_patience_steps = int(
+        training.get(
+            "early_stopping_patience_steps",
+            training.get("early_stopping_patience", 0),
+        )
+        or 0
+    )
+    early_stopping_min_delta = float(training.get("early_stopping_min_delta", 0.0) or 0.0)
+    early_stopping_enabled = early_stopping_patience_steps > 0
+    early_stopping_monitor = (
+        selection_metric if validation_enabled else "loss"
+    )
+    early_stopping_best_metric: float | None = None
+    early_stopping_best_step: int | None = None
+    early_stopped = False
+    early_stopping_stop_step: int | None = None
+    early_stopping_reason: str | None = None
     best_metric: float | None = None
     best_step: int | None = None
     best_checkpoint_path: Path | None = None
@@ -334,6 +352,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     "predicate_context_diagnostics": last_context_diagnostics,
                     "predicate_embedding_gradient_coverage": last_gradient_coverage,
                 }
+                early_stopping_monitor_value: float | None = None
                 if validation_enabled and global_step % validation_interval == 0:
                     validation_metrics = _run_validation(
                         model,
@@ -379,7 +398,55 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         )
                     validation_history.append({"step": global_step, **validation_metrics})
                     metrics_payload.update(validation_metrics)
+                    early_stopping_monitor_value = selected_value
+                elif not validation_enabled:
+                    early_stopping_monitor_value = float(loss)
+                if early_stopping_enabled and early_stopping_monitor_value is not None:
+                    if early_stopping_best_metric is None:
+                        improved_for_stop = True
+                    elif minimize_selection:
+                        improved_for_stop = (
+                            early_stopping_monitor_value
+                            < early_stopping_best_metric - early_stopping_min_delta
+                        )
+                    else:
+                        improved_for_stop = (
+                            early_stopping_monitor_value
+                            > early_stopping_best_metric + early_stopping_min_delta
+                        )
+                    if improved_for_stop:
+                        early_stopping_best_metric = early_stopping_monitor_value
+                        early_stopping_best_step = global_step
+                    steps_since_best = (
+                        0
+                        if early_stopping_best_step is None
+                        else global_step - early_stopping_best_step
+                    )
+                    early_stopped = steps_since_best >= early_stopping_patience_steps
+                    if early_stopped:
+                        early_stopping_stop_step = global_step
+                        early_stopping_reason = (
+                            f"{early_stopping_monitor} did not improve for "
+                            f"{steps_since_best} optimizer steps"
+                        )
+                    metrics_payload.update(
+                        {
+                            "early_stopping_enabled": early_stopping_enabled,
+                            "early_stopping_monitor": early_stopping_monitor,
+                            "early_stopping_monitor_value": early_stopping_monitor_value,
+                            "early_stopping_best_metric": early_stopping_best_metric,
+                            "early_stopping_best_step": early_stopping_best_step,
+                            "early_stopping_steps_since_best": steps_since_best,
+                            "early_stopping_patience_steps": early_stopping_patience_steps,
+                            "early_stopping_min_delta": early_stopping_min_delta,
+                            "early_stopping_should_stop": early_stopped,
+                        }
+                    )
                 _append_metrics(metrics_path, metrics_payload)
+                if early_stopped:
+                    break
+        if early_stopped:
+            break
         if int(training["steps_per_epoch"]) == 0:
             break
     checkpoint_path = _save_checkpoint(
@@ -470,6 +537,20 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             "validation_fresh_sampler_rows": validation_fresh_sampler_rows,
             "validation_fixture_rows_reused": validation_fixture_rows_reused,
         },
+        "early_stopping": {
+            "enabled": early_stopping_enabled,
+            "monitor": early_stopping_monitor if early_stopping_enabled else None,
+            "patience_steps": (
+                early_stopping_patience_steps if early_stopping_enabled else None
+            ),
+            "min_delta": early_stopping_min_delta if early_stopping_enabled else None,
+            "minimize": minimize_selection if early_stopping_enabled else None,
+            "best_metric": early_stopping_best_metric,
+            "best_step": early_stopping_best_step,
+            "stopped": early_stopped,
+            "stop_step": early_stopping_stop_step,
+            "reason": early_stopping_reason,
+        },
     }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     return TrainingResult(
@@ -505,6 +586,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         fresh_sampler_rows=fresh_sampler_rows,
         fixture_rows_reused=fixture_rows_reused,
         validation_summary=summary["validation"],
+        early_stopping_summary=summary["early_stopping"],
     )
 
 

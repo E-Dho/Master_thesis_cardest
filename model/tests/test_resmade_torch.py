@@ -26,7 +26,10 @@ from model.src.model.factorization import (
     valid_factor_class_mask,
 )
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
-from model.src.training.resmade_trainer import build_resmade_from_config
+from model.src.training.resmade_trainer import (
+    build_resmade_from_config,
+    train_resmade_sample_source,
+)
 from model.src.predicates.torch_encoding import encode_tokens_tensor
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
@@ -61,6 +64,30 @@ class ResMADETorchTest(unittest.TestCase):
         for distribution, width in zip(distributions, source.metadata.data_output_bins):
             self.assertEqual(distribution.shape, (1, width))
             self.assertTrue(torch.allclose(distribution.sum(dim=1), torch.ones(1)))
+
+    def test_training_early_stopping_records_stop_reason(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        with tempfile.TemporaryDirectory() as output_directory:
+            config["model"]["hidden_sizes"] = [16]
+            config["model"]["embedding_size"] = 4
+            config["training"]["batch_size"] = 4
+            config["training"]["steps_per_epoch"] = 10
+            config["training"]["checkpoint_interval_steps"] = 0
+            config["training"]["validation_interval_steps"] = 1
+            config["training"]["early_stopping_patience_steps"] = 1
+            config["training"]["early_stopping_min_delta"] = 1.0e9
+            config["logging"]["output_directory"] = output_directory
+
+            result = train_resmade_sample_source(source, config)
+
+            early_stopping = result.early_stopping_summary
+            self.assertTrue(early_stopping["enabled"])
+            self.assertTrue(early_stopping["stopped"])
+            self.assertEqual(early_stopping["monitor"], "loss")
+            self.assertEqual(early_stopping["patience_steps"], 1)
+            self.assertEqual(early_stopping["stop_step"], 2)
+            self.assertEqual(result.total_sampled_tuples, 8)
 
     def test_compositional_predicate_encoding_shares_literal_values(self) -> None:
         source = SyntheticFullJoinSampleSource()

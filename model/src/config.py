@@ -165,6 +165,22 @@ def validate_config(config: dict[str, Any]) -> None:
         ]:
             if int(predicate_encoding.get(key, 1) or 0) <= 0:
                 raise ValueError(f"predicate_encoding.{key} must be positive")
+    training = config.get("training", {})
+    early_stopping_patience_steps = int(
+        training.get(
+            "early_stopping_patience_steps",
+            training.get("early_stopping_patience", 0),
+        )
+        or 0
+    )
+    if early_stopping_patience_steps < 0:
+        raise ValueError("training early stopping patience must be nonnegative")
+    if early_stopping_patience_steps > 0:
+        metrics_interval = int(training.get("validation_interval_steps", 0) or 0)
+        if metrics_interval <= 0:
+            raise ValueError(
+                "training early stopping requires training.validation_interval_steps > 0"
+            )
     validation = config.get("validation", {})
     if validation.get("enabled", False):
         interval_steps = int(
