@@ -16,6 +16,7 @@ from model.src.model.checkpoint import save_resmade_checkpoint
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.predicates.generation import (
     PredicateTrainingContextGenerator,
+    predicate_context_diagnostics,
     literal_token_occurrences,
     literal_token_stats,
     token_coverage,
@@ -23,6 +24,10 @@ from model.src.predicates.generation import (
 from model.src.predicates.operators import PredicateOp
 from model.src.predicates.torch_encoding import encode_tokens_tensor
 from model.src.predicates.vocabulary import PredicateVocabularies, key_to_token
+from model.src.predicates.vocabulary import (
+    TWO_SLOT_OPERATOR_BINS,
+    two_slot_value_bins_by_column,
+)
 from model.src.training.losses import cumulative_inverse_fanout_weights, effective_sample_size
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
 
@@ -53,10 +58,12 @@ class TrainingResult:
     included_indicator_contradictions: int
     predicate_token_coverage: dict[str, dict[str, int]]
     predicate_literal_token_stats: dict[str, dict[str, dict[str, int | float | None]]]
+    predicate_context_diagnostics: dict[str, Any]
     last_predicate_embedding_gradient_coverage: dict[str, Any]
     fresh_sampler_rows: int
     fixture_rows_reused: int
     validation_summary: dict[str, Any]
+    early_stopping_summary: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,7 @@ class TrainingStepResult:
     predicate_token_coverage: dict[str, dict[str, int]]
     literal_token_occurrences: dict[str, dict[str, dict[str, int]]]
     predicate_embedding_gradient_coverage: dict[str, Any]
+    predicate_context_diagnostics: dict[str, Any]
 
 
 def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> PredicateResMADE:
@@ -81,11 +89,11 @@ def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> Predi
     output_head_specs = None
     if plan is not None and plan.enabled:
         output_head_specs = plan.output_head_specs
-    compositional_features = _compositional_feature_tables(
+    encoding_mode = str(predicate_encoding.get("mode", "categorical_legacy"))
+    compositional_features = _predicate_encoding_feature_tables(
         metadata,
         vocabularies,
-        enabled=str(predicate_encoding.get("mode", "categorical_legacy"))
-        in {"compositional", "hybrid"},
+        mode=encoding_mode,
     )
     return PredicateResMADE(
         PredicateResMADEConfig(
@@ -97,7 +105,7 @@ def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> Predi
             activation=str(model_config.get("activation", "relu")),
             input_encoding=str(model_config.get("input_encoding", "embed")),
             embedding_size=int(model_config.get("embedding_size", 16)),
-            predicate_encoding_mode=str(predicate_encoding.get("mode", "categorical_legacy")),
+            predicate_encoding_mode=encoding_mode,
             operator_embedding_size=int(predicate_encoding.get("operator_embedding_size", 8)),
             value_embedding_size=int(predicate_encoding.get("value_embedding_size", 32)),
             special_embedding_size=int(predicate_encoding.get("special_embedding_size", 8)),
@@ -119,8 +127,11 @@ def predicate_vocabularies_from_config(
     """Build predicate vocabularies, including optional native training ranges."""
 
     predicate_generation = config.get("predicate_generation", {})
-    include_native_ranges = bool(
-        predicate_generation.get("enable_native_range_tokens", False)
+    predicate_encoding = config.get("predicate_encoding", {})
+    encoding_mode = str(predicate_encoding.get("mode", "categorical_legacy"))
+    include_native_ranges = (
+        encoding_mode != "two_slot"
+        and bool(predicate_generation.get("enable_native_range_tokens", False))
     )
     native_range_max_domain_size = int(
         predicate_generation.get("native_range_max_domain_size", 512)
@@ -129,16 +140,22 @@ def predicate_vocabularies_from_config(
         metadata,
         include_native_ranges=include_native_ranges,
         native_range_max_domain_size=native_range_max_domain_size,
+        encoding_mode="two_slot" if encoding_mode == "two_slot" else "categorical",
     )
 
 
-def _compositional_feature_tables(
+def _predicate_encoding_feature_tables(
     metadata: object,
     vocabularies: PredicateVocabularies,
     *,
-    enabled: bool,
+    mode: str,
 ) -> dict[str, Any]:
-    if not enabled:
+    if mode == "two_slot":
+        return {
+            "value_bins_by_column": two_slot_value_bins_by_column(metadata),
+            "operator_bins": TWO_SLOT_OPERATOR_BINS,
+        }
+    if mode not in {"compositional", "hybrid"}:
         return {}
     op_to_id = {op: index for index, op in enumerate(PredicateOp)}
     operator_ids = []
@@ -216,6 +233,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     fixture_rows_reused = 0
     aggregate_literal_occurrences: dict[str, dict[str, dict[str, int]]] = {}
     last_gradient_coverage: dict[str, Any] = {}
+    last_context_diagnostics: dict[str, Any] = {}
     aggregate_token_coverage = {
         column.name: {
             "wildcard": 0,
@@ -246,6 +264,23 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         validation_config.get("selection_metric", "validation_weighted_nll")
     )
     minimize_selection = bool(validation_config.get("minimize", True))
+    early_stopping_patience_steps = int(
+        training.get(
+            "early_stopping_patience_steps",
+            training.get("early_stopping_patience", 0),
+        )
+        or 0
+    )
+    early_stopping_min_delta = float(training.get("early_stopping_min_delta", 0.0) or 0.0)
+    early_stopping_enabled = early_stopping_patience_steps > 0
+    early_stopping_monitor = (
+        selection_metric if validation_enabled else "loss"
+    )
+    early_stopping_best_metric: float | None = None
+    early_stopping_best_step: int | None = None
+    early_stopped = False
+    early_stopping_stop_step: int | None = None
+    early_stopping_reason: str | None = None
     best_metric: float | None = None
     best_step: int | None = None
     best_checkpoint_path: Path | None = None
@@ -289,6 +324,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             _merge_coverage(aggregate_token_coverage, step_result.predicate_token_coverage)
             _merge_literal_occurrences(aggregate_literal_occurrences, step_result.literal_token_occurrences)
             last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
+            last_context_diagnostics = step_result.predicate_context_diagnostics
             interval = int(training.get("checkpoint_interval_steps", 0) or 0)
             if interval and global_step % interval == 0:
                 _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config)
@@ -313,8 +349,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         aggregate_literal_occurrences,
                         metadata,
                     ),
+                    "predicate_context_diagnostics": last_context_diagnostics,
                     "predicate_embedding_gradient_coverage": last_gradient_coverage,
                 }
+                early_stopping_monitor_value: float | None = None
                 if validation_enabled and global_step % validation_interval == 0:
                     validation_metrics = _run_validation(
                         model,
@@ -360,7 +398,55 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         )
                     validation_history.append({"step": global_step, **validation_metrics})
                     metrics_payload.update(validation_metrics)
+                    early_stopping_monitor_value = selected_value
+                elif not validation_enabled:
+                    early_stopping_monitor_value = float(loss)
+                if early_stopping_enabled and early_stopping_monitor_value is not None:
+                    if early_stopping_best_metric is None:
+                        improved_for_stop = True
+                    elif minimize_selection:
+                        improved_for_stop = (
+                            early_stopping_monitor_value
+                            < early_stopping_best_metric - early_stopping_min_delta
+                        )
+                    else:
+                        improved_for_stop = (
+                            early_stopping_monitor_value
+                            > early_stopping_best_metric + early_stopping_min_delta
+                        )
+                    if improved_for_stop:
+                        early_stopping_best_metric = early_stopping_monitor_value
+                        early_stopping_best_step = global_step
+                    steps_since_best = (
+                        0
+                        if early_stopping_best_step is None
+                        else global_step - early_stopping_best_step
+                    )
+                    early_stopped = steps_since_best >= early_stopping_patience_steps
+                    if early_stopped:
+                        early_stopping_stop_step = global_step
+                        early_stopping_reason = (
+                            f"{early_stopping_monitor} did not improve for "
+                            f"{steps_since_best} optimizer steps"
+                        )
+                    metrics_payload.update(
+                        {
+                            "early_stopping_enabled": early_stopping_enabled,
+                            "early_stopping_monitor": early_stopping_monitor,
+                            "early_stopping_monitor_value": early_stopping_monitor_value,
+                            "early_stopping_best_metric": early_stopping_best_metric,
+                            "early_stopping_best_step": early_stopping_best_step,
+                            "early_stopping_steps_since_best": steps_since_best,
+                            "early_stopping_patience_steps": early_stopping_patience_steps,
+                            "early_stopping_min_delta": early_stopping_min_delta,
+                            "early_stopping_should_stop": early_stopped,
+                        }
+                    )
                 _append_metrics(metrics_path, metrics_payload)
+                if early_stopped:
+                    break
+        if early_stopped:
+            break
         if int(training["steps_per_epoch"]) == 0:
             break
     checkpoint_path = _save_checkpoint(
@@ -426,6 +512,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             aggregate_literal_occurrences,
             metadata,
         ),
+        "predicate_context_diagnostics": last_context_diagnostics,
         "last_predicate_embedding_gradient_coverage": last_gradient_coverage,
         "columns_with_unseen_evaluation_token_types": [],
         "training_seconds": training_seconds,
@@ -449,6 +536,20 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             "history": validation_history,
             "validation_fresh_sampler_rows": validation_fresh_sampler_rows,
             "validation_fixture_rows_reused": validation_fixture_rows_reused,
+        },
+        "early_stopping": {
+            "enabled": early_stopping_enabled,
+            "monitor": early_stopping_monitor if early_stopping_enabled else None,
+            "patience_steps": (
+                early_stopping_patience_steps if early_stopping_enabled else None
+            ),
+            "min_delta": early_stopping_min_delta if early_stopping_enabled else None,
+            "minimize": minimize_selection if early_stopping_enabled else None,
+            "best_metric": early_stopping_best_metric,
+            "best_step": early_stopping_best_step,
+            "stopped": early_stopped,
+            "stop_step": early_stopping_stop_step,
+            "reason": early_stopping_reason,
         },
     }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
@@ -480,10 +581,12 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             aggregate_literal_occurrences,
             metadata,
         ),
+        predicate_context_diagnostics=last_context_diagnostics,
         last_predicate_embedding_gradient_coverage=last_gradient_coverage,
         fresh_sampler_rows=fresh_sampler_rows,
         fixture_rows_reused=fixture_rows_reused,
         validation_summary=summary["validation"],
+        early_stopping_summary=summary["early_stopping"],
     )
 
 
@@ -516,6 +619,7 @@ def _train_one_batch(
         [context.tokens for context in contexts],
         metadata,
     )
+    context_diagnostics = predicate_context_diagnostics(contexts, metadata)
     weights = cumulative_inverse_fanout_weights(
         target_rows,
         token_rows,
@@ -567,6 +671,7 @@ def _train_one_batch(
         included_indicator_contradictions=generation_stats.included_indicator_contradictions,
         predicate_token_coverage=coverage,
         literal_token_occurrences=literal_occurrences,
+        predicate_context_diagnostics=context_diagnostics,
         predicate_embedding_gradient_coverage=gradient_coverage,
     )
 
@@ -709,6 +814,8 @@ def _predicate_embedding_gradient_coverage(
 
     if getattr(model.config, "input_encoding", "") != "embed":
         return {"mode": "not_applicable", "reason": "input_encoding is not embed"}
+    if getattr(model.config, "predicate_encoding_mode", "") == "two_slot":
+        return _two_slot_gradient_coverage(model, token_rows, token_ids, metadata)
     if getattr(model.config, "predicate_encoding_mode", "") in {"compositional", "hybrid"}:
         return _compositional_gradient_coverage(model, token_rows, token_ids, metadata)
     observed = 0
@@ -747,6 +854,75 @@ def _predicate_embedding_gradient_coverage(
                     ordinary_nonzero += 1
     return {
         "mode": "embed",
+        "observed_non_wildcard_tokens": observed,
+        "nonzero_gradient_non_wildcard_tokens": nonzero,
+        "ordinary_observed_non_wildcard_tokens": ordinary_observed,
+        "ordinary_nonzero_gradient_non_wildcard_tokens": ordinary_nonzero,
+        "by_column": by_column,
+    }
+
+
+def _two_slot_gradient_coverage(
+    model: PredicateResMADE,
+    token_rows: list[list[Any]],
+    token_ids: Any,
+    metadata: object,
+) -> dict[str, Any]:
+    operator_gradient = model.operator_embedding.weight.grad
+    observed = 0
+    nonzero = 0
+    ordinary_observed = 0
+    ordinary_nonzero = 0
+    by_column: dict[str, dict[str, int]] = {}
+    for column_index, column in enumerate(metadata.columns):
+        value_gradient = model.value_embeddings[column_index].weight.grad
+        column_counts = by_column.setdefault(
+            column.name,
+            {
+                "observed_non_wildcard_tokens": 0,
+                "nonzero_gradient_non_wildcard_tokens": 0,
+                "observed_components": 0,
+                "nonzero_gradient_components": 0,
+            },
+        )
+        seen = {
+            (
+                tuple(int(value) for value in token_ids[row_index, column_index].detach().cpu().tolist()),
+                token_rows[row_index][column_index],
+            )
+            for row_index in range(len(token_rows))
+        }
+        missing_value_id = int(model.config.value_bins_by_column[column_index] - 1)  # type: ignore[index]
+        for encoded, token in seen:
+            if token.op == PredicateOp.WILDCARD:
+                continue
+            observed += 1
+            column_counts["observed_non_wildcard_tokens"] += 1
+            token_nonzero = False
+            op1, value1, op2, value2 = encoded
+            components = [
+                (operator_gradient, op1, False),
+                (value_gradient, value1, value1 == missing_value_id),
+                (operator_gradient, op2, False),
+                (value_gradient, value2, value2 == missing_value_id),
+            ]
+            for gradient, component_id, skip in components:
+                if skip or gradient is None:
+                    continue
+                column_counts["observed_components"] += 1
+                is_nonzero = bool(float(gradient[component_id].norm().detach().cpu()) > 0.0)
+                if is_nonzero:
+                    token_nonzero = True
+                    column_counts["nonzero_gradient_components"] += 1
+            if token_nonzero:
+                nonzero += 1
+                column_counts["nonzero_gradient_non_wildcard_tokens"] += 1
+            if token.op != PredicateOp.INV_FANOUT:
+                ordinary_observed += 1
+                if token_nonzero:
+                    ordinary_nonzero += 1
+    return {
+        "mode": "two_slot",
         "observed_non_wildcard_tokens": observed,
         "nonzero_gradient_non_wildcard_tokens": nonzero,
         "ordinary_observed_non_wildcard_tokens": ordinary_observed,

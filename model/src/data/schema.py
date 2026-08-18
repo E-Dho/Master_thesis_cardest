@@ -211,6 +211,9 @@ class ModelMetadata:
     upstream_attribution: dict[str, str] = field(default_factory=dict)
     schema_hash: str | None = None
     factorization_plan: FactorizationPlan = field(default_factory=FactorizationPlan)
+    join_root: str | None = None
+    join_tables: tuple[str, ...] = ()
+    join_edges: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.full_join_cardinality < 0:
@@ -325,6 +328,12 @@ class ModelMetadata:
             schema_hash=data.get("schema_hash"),
             factorization_plan=FactorizationPlan.from_json_dict(
                 data.get("factorization_plan")
+            ),
+            join_root=data.get("join_root"),
+            join_tables=tuple(data.get("join_tables", ())),
+            join_edges=tuple(
+                (str(left), str(right))
+                for left, right in data.get("join_edges", ())
             ),
         )
 

@@ -17,10 +17,12 @@ QUERIES=$ROOT/external/neurocard/neurocard/queries/job-light.csv
 CONFIG=${CONFIG:?set CONFIG to a model config path}
 RUN_DIR=${RUN_DIR:?set RUN_DIR to the config output directory}
 CHECKPOINT_STEP=${CHECKPOINT_STEP:-3500}
-CHECKPOINT=$RUN_DIR/checkpoint_step_${CHECKPOINT_STEP}.pt
 RESULTS=$RUN_DIR/job_light_query_results_native_ranges.csv
 SUMMARY=$RUN_DIR/job_light_query_summary_native_ranges.json
 ANALYSIS_DIR=$RUN_DIR/tail_analysis
+PRETRAIN_STARTUP_CHECK=${PRETRAIN_STARTUP_CHECK:-0}
+STARTUP_CHECK_DRAW_ROWS=${STARTUP_CHECK_DRAW_ROWS:-0}
+STARTUP_CHECK_DIR=${STARTUP_CHECK_DIR:-$RUN_DIR/startup_checks/${SLURM_JOB_ID:-manual}_pretrain}
 
 cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
@@ -34,10 +36,36 @@ echo "start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "config=$CONFIG"
 echo "run_dir=$RUN_DIR"
 echo "checkpoint_step=$CHECKPOINT_STEP"
+echo "pretrain_startup_check=$PRETRAIN_STARTUP_CHECK"
+
+if [[ "$PRETRAIN_STARTUP_CHECK" == "1" ]]; then
+  echo "startup_check_dir=$STARTUP_CHECK_DIR"
+  echo "startup_check_draw_rows=$STARTUP_CHECK_DRAW_ROWS"
+  "$PYTHON" -m model.scripts.check_live_sampler_startup \
+    --config "$CONFIG" \
+    --output-dir "$STARTUP_CHECK_DIR" \
+    --draw-rows "$STARTUP_CHECK_DRAW_ROWS"
+  echo "startup_check_done_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
 
 "$PYTHON" -m model.scripts.train_resmade --config "$CONFIG"
 
 echo "training_done_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+if [[ "$CHECKPOINT_STEP" == "auto" ]]; then
+  CHECKPOINT=$("$PYTHON" - "$RUN_DIR/training_summary.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(summary["checkpoint"])
+PY
+)
+else
+  CHECKPOINT=$RUN_DIR/checkpoint_step_${CHECKPOINT_STEP}.pt
+fi
+echo "checkpoint=$CHECKPOINT"
 
 "$PYTHON" -m model.scripts.evaluate_job_light_queries \
   --config "$CONFIG" \

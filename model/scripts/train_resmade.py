@@ -47,6 +47,11 @@ def main() -> None:
         )
     print(f"metrics_path={result.metrics_path}")
     print(f"summary_path={result.summary_path}")
+    if result.early_stopping_summary.get("enabled"):
+        print(
+            "early_stopping_summary="
+            f"{json.dumps(result.early_stopping_summary, sort_keys=True)}"
+        )
     if result.validation_summary.get("enabled"):
         print(f"validation_summary={json.dumps(result.validation_summary, sort_keys=True)}")
     for fanout_name, stats in result.fanout_effective_sample_size.items():

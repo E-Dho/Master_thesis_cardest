@@ -1,6 +1,6 @@
 dataset:
   type: neurocard_full_join
-  name: job_light_duet_batch_native_range_7m
+  name: job_light_duet_batch_native_range_10k_early_stop
   csv_directory: datasets/job
   prepared_directory: data/neurocard_prepared/job_light
   sampling_mode: live
@@ -80,7 +80,9 @@ training:
   learning_rate: 0.0001
   optimizer: adam
   epochs: 1
-  steps_per_epoch: 3500
+  steps_per_epoch: 10000
+  early_stopping_patience_steps: 1000
+  early_stopping_min_delta: 0.0
   gradient_clip_norm: 5.0
   checkpoint_interval_steps: 500
   validation_interval_steps: 250
@@ -93,4 +95,4 @@ inference:
   use_log_space_product: true
 
 logging:
-  output_directory: model/runs/job_light_duet_batch_native_range_7m
+  output_directory: model/runs/job_light_duet_batch_native_range_10k_early_stop

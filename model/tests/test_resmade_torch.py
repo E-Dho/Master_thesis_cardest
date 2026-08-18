@@ -26,7 +26,10 @@ from model.src.model.factorization import (
     valid_factor_class_mask,
 )
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
-from model.src.training.resmade_trainer import build_resmade_from_config
+from model.src.training.resmade_trainer import (
+    build_resmade_from_config,
+    train_resmade_sample_source,
+)
 from model.src.predicates.torch_encoding import encode_tokens_tensor
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
@@ -61,6 +64,30 @@ class ResMADETorchTest(unittest.TestCase):
         for distribution, width in zip(distributions, source.metadata.data_output_bins):
             self.assertEqual(distribution.shape, (1, width))
             self.assertTrue(torch.allclose(distribution.sum(dim=1), torch.ones(1)))
+
+    def test_training_early_stopping_records_stop_reason(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        with tempfile.TemporaryDirectory() as output_directory:
+            config["model"]["hidden_sizes"] = [16]
+            config["model"]["embedding_size"] = 4
+            config["training"]["batch_size"] = 4
+            config["training"]["steps_per_epoch"] = 10
+            config["training"]["checkpoint_interval_steps"] = 0
+            config["training"]["validation_interval_steps"] = 1
+            config["training"]["early_stopping_patience_steps"] = 1
+            config["training"]["early_stopping_min_delta"] = 1.0e9
+            config["logging"]["output_directory"] = output_directory
+
+            result = train_resmade_sample_source(source, config)
+
+            early_stopping = result.early_stopping_summary
+            self.assertTrue(early_stopping["enabled"])
+            self.assertTrue(early_stopping["stopped"])
+            self.assertEqual(early_stopping["monitor"], "loss")
+            self.assertEqual(early_stopping["patience_steps"], 1)
+            self.assertEqual(early_stopping["stop_step"], 2)
+            self.assertEqual(result.total_sampled_tuples, 8)
 
     def test_compositional_predicate_encoding_shares_literal_values(self) -> None:
         source = SyntheticFullJoinSampleSource()
@@ -119,6 +146,33 @@ class ResMADETorchTest(unittest.TestCase):
         self.assertGreater(float(model.literal_embeddings[0].weight.grad[equal_id].norm()), 0.0)
         self.assertGreater(float(model.operator_embedding.weight.grad.norm()), 0.0)
         self.assertGreater(float(model.value_embeddings[0].weight.grad.norm()), 0.0)
+
+    def test_two_slot_native_range_conditions_later_logits(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["predicate_encoding"] = {
+            "mode": "two_slot",
+            "operator_embedding_size": 4,
+            "value_embedding_size": 6,
+            "merge_hidden_size": 8,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        vocabularies = PredicateVocabularies.from_metadata(
+            source.metadata,
+            encoding_mode="two_slot",
+        )
+        wildcard = [PredicateToken.wildcard()] * len(source.metadata.columns)
+        ranged = list(wildcard)
+        ranged[0] = PredicateToken.range("a1", "a2")
+        logits_wildcard = model(encode_tokens_tensor([wildcard], vocabularies))
+        logits_range = model(encode_tokens_tensor([ranged], vocabularies))
+        later_start, later_stop = source.metadata.model_output_slices[1]
+        self.assertFalse(
+            torch.allclose(
+                logits_wildcard[:, later_start:later_stop],
+                logits_range[:, later_start:later_stop],
+            )
+        )
 
     def test_autoregressive_no_current_or_future_leakage(self) -> None:
         model, source, vocabularies = self._model(residual=True, direct_io=True)

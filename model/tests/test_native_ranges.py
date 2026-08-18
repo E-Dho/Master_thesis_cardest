@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from model.src.evaluation.metrics import q_error, q_error_floor_one
+from model.scripts.evaluate_job_light_queries import RawPredicate, build_normalized_token
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.sets import ColumnPredicateSet
 from model.src.predicates.vocabulary import PredicateVocabularies
@@ -97,6 +98,31 @@ class NativeRangeNormalizationTest(unittest.TestCase):
         )
         legacy = PredicateVocabularies((('["wildcard", null, null]', '["equal", 1, null]'),))
         self.assertEqual(legacy.encode_token(0, PredicateToken.equal(1)), 1)
+
+    def test_evaluator_uses_normalized_predicate_for_conditioning(self) -> None:
+        metadata = ModelMetadata(
+            columns=(ColumnMetadata("x", ColumnKind.DATA, (10, 20, 50, 60)),),
+            full_join_cardinality=4,
+        )
+        built = build_normalized_token(
+            metadata,
+            "x",
+            [
+                RawPredicate("x", ">=", 10, "x>=10"),
+                RawPredicate("x", ">=", 50, "x>=50"),
+            ],
+        )
+        self.assertEqual(built.token, PredicateToken(PredicateOp.GREATER_EQUAL, 50))
+
+        ranged = build_normalized_token(
+            metadata,
+            "x",
+            [
+                RawPredicate("x", ">", 10, "x>10"),
+                RawPredicate("x", "<=", 50, "x<=50"),
+            ],
+        )
+        self.assertEqual(ranged.token, PredicateToken.range(20, 50))
 
 
 if __name__ == "__main__":

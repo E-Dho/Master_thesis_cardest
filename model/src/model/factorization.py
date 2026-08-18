@@ -72,6 +72,9 @@ def apply_factorization_to_metadata(
         upstream_attribution=metadata.upstream_attribution,
         schema_hash=None,
         factorization_plan=plan,
+        join_root=metadata.join_root,
+        join_tables=metadata.join_tables,
+        join_edges=metadata.join_edges,
     )
 
 

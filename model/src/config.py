@@ -145,17 +145,18 @@ def validate_config(config: dict[str, Any]) -> None:
         )
     predicate_encoding = config.get("predicate_encoding", {})
     encoding_mode = str(predicate_encoding.get("mode", "categorical_legacy"))
-    if encoding_mode not in {"categorical_legacy", "compositional", "hybrid"}:
+    if encoding_mode not in {"categorical_legacy", "compositional", "hybrid", "two_slot"}:
         raise ValueError(
-            "predicate_encoding.mode must be categorical_legacy, compositional, or hybrid"
+            "predicate_encoding.mode must be categorical_legacy, compositional, hybrid, or two_slot"
         )
-    if encoding_mode in {"compositional", "hybrid"}:
+    if encoding_mode in {"compositional", "hybrid", "two_slot"}:
         model = config.get("model", {})
         if str(model.get("input_encoding", "embed")) != "embed":
             raise ValueError(
-                "predicate_encoding.mode=compositional/hybrid requires "
+                "predicate_encoding.mode=compositional/hybrid/two_slot requires "
                 "model.input_encoding=embed"
             )
+    if encoding_mode in {"compositional", "hybrid"}:
         for key in [
             "operator_embedding_size",
             "value_embedding_size",
@@ -164,6 +165,22 @@ def validate_config(config: dict[str, Any]) -> None:
         ]:
             if int(predicate_encoding.get(key, 1) or 0) <= 0:
                 raise ValueError(f"predicate_encoding.{key} must be positive")
+    training = config.get("training", {})
+    early_stopping_patience_steps = int(
+        training.get(
+            "early_stopping_patience_steps",
+            training.get("early_stopping_patience", 0),
+        )
+        or 0
+    )
+    if early_stopping_patience_steps < 0:
+        raise ValueError("training early stopping patience must be nonnegative")
+    if early_stopping_patience_steps > 0:
+        metrics_interval = int(training.get("validation_interval_steps", 0) or 0)
+        if metrics_interval <= 0:
+            raise ValueError(
+                "training early stopping requires training.validation_interval_steps > 0"
+            )
     validation = config.get("validation", {})
     if validation.get("enabled", False):
         interval_steps = int(

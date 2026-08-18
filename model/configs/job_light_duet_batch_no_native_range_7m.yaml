@@ -67,8 +67,11 @@ predicate_generation:
   seed: 0
 
 predicate_encoding:
-  mode: categorical_legacy
-  max_predicates_per_column: 1
+  mode: two_slot
+  operator_embedding_size: 8
+  value_embedding_size: 32
+  merge_hidden_size: 64
+  max_predicates_per_column: 2
 
 training:
   seed: 0
