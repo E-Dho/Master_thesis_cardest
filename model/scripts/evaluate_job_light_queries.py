@@ -386,7 +386,12 @@ def eval_query_native(
         wrapped.last_backbone_seconds = perf_counter() - backbone_start
         outputs = TorchBackboneOutputs(
             logits=logits,
-            split_logits=model.split_logits(logits),
+            split_logits=model.split_head_outputs(logits),
+            output_embeddings=(
+                [embedding.weight for embedding in model.output_embeddings]
+                if getattr(model.config, "output_encoding", "one_hot") == "embed"
+                else None
+            ),
         )
         decode_start = perf_counter()
         factor_values = []

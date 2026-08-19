@@ -33,6 +33,7 @@ class TorchBackboneOutputs:
 
     logits: Any
     split_logits: list[Any]
+    output_embeddings: list[Any] | None = None
 
 
 class IdentityOutputAdapter:
@@ -93,7 +94,13 @@ class TorchIdentityOutputAdapter:
             head_index = head_indices[0]
         else:
             head_index = original_column_index
-        return torch.softmax(backbone_outputs.split_logits[head_index], dim=1)
+        logits = _project_head_output(
+            backbone_outputs.split_logits[head_index],
+            None
+            if backbone_outputs.output_embeddings is None
+            else backbone_outputs.output_embeddings[head_index],
+        )
+        return torch.softmax(logits, dim=1)
 
     def column_factor(
         self,
@@ -570,6 +577,11 @@ class FactorizedColumnProbabilityEvaluator:
             return cached
         head_index = self.factorization.factor_column_indices[factor_index]
         base_logits = self.backbone_outputs.split_logits[head_index]
+        output_embedding = (
+            None
+            if self.backbone_outputs.output_embeddings is None
+            else self.backbone_outputs.output_embeddings[head_index]
+        )
         if factor_index == 0:
             prefix_for_batch = torch.empty(
                 self.batch_size,
@@ -587,15 +599,16 @@ class FactorizedColumnProbabilityEvaluator:
                 base_logits,
                 prefix_for_batch,
                 valid_class_mask=valid_class_mask,
+                output_embedding=output_embedding,
             )
             distribution = torch.softmax(logits, dim=1).unsqueeze(1)
         else:
             prefix_count = int(prefixes.shape[0])
-            domain = self.factorization.factor_domains[factor_index]
+            base_width = int(base_logits.shape[1])
             expanded_base = (
                 base_logits.unsqueeze(1)
-                .expand(self.batch_size, prefix_count, domain)
-                .reshape(self.batch_size * prefix_count, domain)
+                .expand(self.batch_size, prefix_count, base_width)
+                .reshape(self.batch_size * prefix_count, base_width)
             )
             expanded_prefixes = (
                 prefixes.unsqueeze(0)
@@ -612,7 +625,9 @@ class FactorizedColumnProbabilityEvaluator:
                 expanded_base,
                 expanded_prefixes,
                 valid_class_mask=valid_class_mask,
+                output_embedding=output_embedding,
             )
+            domain = int(self.factorization.factor_domains[factor_index])
             distribution = torch.softmax(logits, dim=1).reshape(
                 self.batch_size,
                 prefix_count,
@@ -632,6 +647,12 @@ def _encoded_id_or_none(column: ColumnMetadata, value: Any) -> int | None:
         return column.encode_value(value)
     except ValueError:
         return None
+
+
+def _project_head_output(head_output: Any, output_embedding: Any | None) -> Any:
+    if output_embedding is None:
+        return head_output
+    return head_output @ output_embedding.t()
 
 
 def _encoded_interval_matches_predicate(

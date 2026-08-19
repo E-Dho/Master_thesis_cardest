@@ -149,6 +149,9 @@ class PredicateTrainingContextGenerator:
                     contexts.append(context)
                     repeated_rows.append(row)
                     continue
+                if self._requires_root(metadata) and not context.included_tables:
+                    rejected += 1
+                    continue
                 if not context_satisfies_row(context, row, metadata):
                     rejected += 1
                     continue
@@ -181,6 +184,9 @@ class PredicateTrainingContextGenerator:
         for row in encoded_rows:
             for _ in range(self.per_row_contexts if self.enabled else 1):
                 context = self._generate_one(row, metadata, rng)
+                if self._requires_root(metadata) and not context.included_tables:
+                    rejected += 1
+                    continue
                 if not context_satisfies_row(context, row, metadata):
                     rejected += 1
                     continue
@@ -206,7 +212,12 @@ class PredicateTrainingContextGenerator:
     ) -> GeneratedTrainingContext:
         included_tables = self._sample_included_tables(encoded_row, metadata, rng)
         inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
-        ordinary = self._ordinary_predicates(encoded_row, metadata, rng)
+        ordinary = self._ordinary_predicates(
+            encoded_row,
+            metadata,
+            rng,
+            included_tables,
+        )
         tokens = tuple(
             tokens_for_query_tables(
                 metadata,
@@ -255,6 +266,19 @@ class PredicateTrainingContextGenerator:
             return frozenset()
         if self.table_subset_sampling == "full" or not self.enabled:
             return frozenset(present)
+        if self.table_subset_sampling == "neurocard_rooted_connected":
+            graph = infer_join_graph(metadata)
+            if graph.root_table not in present:
+                return frozenset()
+            candidates = connected_table_subsets(
+                metadata,
+                allowed_tables=present,
+                required_root=graph.root_table,
+            )
+            if not candidates:
+                return frozenset({graph.root_table})
+            index = int(rng.integers(0, len(candidates)))
+            return frozenset(candidates[index])
         if self.table_subset_sampling != "connected":
             raise ValueError(
                 f"unsupported predicate_generation.table_subset_sampling "
@@ -266,16 +290,26 @@ class PredicateTrainingContextGenerator:
         index = int(rng.integers(0, len(candidates)))
         return frozenset(candidates[index])
 
+    def _requires_root(self, metadata: ModelMetadata) -> bool:
+        return (
+            self.enabled
+            and self.table_subset_sampling == "neurocard_rooted_connected"
+            and bool(infer_join_graph(metadata).root_table)
+        )
+
     def _ordinary_predicates(
         self,
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        included_tables: frozenset[str],
     ) -> dict[str, PredicateToken]:
         ordinary: dict[str, PredicateToken] = {}
         caches = self._column_caches(metadata)
         for column_index, column in enumerate(metadata.columns):
             if column.kind != ColumnKind.DATA:
+                continue
+            if column.table is not None and column.table not in included_tables:
                 continue
             value = column.domain[int(encoded_row[column_index])]
             token = self._sample_satisfied_predicate(caches[column_index], value, rng)
@@ -332,7 +366,6 @@ class PredicateTrainingContextGenerator:
         if not (
             self.enable_native_range_tokens
             and self.native_range_probability > 0.0
-            and domain_size <= self.native_range_max_domain_size
         ):
             if bool(rng.integers(0, 2)):
                 stop = bisect_right(comparable_values, value)
@@ -487,6 +520,7 @@ def connected_table_subsets(
     metadata: ModelMetadata,
     *,
     allowed_tables: frozenset[str] | set[str] | None = None,
+    required_root: str | None = None,
 ) -> tuple[frozenset[str], ...]:
     """Enumerate nonempty connected table subsets within the join graph."""
 
@@ -494,11 +528,17 @@ def connected_table_subsets(
     allowed = set(allowed_tables if allowed_tables is not None else graph.tables)
     tables = tuple(table for table in graph.tables if table in allowed)
     if not graph.edges:
-        return tuple(frozenset((table,)) for table in tables)
+        return tuple(
+            frozenset((table,))
+            for table in tables
+            if required_root is None or table == required_root
+        )
     subsets: list[frozenset[str]] = []
     for size in range(1, len(tables) + 1):
         for combo in combinations(tables, size):
             subset = frozenset(combo)
+            if required_root is not None and required_root not in subset:
+                continue
             if _is_connected_subset(subset, graph.edges):
                 subsets.append(subset)
     return tuple(subsets)

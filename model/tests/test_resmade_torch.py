@@ -174,6 +174,101 @@ class ResMADETorchTest(unittest.TestCase):
             )
         )
 
+    def test_binary_duet_predicates_do_not_allocate_literal_embeddings(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["model"]["input_encoding"] = "duet_binary"
+        config["model"]["embedding_size"] = 8
+        config["predicate_encoding"] = {
+            "mode": "two_slot_binary_duet",
+            "multi_predicate_merge": "sum",
+            "merge_hidden_size": 8,
+            "max_predicates_per_column": 2,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        self.assertEqual(len(model.value_embeddings), 0)
+        self.assertFalse(hasattr(model, "operator_embedding"))
+        self.assertEqual(
+            tuple(model.binary_value_widths_by_column),
+            tuple(binary_literal_width(column.domain_size) for column in source.metadata.columns),
+        )
+
+    def test_binary_duet_range_sums_shared_slot_encodings(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["model"]["input_encoding"] = "duet_binary"
+        config["model"]["embedding_size"] = 8
+        config["predicate_encoding"] = {
+            "mode": "two_slot_binary_duet",
+            "multi_predicate_merge": "sum",
+            "merge_hidden_size": 8,
+            "max_predicates_per_column": 2,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        vocabularies = PredicateVocabularies.from_metadata(
+            source.metadata,
+            encoding_mode="two_slot_binary_duet",
+        )
+        wildcard = [PredicateToken.wildcard()] * len(source.metadata.columns)
+        one_sided = list(wildcard)
+        one_sided[1] = PredicateToken(PredicateOp.GREATER_EQUAL, "b1")
+        other_side = list(wildcard)
+        other_side[1] = PredicateToken(PredicateOp.LESS_EQUAL, "b2")
+        ranged = list(wildcard)
+        ranged[1] = PredicateToken.range("b1", "b2")
+
+        one_ids = encode_tokens_tensor([one_sided], vocabularies)
+        other_ids = encode_tokens_tensor([other_side], vocabularies)
+        range_ids = encode_tokens_tensor([ranged], vocabularies)
+        column_index = 1
+        one_slot = model._encode_binary_duet_slot(
+            column_index,
+            one_ids[:, column_index, 0],
+            one_ids[:, column_index, 1],
+            model.predicate_slot_networks[column_index],
+        )
+        other_slot = model._encode_binary_duet_slot(
+            column_index,
+            other_ids[:, column_index, 0],
+            other_ids[:, column_index, 1],
+            model.predicate_slot_networks[column_index],
+        )
+        range_encoded = model.encode_inputs(range_ids)[
+            :,
+            sum(model.column_input_widths[:column_index]):sum(
+                model.column_input_widths[: column_index + 1]
+            ),
+        ]
+        self.assertTrue(torch.allclose(range_encoded, one_slot + other_slot))
+
+        loss = range_encoded.sum()
+        loss.backward()
+        first_linear = model.predicate_slot_networks[column_index][0]
+        self.assertGreater(float(first_linear.weight.grad.norm()), 0.0)
+
+    def test_binary_duet_wildcard_uses_explicit_special_embedding(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["model"]["input_encoding"] = "duet_binary"
+        config["model"]["embedding_size"] = 8
+        config["predicate_encoding"] = {
+            "mode": "two_slot_binary_duet",
+            "multi_predicate_merge": "sum",
+            "merge_hidden_size": 8,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        vocabularies = PredicateVocabularies.from_metadata(
+            source.metadata,
+            encoding_mode="two_slot_binary_duet",
+        )
+        wildcard = [PredicateToken.wildcard()] * len(source.metadata.columns)
+        encoded = model.encode_inputs(encode_tokens_tensor([wildcard], vocabularies))
+        first_width = model.column_input_widths[0]
+        expected = model.special_token_embeddings[0](
+            torch.tensor([0], dtype=torch.long)
+        )
+        self.assertTrue(torch.allclose(encoded[:, :first_width], expected))
+
     def test_autoregressive_no_current_or_future_leakage(self) -> None:
         model, source, vocabularies = self._model(residual=True, direct_io=True)
         tokens_a = tokens_for_query_tables(source.metadata, {"A"}, {"F_A_to_B"})
@@ -235,21 +330,31 @@ class ResMADETorchTest(unittest.TestCase):
         self.assertEqual(loaded.output_slices, model.output_slices)
         self.assertEqual(payload["metadata"]["column_order"], "data_indicators_fanouts")
 
-    def test_factorized_resmade_rejects_direct_io(self) -> None:
-        metadata = self._factorized_metadata()
-        vocabularies = PredicateVocabularies.from_metadata(metadata)
-        with self.assertRaises(ValueError):
-            PredicateResMADE(
-                PredicateResMADEConfig(
-                    predicate_input_bins=vocabularies.input_bins,
-                    data_output_bins=metadata.data_output_bins,
-                    hidden_sizes=(16, 16),
-                    direct_io_connections=True,
-                    output_head_specs=metadata.factorization_plan.output_head_specs,
-                    factorization_plan=metadata.factorization_plan,
-                    anpm_config=ANPMConfig(enabled=True),
-                )
+    def test_direct_io_mask_allows_only_past_data_indicator_sources(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        vocabularies = PredicateVocabularies.from_metadata(source.metadata)
+        model = PredicateResMADE(
+            PredicateResMADEConfig(
+                predicate_input_bins=vocabularies.input_bins,
+                data_output_bins=source.metadata.data_output_bins,
+                column_kinds=tuple(column.kind.value for column in source.metadata.columns),
+                hidden_sizes=(16, 16),
+                direct_io_connections=True,
+                direct_io_source_kinds=("data", "indicator"),
+                embedding_size=4,
             )
+        )
+        assert model.direct_io_layer is not None
+        mask = model.direct_io_layer.mask
+        column_starts = np.cumsum((0, *model.column_input_widths[:-1]))
+        for output_head_index, spec in enumerate(model.output_head_specs):
+            out_start, out_stop = model.output_slices[output_head_index]
+            for input_column_index, column in enumerate(source.metadata.columns):
+                in_start = int(column_starts[input_column_index])
+                in_stop = in_start + model.column_input_widths[input_column_index]
+                block = mask[out_start:out_stop, in_start:in_stop]
+                if column.kind == ColumnKind.FANOUT or input_column_index >= spec.source_column_index:
+                    self.assertEqual(float(block.sum()), 0.0)
 
     def test_factorized_heads_use_original_column_degrees(self) -> None:
         metadata = self._factorized_metadata()
@@ -325,6 +430,59 @@ class ResMADETorchTest(unittest.TestCase):
         self.assertEqual(factor_two.shape, (2, 7))
         with self.assertRaises(ValueError):
             decoder.conditional_logits(1, torch.randn(3, 5), prefix)
+
+    def test_embedded_output_latent_anpm_shapes_and_gradients(self) -> None:
+        metadata = self._factorized_metadata()
+        vocabularies = PredicateVocabularies.from_metadata(metadata)
+        model = PredicateResMADE(
+            PredicateResMADEConfig(
+                predicate_input_bins=vocabularies.input_bins,
+                data_output_bins=metadata.data_output_bins,
+                column_kinds=tuple(column.kind.value for column in metadata.columns),
+                hidden_sizes=(32, 32),
+                direct_io_connections=True,
+                direct_io_source_kinds=("data", "indicator"),
+                embedding_size=8,
+                output_encoding="embed",
+                output_embedding_size=16,
+                output_head_specs=metadata.factorization_plan.output_head_specs,
+                factorization_plan=metadata.factorization_plan,
+                anpm_config=ANPMConfig(
+                    enabled=True,
+                    previous_factor_embedding_size=8,
+                    hidden_size=16,
+                    decode_chunk_size=5,
+                ),
+            )
+        )
+        tokens = [[PredicateToken.wildcard(), PredicateToken.wildcard()]]
+        token_ids = encode_tokens_tensor(tokens, vocabularies)
+        rows = torch.tensor([[0, 0], [19, 1], [7, 0], [13, 1]])
+        weights = torch.ones_like(rows, dtype=torch.float32)
+        outputs = model(token_ids.expand(rows.shape[0], -1))
+        split_outputs = model.split_head_outputs(outputs)
+        self.assertEqual(split_outputs[0].shape, (4, 16))
+        self.assertEqual(
+            model.project_head_output(0, split_outputs[0]).shape[1],
+            model.output_head_specs[0].domain_size,
+        )
+        breakdown = torch_weighted_per_head_cross_entropy(
+            outputs,
+            rows,
+            weights,
+            metadata,
+            anpm_decoders=model.anpm_decoders,
+            split_head_outputs=split_outputs,
+            output_embeddings=[embedding.weight for embedding in model.output_embeddings],
+        )
+        breakdown.total_loss.backward()
+        self.assertGreater(float(model.output_embeddings[0].weight.grad.norm()), 0.0)
+        self.assertTrue(
+            any(
+                parameter.grad is not None and float(parameter.grad.norm()) > 0.0
+                for parameter in model.anpm_decoders.parameters()
+            )
+        )
 
     def test_distjoin_transform_matches_reference_equation(self) -> None:
         decoder = ANPMColumnDecoder(

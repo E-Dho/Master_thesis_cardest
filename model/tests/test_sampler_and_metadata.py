@@ -54,7 +54,7 @@ class SamplerMetadataTest(unittest.TestCase):
         ):
             validate_config(load_simple_yaml(path))
 
-    def test_factorized_config_rejects_direct_io_and_parses_block_lists(self) -> None:
+    def test_factorized_config_validates_direct_io_source_kinds_and_parses_block_lists(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/config.yaml"
             with open(path, "w", encoding="utf-8") as handle:
@@ -80,6 +80,8 @@ class SamplerMetadataTest(unittest.TestCase):
                 )
             config = load_simple_yaml(path)
         self.assertEqual(config["factorization"]["blacklist_kinds"], ["indicator", "fanout"])
+        validate_config(config)
+        config["model"]["direct_io_source_kinds"] = ["data", "future"]
         with self.assertRaises(ValueError):
             validate_config(config)
 

@@ -26,6 +26,7 @@ from model.src.predicates.torch_encoding import encode_tokens_tensor
 from model.src.predicates.vocabulary import PredicateVocabularies, key_to_token
 from model.src.predicates.vocabulary import (
     TWO_SLOT_OPERATOR_BINS,
+    two_slot_binary_widths_by_column,
     two_slot_value_bins_by_column,
 )
 from model.src.training.losses import cumulative_inverse_fanout_weights, effective_sample_size
@@ -99,17 +100,29 @@ def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> Predi
         PredicateResMADEConfig(
             predicate_input_bins=vocabularies.input_bins,
             data_output_bins=metadata.data_output_bins,
+            column_kinds=tuple(str(column.kind.value) for column in metadata.columns),
             hidden_sizes=tuple(model_config.get("hidden_sizes", [128, 128])),
             residual_connections=bool(model_config.get("residual_connections", True)),
             direct_io_connections=bool(model_config.get("direct_io_connections", True)),
+            direct_io_source_kinds=tuple(
+                str(kind)
+                for kind in model_config.get(
+                    "direct_io_source_kinds",
+                    ["data", "indicator", "fanout"],
+                )
+            ),
             activation=str(model_config.get("activation", "relu")),
             input_encoding=str(model_config.get("input_encoding", "embed")),
+            output_encoding=str(model_config.get("output_encoding", "one_hot")),
+            output_embedding_size=int(model_config.get("output_embedding_size", 64)),
+            output_embeddings_tied=bool(model_config.get("output_embeddings_tied", False)),
             embedding_size=int(model_config.get("embedding_size", 16)),
             predicate_encoding_mode=encoding_mode,
             operator_embedding_size=int(predicate_encoding.get("operator_embedding_size", 8)),
             value_embedding_size=int(predicate_encoding.get("value_embedding_size", 32)),
             special_embedding_size=int(predicate_encoding.get("special_embedding_size", 8)),
             merge_hidden_size=int(predicate_encoding.get("merge_hidden_size", 64)),
+            multi_predicate_merge=str(predicate_encoding.get("multi_predicate_merge", "sum")),
             **compositional_features,
             residual_dropout=float(model_config.get("residual_dropout", 0.0)),
             fixed_ordering=bool(model_config.get("fixed_ordering", True)),
@@ -129,10 +142,11 @@ def predicate_vocabularies_from_config(
     predicate_generation = config.get("predicate_generation", {})
     predicate_encoding = config.get("predicate_encoding", {})
     encoding_mode = str(predicate_encoding.get("mode", "categorical_legacy"))
-    include_native_ranges = (
-        encoding_mode != "two_slot"
-        and bool(predicate_generation.get("enable_native_range_tokens", False))
-    )
+    include_native_ranges = encoding_mode not in {
+        "two_slot",
+        "two_slot_categorical_legacy",
+        "two_slot_binary_duet",
+    } and bool(predicate_generation.get("enable_native_range_tokens", False))
     native_range_max_domain_size = int(
         predicate_generation.get("native_range_max_domain_size", 512)
     )
@@ -140,7 +154,15 @@ def predicate_vocabularies_from_config(
         metadata,
         include_native_ranges=include_native_ranges,
         native_range_max_domain_size=native_range_max_domain_size,
-        encoding_mode="two_slot" if encoding_mode == "two_slot" else "categorical",
+        encoding_mode=(
+            "two_slot_binary_duet"
+            if encoding_mode == "two_slot_binary_duet"
+            else (
+                "two_slot"
+                if encoding_mode in {"two_slot", "two_slot_categorical_legacy"}
+                else "categorical"
+            )
+        ),
     )
 
 
@@ -150,9 +172,15 @@ def _predicate_encoding_feature_tables(
     *,
     mode: str,
 ) -> dict[str, Any]:
-    if mode == "two_slot":
+    if mode in {"two_slot", "two_slot_categorical_legacy"}:
         return {
             "value_bins_by_column": two_slot_value_bins_by_column(metadata),
+            "operator_bins": TWO_SLOT_OPERATOR_BINS,
+        }
+    if mode == "two_slot_binary_duet":
+        return {
+            "value_bins_by_column": two_slot_value_bins_by_column(metadata),
+            "binary_value_widths_by_column": two_slot_binary_widths_by_column(metadata),
             "operator_bins": TWO_SLOT_OPERATOR_BINS,
         }
     if mode not in {"compositional", "hybrid"}:
@@ -484,6 +512,58 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         for fanout_name, values in fanout_ess_values.items()
         if values
     }
+    output_embedding_parameter_count = int(
+        sum(parameter.numel() for parameter in getattr(model, "output_embeddings").parameters())
+    )
+    direct_io_parameter_count = int(
+        0
+        if getattr(model, "direct_io_layer", None) is None
+        else sum(parameter.numel() for parameter in model.direct_io_layer.parameters())
+    )
+    binary_widths = tuple(
+        int(width)
+        for width in getattr(model.config, "binary_value_widths_by_column", ()) or ()
+    )
+    binary_literal_input_dimensions = int(sum(binary_widths))
+    old_categorical_literal_embedding_params = int(
+        sum(column.domain_size * int(model.config.value_embedding_size) for column in metadata.columns)
+    )
+    high_cardinality_columns = []
+    for column_index, column in enumerate(metadata.columns):
+        if column.kind.value != "data" or column.domain_size < 2048:
+            continue
+        factorization = metadata.factorization_plan.factorization_for_column(column_index)
+        high_cardinality_columns.append(
+            {
+                "column": column.name,
+                "domain_size": int(column.domain_size),
+                "binary_width": (
+                    int(binary_widths[column_index]) if binary_widths else None
+                ),
+                "old_categorical_input_embedding_params": int(
+                    column.domain_size * int(model.config.value_embedding_size)
+                ),
+                "new_binary_input_dimensions": (
+                    int(binary_widths[column_index]) if binary_widths else None
+                ),
+                "factor_domains": (
+                    None if factorization is None else tuple(factorization.factor_domains)
+                ),
+                "output_embedding_dimensions": (
+                    None
+                    if getattr(model.config, "output_encoding", "one_hot") != "embed"
+                    else [
+                        [
+                            int(metadata.factorization_plan.output_head_specs[head_index].domain_size),
+                            int(model.config.output_embedding_size),
+                        ]
+                        for head_index in metadata.factorization_plan.output_heads_for_column(
+                            column_index
+                        )
+                    ]
+                ),
+            }
+        )
     summary = {
         "checkpoint": str(checkpoint_path),
         "parameter_count": model.parameter_count(),
@@ -519,6 +599,27 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "fanout_effective_sample_size": fanout_ess_summary,
         "output_width_original": output_width_original,
         "output_width_factorized": output_width_factorized,
+        "predicate_encoding_mode": getattr(
+            model.config,
+            "predicate_encoding_mode",
+            "categorical_legacy",
+        ),
+        "total_binary_literal_input_dimensions": binary_literal_input_dimensions,
+        "parameters_saved_vs_categorical_literal_embeddings": (
+            old_categorical_literal_embedding_params
+            - _module_parameter_count(getattr(model, "value_embeddings", None))
+        ),
+        "direct_io_parameter_count": direct_io_parameter_count,
+        "direct_io_source_kinds": tuple(getattr(model.config, "direct_io_source_kinds", ())),
+        "output_encoding": getattr(model.config, "output_encoding", "one_hot"),
+        "output_embedding_parameter_count": output_embedding_parameter_count,
+        "backbone_output_width": int(getattr(model, "output_width", 0)),
+        "anpm_latent_dimension": (
+            int(getattr(model.config, "output_embedding_size", 0))
+            if getattr(model.config, "output_encoding", "one_hot") == "embed"
+            else None
+        ),
+        "high_cardinality_binary_columns": high_cardinality_columns,
         "peak_gpu_memory_bytes": peak_gpu_memory_bytes,
         "last_original_column_losses": last_original_column_losses,
         "last_factor_losses": last_factor_losses,
@@ -631,12 +732,20 @@ def _train_one_batch(
     head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
     optimizer.zero_grad(set_to_none=True)
     logits = model(token_ids)
+    split_head_outputs = model.split_head_outputs(logits)
+    output_embeddings = (
+        [embedding.weight for embedding in model.output_embeddings]
+        if getattr(model.config, "output_encoding", "one_hot") == "embed"
+        else None
+    )
     breakdown = torch_weighted_per_head_cross_entropy(
         logits,
         targets,
         head_weights,
         metadata,
         anpm_decoders=getattr(model, "anpm_decoders", None),
+        split_head_outputs=split_head_outputs,
+        output_embeddings=output_embeddings,
         head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
         mask_invalid_factor_combinations=bool(
             config.get("anpm", {}).get("mask_invalid_combinations", True)
@@ -734,12 +843,20 @@ def _run_validation(
             targets = torch.tensor(target_rows, dtype=torch.long, device=device)
             head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
             logits = model(token_ids)
+            split_head_outputs = model.split_head_outputs(logits)
+            output_embeddings = (
+                [embedding.weight for embedding in model.output_embeddings]
+                if getattr(model.config, "output_encoding", "one_hot") == "embed"
+                else None
+            )
             breakdown = torch_weighted_per_head_cross_entropy(
                 logits,
                 targets,
                 head_weights,
                 metadata,
                 anpm_decoders=getattr(model, "anpm_decoders", None),
+                split_head_outputs=split_head_outputs,
+                output_embeddings=output_embeddings,
                 head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
                 mask_invalid_factor_combinations=bool(
                     config.get("anpm", {}).get("mask_invalid_combinations", True)
@@ -812,9 +929,14 @@ def _predicate_embedding_gradient_coverage(
 ) -> dict[str, Any]:
     """Report whether observed non-wildcard predicate embeddings received gradients."""
 
-    if getattr(model.config, "input_encoding", "") != "embed":
+    if getattr(model.config, "input_encoding", "") not in {"embed", "duet_binary"}:
         return {"mode": "not_applicable", "reason": "input_encoding is not embed"}
-    if getattr(model.config, "predicate_encoding_mode", "") == "two_slot":
+    if getattr(model.config, "predicate_encoding_mode", "") == "two_slot_binary_duet":
+        return _binary_duet_gradient_coverage(model, token_rows, token_ids, metadata)
+    if getattr(model.config, "predicate_encoding_mode", "") in {
+        "two_slot",
+        "two_slot_categorical_legacy",
+    }:
         return _two_slot_gradient_coverage(model, token_rows, token_ids, metadata)
     if getattr(model.config, "predicate_encoding_mode", "") in {"compositional", "hybrid"}:
         return _compositional_gradient_coverage(model, token_rows, token_ids, metadata)
@@ -931,6 +1053,62 @@ def _two_slot_gradient_coverage(
     }
 
 
+def _binary_duet_gradient_coverage(
+    model: PredicateResMADE,
+    token_rows: list[list[Any]],
+    token_ids: Any,
+    metadata: object,
+) -> dict[str, Any]:
+    observed = 0
+    nonzero = 0
+    ordinary_observed = 0
+    ordinary_nonzero = 0
+    by_column: dict[str, dict[str, int]] = {}
+    for column_index, column in enumerate(metadata.columns):
+        network = model.predicate_slot_networks[column_index]
+        network_grad = network[0].weight.grad
+        special_grad = model.special_token_embeddings[column_index].weight.grad
+        has_network_grad = network_grad is not None and bool(network_grad.abs().sum() > 0)
+        has_special_grad = special_grad is not None and bool(special_grad.abs().sum() > 0)
+        seen_tokens = {
+            token_rows[row_index][column_index]
+            for row_index in range(len(token_rows))
+        }
+        column_counts = by_column.setdefault(
+            column.name,
+            {
+                "observed_non_wildcard_tokens": 0,
+                "nonzero_gradient_non_wildcard_tokens": 0,
+                "ordinary_observed_non_wildcard_tokens": 0,
+                "ordinary_nonzero_gradient_non_wildcard_tokens": 0,
+                "special_embedding_gradient_nonzero": int(has_special_grad),
+            },
+        )
+        for token in seen_tokens:
+            if token.op == PredicateOp.WILDCARD:
+                continue
+            observed += 1
+            column_counts["observed_non_wildcard_tokens"] += 1
+            token_has_grad = has_special_grad if token.op == PredicateOp.INV_FANOUT else has_network_grad
+            if token_has_grad:
+                nonzero += 1
+                column_counts["nonzero_gradient_non_wildcard_tokens"] += 1
+            if token.op != PredicateOp.INV_FANOUT:
+                ordinary_observed += 1
+                column_counts["ordinary_observed_non_wildcard_tokens"] += 1
+                if token_has_grad:
+                    ordinary_nonzero += 1
+                    column_counts["ordinary_nonzero_gradient_non_wildcard_tokens"] += 1
+    return {
+        "mode": "two_slot_binary_duet",
+        "observed_non_wildcard_tokens": observed,
+        "nonzero_gradient_non_wildcard_tokens": nonzero,
+        "ordinary_observed_non_wildcard_tokens": ordinary_observed,
+        "ordinary_nonzero_gradient_non_wildcard_tokens": ordinary_nonzero,
+        "by_column": by_column,
+    }
+
+
 def _compositional_gradient_coverage(
     model: PredicateResMADE,
     token_rows: list[list[Any]],
@@ -1030,6 +1208,12 @@ def _compositional_gradient_coverage(
 def _append_metrics(path: Path, metrics: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(metrics, sort_keys=True) + "\n")
+
+
+def _module_parameter_count(module: Any | None) -> int:
+    if module is None or not hasattr(module, "parameters"):
+        return 0
+    return int(sum(parameter.numel() for parameter in module.parameters()))
 
 
 def _save_checkpoint(

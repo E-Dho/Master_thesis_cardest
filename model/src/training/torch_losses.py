@@ -28,6 +28,8 @@ def torch_weighted_per_head_cross_entropy(
     metadata: ModelMetadata,
     *,
     anpm_decoders: Mapping[str, Any] | None = None,
+    split_head_outputs: list["torch.Tensor"] | None = None,
+    output_embeddings: list["torch.Tensor"] | None = None,
     head_loss_reduction: str = "mean",
     mask_invalid_factor_combinations: bool = True,
     epsilon: float = 1.0e-12,
@@ -48,6 +50,8 @@ def torch_weighted_per_head_cross_entropy(
             head_weights,
             metadata,
             anpm_decoders=anpm_decoders,
+            split_head_outputs=split_head_outputs,
+            output_embeddings=output_embeddings,
             head_loss_reduction=head_loss_reduction,
             mask_invalid_factor_combinations=mask_invalid_factor_combinations,
             epsilon=epsilon,
@@ -59,7 +63,13 @@ def torch_weighted_per_head_cross_entropy(
     fanout_losses: dict[str, float] = {}
     original_column_losses: dict[str, float] = {}
     for column_index, (start, stop) in enumerate(metadata.output_slices):
-        column_logits = logits[:, start:stop]
+        if split_head_outputs is None:
+            column_logits = logits[:, start:stop]
+        else:
+            column_logits = _project_head_output(
+                split_head_outputs[column_index],
+                None if output_embeddings is None else output_embeddings[column_index],
+            )
         unweighted = functional.cross_entropy(
             column_logits, targets[:, column_index].long(), reduction="none"
         )
@@ -98,6 +108,8 @@ def torch_factorized_grouped_cross_entropy(
     metadata: ModelMetadata,
     *,
     anpm_decoders: Mapping[str, Any] | None,
+    split_head_outputs: list["torch.Tensor"] | None = None,
+    output_embeddings: list["torch.Tensor"] | None = None,
     head_loss_reduction: str = "mean",
     mask_invalid_factor_combinations: bool = True,
     epsilon: float = 1.0e-12,
@@ -111,8 +123,11 @@ def torch_factorized_grouped_cross_entropy(
         raise ValueError("factorized loss requires ANPM decoders")
     plan = metadata.factorization_plan
     target_heads = factorize_rows(targets, metadata)
-    slices = metadata.model_output_slices
-    split_logits = [logits[:, start:stop] for start, stop in slices]
+    if split_head_outputs is None:
+        slices = metadata.model_output_slices
+        split_outputs = [logits[:, start:stop] for start, stop in slices]
+    else:
+        split_outputs = split_head_outputs
     per_column_losses: list[torch.Tensor] = []
     ordinary_losses: list[torch.Tensor] = []
     indicator_losses: list[torch.Tensor] = []
@@ -127,8 +142,12 @@ def torch_factorized_grouped_cross_entropy(
             if len(head_indices) != 1:
                 raise ValueError(f"column {column.name!r} must have one atomic head")
             head_index = head_indices[0]
+            column_logits = _project_head_output(
+                split_outputs[head_index],
+                None if output_embeddings is None else output_embeddings[head_index],
+            )
             unweighted = functional.cross_entropy(
-                split_logits[head_index],
+                column_logits,
                 targets[:, column_index].long(),
                 reduction="none",
             )
@@ -143,7 +162,7 @@ def torch_factorized_grouped_cross_entropy(
                 [target_heads[:, head_index].long() for head_index in head_indices],
                 dim=1,
             )
-            base_logits = [split_logits[head_index] for head_index in head_indices]
+            base_logits = [split_outputs[head_index] for head_index in head_indices]
             valid_mask_provider = None
             if mask_invalid_factor_combinations:
                 valid_mask_provider = lambda factor_index, prefix, f=factorization: (
@@ -153,6 +172,11 @@ def torch_factorized_grouped_cross_entropy(
                 base_logits,
                 true_factors,
                 valid_mask_provider=valid_mask_provider,
+                output_embeddings=(
+                    None
+                    if output_embeddings is None
+                    else [output_embeddings[head_index] for head_index in head_indices]
+                ),
             )
             factor_terms = []
             for local_factor_index, factor_logits in enumerate(decoded_logits):
@@ -201,3 +225,12 @@ def _mean_detached(values: list["torch.Tensor"]) -> float:
     import torch
 
     return float(torch.stack([value.detach().cpu() for value in values]).mean())
+
+
+def _project_head_output(
+    head_output: "torch.Tensor",
+    output_embedding: "torch.Tensor | None",
+) -> "torch.Tensor":
+    if output_embedding is None:
+        return head_output
+    return head_output @ output_embedding.t()

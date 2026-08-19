@@ -192,6 +192,7 @@ else:
             embedding_size: int,
             hidden_size: int,
             final_activation: str = "relu",
+            representation_size: int | None = None,
         ) -> None:
             super().__init__()
             if len(factor_domains) < 2:
@@ -208,6 +209,11 @@ else:
             self.embedding_size = int(embedding_size)
             self.hidden_size = int(hidden_size)
             self.final_activation = final_activation
+            self.representation_size = (
+                None if representation_size is None else int(representation_size)
+            )
+            if self.representation_size is not None and self.representation_size <= 0:
+                raise ValueError("representation_size must be positive")
             self.previous_factor_embeddings = nn.ModuleList(
                 nn.Embedding(domain, self.embedding_size)
                 for domain in self.factor_domains[:-1]
@@ -215,7 +221,11 @@ else:
             self.factor_hypernetworks = nn.ModuleList(
                 FactorHypernetwork(
                     prefix_embedding_size=self.embedding_size * factor_index,
-                    current_domain_size=domain,
+                    current_domain_size=(
+                        self.representation_size
+                        if self.representation_size is not None
+                        else domain
+                    ),
                     hidden_size=self.hidden_size,
                 )
                 for factor_index, domain in enumerate(self.factor_domains[1:], start=1)
@@ -227,6 +237,7 @@ else:
             true_factors: "torch.Tensor",
             *,
             valid_mask_provider: Any | None = None,
+            output_embeddings: Sequence["torch.Tensor"] | None = None,
         ) -> list["torch.Tensor"]:
             """Return factor logits using teacher-forced previous factor labels."""
 
@@ -248,6 +259,9 @@ else:
                         logits,
                         prefix,
                         valid_class_mask=valid_class_mask,
+                        output_embedding=(
+                            None if output_embeddings is None else output_embeddings[factor_index]
+                        ),
                     )
                 )
             return decoded
@@ -259,6 +273,7 @@ else:
             prefix_factors: "torch.Tensor",
             *,
             valid_class_mask: "torch.Tensor | None" = None,
+            output_embedding: "torch.Tensor | None" = None,
         ) -> "torch.Tensor":
             """Apply DistJoin's prefix-generated transform to one factor head.
 
@@ -277,12 +292,17 @@ else:
             if factor_index < 0 or factor_index >= len(self.factor_domains):
                 raise ValueError("factor_index outside decoder factor range")
             if base_logits.ndim != 2:
-                raise ValueError("base_logits must be [batch, factor_domain]")
+                raise ValueError("base_logits must be [batch, factor_domain_or_repr]")
             expected_domain = self.factor_domains[factor_index]
-            if base_logits.shape[1] != expected_domain:
+            expected_width = (
+                int(output_embedding.shape[1])
+                if output_embedding is not None
+                else expected_domain
+            )
+            if base_logits.shape[1] != expected_width:
                 raise ValueError(
-                    f"base logits width {base_logits.shape[1]} != factor domain "
-                    f"{expected_domain}"
+                    f"base width {base_logits.shape[1]} != expected width "
+                    f"{expected_width}"
                 )
             if prefix_factors.ndim != 2 or prefix_factors.shape[1] != factor_index:
                 raise ValueError("prefix_factors must be [batch, factor_index]")
@@ -291,11 +311,13 @@ else:
             if base_logits.shape[0] == 1 and prefix_factors.shape[0] != 1:
                 base_logits = base_logits.expand(prefix_factors.shape[0], -1)
             if factor_index == 0:
-                return self._apply_valid_class_mask(base_logits, valid_class_mask)
+                logits = self._project_output(base_logits, output_embedding)
+                return self._apply_valid_class_mask(logits, valid_class_mask)
             prefix_embedding = self._encode_prefix(factor_index, prefix_factors)
             parameters = self.generated_parameters(factor_index, prefix_embedding)
             transformed = self.distjoin_transform(base_logits, parameters)
-            return self._apply_valid_class_mask(transformed, valid_class_mask)
+            logits = self._project_output(transformed, output_embedding)
+            return self._apply_valid_class_mask(logits, valid_class_mask)
 
         def _encode_prefix(
             self,
@@ -376,6 +398,15 @@ else:
             if self.final_activation == "relu":
                 return torch.relu(logits)
             return logits
+
+        @staticmethod
+        def _project_output(
+            representation: "torch.Tensor",
+            output_embedding: "torch.Tensor | None",
+        ) -> "torch.Tensor":
+            if output_embedding is None:
+                return representation
+            return representation @ output_embedding.t()
 
         @staticmethod
         def _apply_valid_class_mask(

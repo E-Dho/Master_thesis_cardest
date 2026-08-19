@@ -101,11 +101,23 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("dataset.sampler_batch_size must be positive in live mode")
     if model.get("type") == "predicate_resmade" and not model.get("fixed_ordering", True):
         raise ValueError("predicate_resmade requires model.fixed_ordering=true")
+    output_encoding = str(model.get("output_encoding", "one_hot"))
+    if output_encoding not in {"one_hot", "embed"}:
+        raise ValueError("model.output_encoding must be one_hot or embed")
+    if output_encoding == "embed":
+        if int(model.get("output_embedding_size", 64) or 0) <= 0:
+            raise ValueError("model.output_embedding_size must be positive")
+        if bool(model.get("output_embeddings_tied", False)):
+            raise ValueError("model.output_embeddings_tied=true is not supported yet")
+    direct_io_source_kinds = tuple(
+        str(kind)
+        for kind in model.get("direct_io_source_kinds", ["data", "indicator", "fanout"])
+    )
+    if any(kind not in {"data", "indicator", "fanout"} for kind in direct_io_source_kinds):
+        raise ValueError(
+            "model.direct_io_source_kinds must contain only data, indicator, or fanout"
+        )
     if factorization_config.enabled:
-        if model.get("direct_io_connections", False):
-            raise ValueError(
-                "factorization.enabled=true requires model.direct_io_connections=false"
-            )
         if not anpm_config.enabled:
             raise ValueError("factorization.enabled=true requires anpm.enabled=true")
         decoder = str(inference.get("factorized_decoder", "anpm"))
@@ -139,22 +151,43 @@ def validate_config(config: dict[str, Any]) -> None:
     if per_row_contexts <= 0:
         raise ValueError("predicate_generation.per_row_contexts must be positive")
     table_subset_sampling = str(predicate_generation.get("table_subset_sampling", "full"))
-    if table_subset_sampling not in {"full", "connected"}:
+    if table_subset_sampling not in {"full", "connected", "neurocard_rooted_connected"}:
         raise ValueError(
-            "predicate_generation.table_subset_sampling must be 'full' or 'connected'"
+            "predicate_generation.table_subset_sampling must be 'full', 'connected', "
+            "or 'neurocard_rooted_connected'"
         )
     predicate_encoding = config.get("predicate_encoding", {})
     encoding_mode = str(predicate_encoding.get("mode", "categorical_legacy"))
-    if encoding_mode not in {"categorical_legacy", "compositional", "hybrid", "two_slot"}:
+    if encoding_mode not in {
+        "categorical_legacy",
+        "compositional",
+        "hybrid",
+        "two_slot",
+        "two_slot_categorical_legacy",
+        "two_slot_binary_duet",
+    }:
         raise ValueError(
-            "predicate_encoding.mode must be categorical_legacy, compositional, hybrid, or two_slot"
+            "predicate_encoding.mode must be categorical_legacy, compositional, "
+            "hybrid, two_slot, two_slot_categorical_legacy, or two_slot_binary_duet"
         )
-    if encoding_mode in {"compositional", "hybrid", "two_slot"}:
+    if str(model.get("input_encoding", "embed")) == "duet_binary":
+        if encoding_mode != "two_slot_binary_duet":
+            raise ValueError(
+                "model.input_encoding=duet_binary requires "
+                "predicate_encoding.mode=two_slot_binary_duet"
+            )
+    if encoding_mode in {
+        "compositional",
+        "hybrid",
+        "two_slot",
+        "two_slot_categorical_legacy",
+        "two_slot_binary_duet",
+    }:
         model = config.get("model", {})
-        if str(model.get("input_encoding", "embed")) != "embed":
+        if str(model.get("input_encoding", "embed")) not in {"embed", "duet_binary"}:
             raise ValueError(
                 "predicate_encoding.mode=compositional/hybrid/two_slot requires "
-                "model.input_encoding=embed"
+                "model.input_encoding=embed or duet_binary"
             )
     if encoding_mode in {"compositional", "hybrid"}:
         for key in [

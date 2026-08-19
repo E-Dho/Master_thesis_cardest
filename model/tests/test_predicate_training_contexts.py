@@ -18,6 +18,7 @@ from model.src.predicates.generation import (
 )
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.vocabulary import PredicateVocabularies
+from model.src.predicates.vocabulary import binary_bits_lsb, binary_literal_width
 from model.src.training.losses import cumulative_inverse_fanout_weights
 
 
@@ -60,6 +61,22 @@ class PredicateTrainingContextTest(unittest.TestCase):
         self.assertIn(frozenset({"B", "C"}), subsets)
         self.assertNotIn(frozenset({"A", "C"}), subsets)
 
+    def test_binary_literal_encoding_is_lsb_first(self) -> None:
+        self.assertEqual(binary_literal_width(1), 1)
+        self.assertEqual(binary_literal_width(16), 4)
+        self.assertEqual(binary_bits_lsb(13, 4), (1, 0, 1, 1))
+
+    def test_rooted_connected_subsets_include_root(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        subsets = connected_table_subsets(
+            source.metadata,
+            required_root="A",
+        )
+        self.assertIn(frozenset({"A"}), subsets)
+        self.assertIn(frozenset({"A", "B"}), subsets)
+        self.assertNotIn(frozenset({"B"}), subsets)
+        self.assertNotIn(frozenset({"B", "C"}), subsets)
+
     def test_fanout_tokens_follow_child_table_semantics(self) -> None:
         source = SyntheticFullJoinSampleSource()
         self.assertEqual(
@@ -74,6 +91,41 @@ class PredicateTrainingContextTest(unittest.TestCase):
             inverse_fanouts_for_table_subset(source.metadata, frozenset({"A", "B"})),
             frozenset({"F_B_to_C"}),
         )
+
+    def test_neurocard_rooted_generation_wildcards_omitted_table_data(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "table_subset_sampling": "neurocard_rooted_connected",
+                "wildcard_probability": 0.0,
+                "equality_probability": 1.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+            }
+        )
+        batch = source.batches(80, seed=13)
+        contexts, repeated_rows, _ = generator.generate_batch(
+            encoded_rows=batch.encoded_values,
+            metadata=source.metadata,
+            rng=np.random.default_rng(23),
+        )
+        self.assertTrue(contexts)
+        self.assertTrue(all("A" in context.included_tables for context in contexts))
+        self.assertTrue(any(context.included_tables == frozenset({"A"}) for context in contexts))
+        self.assertTrue(any(len(context.included_tables) > 1 for context in contexts))
+        for context, row in zip(contexts, repeated_rows):
+            self.assertTrue(context_satisfies_row(context, row, source.metadata))
+            for column, token in zip(source.metadata.columns, context.tokens):
+                if column.kind == ColumnKind.DATA and column.table not in context.included_tables:
+                    self.assertEqual(token.op, PredicateOp.WILDCARD)
+                if column.kind == ColumnKind.FANOUT:
+                    child = column.fanout_source.split("->", 1)[1]
+                    if child in context.included_tables:
+                        self.assertEqual(token.op, PredicateOp.WILDCARD)
+                    else:
+                        self.assertEqual(token.op, PredicateOp.INV_FANOUT)
 
     def test_current_fanout_does_not_weight_its_own_head(self) -> None:
         source = SyntheticFullJoinSampleSource()

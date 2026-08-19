@@ -6,6 +6,8 @@ from typing import Sequence
 from model.src.data.schema import FactorizationPlan, OutputHeadSpec
 from model.src.model.anpm import ANPMColumnDecoder, ANPMConfig
 from model.src.model.masked_layers import MaskedLinear, MaskedResidualBlock, mask_from_degrees
+from model.src.predicates.operators import PredicateOp
+from model.src.predicates.vocabulary import TWO_SLOT_OP_TO_ID
 
 import torch
 from torch import nn
@@ -17,11 +19,16 @@ class PredicateResMADEConfig:
 
     predicate_input_bins: tuple[int, ...]
     data_output_bins: tuple[int, ...]
+    column_kinds: tuple[str, ...] = ()
     hidden_sizes: tuple[int, ...] = (512, 512, 512, 512)
     residual_connections: bool = True
     direct_io_connections: bool = True
+    direct_io_source_kinds: tuple[str, ...] = ("data", "indicator", "fanout")
     activation: str = "relu"
     input_encoding: str = "embed"
+    output_encoding: str = "one_hot"
+    output_embedding_size: int = 64
+    output_embeddings_tied: bool = False
     embedding_size: int = 32
     predicate_encoding_mode: str = "categorical_legacy"
     operator_embedding_size: int = 8
@@ -33,8 +40,10 @@ class PredicateResMADEConfig:
     token_upper_ids_by_column: tuple[tuple[int, ...], ...] | None = None
     token_special_ids_by_column: tuple[tuple[int, ...], ...] | None = None
     value_bins_by_column: tuple[int, ...] | None = None
+    binary_value_widths_by_column: tuple[int, ...] | None = None
     operator_bins: int = 8
     special_bins: int = 4
+    multi_predicate_merge: str = "sum"
     residual_dropout: float = 0.0
     fixed_ordering: bool = True
     output_head_specs: tuple[OutputHeadSpec, ...] | None = None
@@ -46,29 +55,47 @@ class PredicateResMADEConfig:
             raise ValueError("predicate_input_bins and data_output_bins must align by column")
         if len(self.predicate_input_bins) == 0:
             raise ValueError("at least one modeled column is required")
+        if self.column_kinds and len(self.column_kinds) != len(self.predicate_input_bins):
+            raise ValueError("column_kinds must align with predicate_input_bins")
         if not self.hidden_sizes:
             raise ValueError("at least one hidden layer is required")
         if any(size <= 0 for size in self.hidden_sizes):
             raise ValueError("hidden_sizes must be positive")
         if self.residual_connections and len(set(self.hidden_sizes)) != 1:
             raise ValueError("residual hidden layers must have compatible dimensions")
-        if self.input_encoding not in {"embed", "one_hot"}:
-            raise ValueError("input_encoding must be 'embed' or 'one_hot'")
+        if self.input_encoding not in {"embed", "one_hot", "duet_binary"}:
+            raise ValueError("input_encoding must be 'embed', 'one_hot', or 'duet_binary'")
+        if self.output_encoding not in {"one_hot", "embed"}:
+            raise ValueError("output_encoding must be 'one_hot' or 'embed'")
+        if self.output_encoding == "embed" and self.output_embedding_size <= 0:
+            raise ValueError("output_embedding_size must be positive")
+        if self.output_embeddings_tied:
+            raise ValueError("output_embeddings_tied=true is not supported yet")
         if self.predicate_encoding_mode not in {
             "categorical_legacy",
             "compositional",
             "hybrid",
             "two_slot",
+            "two_slot_categorical_legacy",
+            "two_slot_binary_duet",
         }:
             raise ValueError(
-                "predicate_encoding_mode must be categorical_legacy, compositional, hybrid, or two_slot"
+                "predicate_encoding_mode must be categorical_legacy, compositional, "
+                "hybrid, two_slot, two_slot_categorical_legacy, or two_slot_binary_duet"
             )
-        if self.predicate_encoding_mode in {"compositional", "hybrid", "two_slot"}:
-            if self.input_encoding != "embed":
+        if self.predicate_encoding_mode in {
+            "compositional",
+            "hybrid",
+            "two_slot",
+            "two_slot_categorical_legacy",
+            "two_slot_binary_duet",
+        }:
+            if self.input_encoding not in {"embed", "duet_binary"}:
                 raise ValueError(
-                    "compositional/hybrid/two_slot predicate encoding requires input_encoding=embed"
+                    "compositional/hybrid/two-slot predicate encoding requires "
+                    "input_encoding=embed or duet_binary"
                 )
-        if self.predicate_encoding_mode == "two_slot":
+        if self.predicate_encoding_mode in {"two_slot", "two_slot_categorical_legacy"}:
             if self.value_bins_by_column is None:
                 raise ValueError("two_slot predicate encoding requires value_bins_by_column")
             if len(self.value_bins_by_column) != len(self.predicate_input_bins):
@@ -77,6 +104,27 @@ class PredicateResMADEConfig:
                 ("operator_embedding_size", self.operator_embedding_size),
                 ("value_embedding_size", self.value_embedding_size),
                 ("merge_hidden_size", self.merge_hidden_size),
+            ]:
+                if size <= 0:
+                    raise ValueError(f"{size_name} must be positive")
+        if self.predicate_encoding_mode == "two_slot_binary_duet":
+            if self.value_bins_by_column is None:
+                raise ValueError("two_slot_binary_duet requires value_bins_by_column")
+            if self.binary_value_widths_by_column is None:
+                raise ValueError(
+                    "two_slot_binary_duet requires binary_value_widths_by_column"
+                )
+            if len(self.binary_value_widths_by_column) != len(self.predicate_input_bins):
+                raise ValueError(
+                    "binary_value_widths_by_column must align with predicate_input_bins"
+                )
+            if self.multi_predicate_merge != "sum":
+                raise ValueError(
+                    "two_slot_binary_duet currently supports multi_predicate_merge=sum"
+                )
+            for size_name, size in [
+                ("merge_hidden_size", self.merge_hidden_size),
+                ("embedding_size", self.embedding_size),
             ]:
                 if size <= 0:
                     raise ValueError(f"{size_name} must be positive")
@@ -127,12 +175,11 @@ class PredicateResMADEConfig:
                     f"output head {spec.name!r} references invalid original column "
                     f"{spec.source_column_index}"
                 )
-        plan = self.factorization_plan
-        if plan is not None and plan.enabled and self.direct_io_connections:
+        if any(kind not in {"data", "indicator", "fanout"} for kind in self.direct_io_source_kinds):
             raise ValueError(
-                "model.direct_io_connections=true is not supported with "
-                "factorization.enabled=true"
+                "direct_io_source_kinds must contain only data, indicator, or fanout"
             )
+        plan = self.factorization_plan
         if plan is not None and plan.enabled and specs != plan.output_head_specs:
             raise ValueError("factorized ResMADE output heads must match metadata plan")
         anpm = self.anpm_config
@@ -157,11 +204,16 @@ class PredicateResMADEConfig:
         return {
             "predicate_input_bins": self.predicate_input_bins,
             "data_output_bins": self.data_output_bins,
+            "column_kinds": self.column_kinds,
             "hidden_sizes": self.hidden_sizes,
             "residual_connections": self.residual_connections,
             "direct_io_connections": self.direct_io_connections,
+            "direct_io_source_kinds": self.direct_io_source_kinds,
             "activation": self.activation,
             "input_encoding": self.input_encoding,
+            "output_encoding": self.output_encoding,
+            "output_embedding_size": self.output_embedding_size,
+            "output_embeddings_tied": self.output_embeddings_tied,
             "embedding_size": self.embedding_size,
             "predicate_encoding_mode": self.predicate_encoding_mode,
             "operator_embedding_size": self.operator_embedding_size,
@@ -173,8 +225,10 @@ class PredicateResMADEConfig:
             "token_upper_ids_by_column": self.token_upper_ids_by_column,
             "token_special_ids_by_column": self.token_special_ids_by_column,
             "value_bins_by_column": self.value_bins_by_column,
+            "binary_value_widths_by_column": self.binary_value_widths_by_column,
             "operator_bins": self.operator_bins,
             "special_bins": self.special_bins,
+            "multi_predicate_merge": self.multi_predicate_merge,
             "residual_dropout": self.residual_dropout,
             "fixed_ordering": self.fixed_ordering,
             "output_head_specs": (
@@ -215,11 +269,22 @@ class PredicateResMADEConfig:
         return cls(
             predicate_input_bins=tuple(data["predicate_input_bins"]),  # type: ignore[arg-type,index]
             data_output_bins=tuple(data["data_output_bins"]),  # type: ignore[arg-type,index]
+            column_kinds=tuple(str(value) for value in data.get("column_kinds", ())),
             hidden_sizes=tuple(data["hidden_sizes"]),  # type: ignore[arg-type,index]
             residual_connections=bool(data["residual_connections"]),  # type: ignore[index]
             direct_io_connections=bool(data["direct_io_connections"]),  # type: ignore[index]
+            direct_io_source_kinds=tuple(
+                str(value)
+                for value in data.get(
+                    "direct_io_source_kinds",
+                    ("data", "indicator", "fanout"),
+                )
+            ),
             activation=str(data["activation"]),  # type: ignore[index]
             input_encoding=str(data["input_encoding"]),  # type: ignore[index]
+            output_encoding=str(data.get("output_encoding", "one_hot")),
+            output_embedding_size=int(data.get("output_embedding_size", 64)),
+            output_embeddings_tied=bool(data.get("output_embeddings_tied", False)),
             embedding_size=int(data["embedding_size"]),  # type: ignore[index]
             predicate_encoding_mode=str(data.get("predicate_encoding_mode", "categorical_legacy")),
             operator_embedding_size=int(data.get("operator_embedding_size", 8)),
@@ -243,8 +308,14 @@ class PredicateResMADEConfig:
                 if data.get("value_bins_by_column") is None
                 else tuple(int(value) for value in data["value_bins_by_column"])  # type: ignore[index]
             ),
+            binary_value_widths_by_column=(
+                None
+                if data.get("binary_value_widths_by_column") is None
+                else tuple(int(value) for value in data["binary_value_widths_by_column"])  # type: ignore[index]
+            ),
             operator_bins=int(data.get("operator_bins", 8)),
             special_bins=int(data.get("special_bins", 4)),
+            multi_predicate_merge=str(data.get("multi_predicate_merge", "sum")),
             residual_dropout=float(data["residual_dropout"]),  # type: ignore[index]
             fixed_ordering=bool(data["fixed_ordering"]),  # type: ignore[index]
             output_head_specs=output_head_specs,
@@ -272,24 +343,49 @@ class PredicateResMADE(nn.Module):
         self.output_head_to_original_column = tuple(
             spec.source_column_index for spec in self.output_head_specs
         )
+        self.column_kinds = (
+            tuple(config.column_kinds)
+            if config.column_kinds
+            else tuple("data" for _ in range(self.num_columns))
+        )
         self.factorization_plan = config.factorization_plan or FactorizationPlan()
         self.anpm_config = config.anpm_config or ANPMConfig()
         self.column_input_widths = self._column_input_widths(config)
         self.input_width = sum(self.column_input_widths)
         self.output_width = sum(spec.domain_size for spec in self.output_head_specs)
-        self.output_slices = self._output_slices(
-            tuple(spec.domain_size for spec in self.output_head_specs)
+        self.output_head_widths = tuple(
+            spec.domain_size
+            if config.output_encoding == "one_hot"
+            else int(config.output_embedding_size)
+            for spec in self.output_head_specs
         )
+        self.output_width = sum(self.output_head_widths)
+        self.output_slices = self._output_slices(self.output_head_widths)
+        if config.output_encoding == "embed":
+            self.output_embeddings = nn.ModuleList(
+                [
+                    nn.Embedding(
+                        num_embeddings=spec.domain_size,
+                        embedding_dim=config.output_embedding_size,
+                    )
+                    for spec in self.output_head_specs
+                ]
+            )
+        else:
+            self.output_embeddings = nn.ModuleList()
         self.input_degrees = self._expanded_input_degrees()
         hidden_degrees = self._hidden_degrees(config.hidden_sizes[0], self.num_columns)
         self.hidden_degrees = hidden_degrees
 
-        if config.input_encoding == "embed" and config.predicate_encoding_mode == "categorical_legacy":
+        if self._uses_embedding_input(config) and config.predicate_encoding_mode == "categorical_legacy":
             self.embeddings = nn.ModuleList(
                 [nn.Embedding(num_embeddings=bins, embedding_dim=config.embedding_size)
                  for bins in config.predicate_input_bins]
             )
-        elif config.input_encoding == "embed" and config.predicate_encoding_mode == "two_slot":
+        elif (
+            self._uses_embedding_input(config)
+            and config.predicate_encoding_mode in {"two_slot", "two_slot_categorical_legacy"}
+        ):
             self.embeddings = nn.ModuleList()
             self.literal_embeddings = nn.ModuleList()
             self.operator_embedding = nn.Embedding(
@@ -316,7 +412,38 @@ class PredicateResMADE(nn.Module):
                 ]
             )
             self.special_embedding = nn.Embedding(1, config.special_embedding_size)
-        elif config.input_encoding == "embed":
+        elif (
+            self._uses_embedding_input(config)
+            and config.predicate_encoding_mode == "two_slot_binary_duet"
+        ):
+            self.embeddings = nn.ModuleList()
+            self.literal_embeddings = nn.ModuleList()
+            self.value_embeddings = nn.ModuleList()
+            self.special_token_embeddings = nn.ModuleList(
+                [
+                    nn.Embedding(num_embeddings=2, embedding_dim=config.embedding_size)
+                    for _ in config.predicate_input_bins
+                ]
+            )
+            assert config.binary_value_widths_by_column is not None
+            self.binary_value_widths_by_column = tuple(
+                int(width) for width in config.binary_value_widths_by_column
+            )
+            self.predicate_slot_networks = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(
+                            int(config.operator_bins) + int(binary_width),
+                            config.merge_hidden_size,
+                        ),
+                        self._make_activation(config.activation),
+                        nn.Linear(config.merge_hidden_size, config.embedding_size),
+                    )
+                    for binary_width in self.binary_value_widths_by_column
+                ]
+            )
+            self.inv_fanout_operator_id = int(TWO_SLOT_OP_TO_ID[PredicateOp.INV_FANOUT])
+        elif self._uses_embedding_input(config):
             self.embeddings = nn.ModuleList()
             if config.predicate_encoding_mode == "hybrid":
                 self.literal_embeddings = nn.ModuleList(
@@ -413,9 +540,7 @@ class PredicateResMADE(nn.Module):
         )
         if config.direct_io_connections:
             self.direct_io_layer = MaskedLinear(self.input_width, self.output_width, bias=False)
-            self.direct_io_layer.set_mask(
-                mask_from_degrees(self.input_degrees, output_degrees, strict=True)
-            )
+            self.direct_io_layer.set_mask(self._direct_io_mask(output_degrees))
         else:
             self.direct_io_layer = None
         self.anpm_decoders = self._build_anpm_decoders()
@@ -437,12 +562,15 @@ class PredicateResMADE(nn.Module):
         """Encode predicate-token IDs using per-column embeddings or one-hot blocks."""
 
         pieces = []
-        if self.config.input_encoding == "embed" and self.config.predicate_encoding_mode == "categorical_legacy":
+        if self._uses_embedding_input(self.config) and self.config.predicate_encoding_mode == "categorical_legacy":
             if token_ids.ndim != 2 or token_ids.shape[1] != self.num_columns:
                 raise ValueError("token_ids must have shape [batch, number_of_columns]")
             for column_index, embedding in enumerate(self.embeddings):
                 pieces.append(embedding(token_ids[:, column_index]))
-        elif self.config.input_encoding == "embed" and self.config.predicate_encoding_mode == "two_slot":
+        elif (
+            self._uses_embedding_input(self.config)
+            and self.config.predicate_encoding_mode in {"two_slot", "two_slot_categorical_legacy"}
+        ):
             if token_ids.ndim != 3 or token_ids.shape[1] != self.num_columns or token_ids.shape[2] != 4:
                 raise ValueError("two_slot token_ids must have shape [batch, columns, 4]")
             for column_index, value_embedding in enumerate(self.value_embeddings):
@@ -457,7 +585,40 @@ class PredicateResMADE(nn.Module):
                     dim=1,
                 )
                 pieces.append(self.predicate_merge_networks[column_index](merged))
-        elif self.config.input_encoding == "embed":
+        elif (
+            self._uses_embedding_input(self.config)
+            and self.config.predicate_encoding_mode == "two_slot_binary_duet"
+        ):
+            if token_ids.ndim != 3 or token_ids.shape[1] != self.num_columns or token_ids.shape[2] != 4:
+                raise ValueError(
+                    "two_slot_binary_duet token_ids must have shape [batch, columns, 4]"
+                )
+            for column_index, slot_network in enumerate(self.predicate_slot_networks):
+                slot_values = token_ids[:, column_index, :]
+                first_op_ids = slot_values[:, 0]
+                second_op_ids = slot_values[:, 2]
+                wildcard_mask = (first_op_ids == 0) & (second_op_ids == 0)
+                inv_mask = first_op_ids == self.inv_fanout_operator_id
+                encoded = self._encode_binary_duet_slot(
+                    column_index,
+                    first_op_ids,
+                    slot_values[:, 1],
+                    slot_network,
+                )
+                second_encoded = self._encode_binary_duet_slot(
+                    column_index,
+                    second_op_ids,
+                    slot_values[:, 3],
+                    slot_network,
+                )
+                encoded = encoded + second_encoded
+                special_ids = torch.zeros_like(first_op_ids)
+                special_ids = torch.where(inv_mask, torch.ones_like(special_ids), special_ids)
+                special_encoded = self.special_token_embeddings[column_index](special_ids)
+                use_special = wildcard_mask | inv_mask
+                encoded = torch.where(use_special.unsqueeze(1), special_encoded, encoded)
+                pieces.append(encoded)
+        elif self._uses_embedding_input(self.config):
             if token_ids.ndim != 2 or token_ids.shape[1] != self.num_columns:
                 raise ValueError("token_ids must have shape [batch, number_of_columns]")
             for column_index, value_embedding in enumerate(self.value_embeddings):
@@ -501,7 +662,29 @@ class PredicateResMADE(nn.Module):
         return torch.cat(pieces, dim=1)
 
     def split_logits(self, logits: torch.Tensor) -> list[torch.Tensor]:
-        return [logits[:, start:stop] for start, stop in self.output_slices]
+        head_outputs = self.split_head_outputs(logits)
+        return [
+            self.project_head_output(head_index, head_output)
+            for head_index, head_output in enumerate(head_outputs)
+        ]
+
+    def split_head_outputs(self, outputs: torch.Tensor) -> list[torch.Tensor]:
+        return [outputs[:, start:stop] for start, stop in self.output_slices]
+
+    def project_head_output(self, head_index: int, head_output: torch.Tensor) -> torch.Tensor:
+        if self.config.output_encoding == "one_hot":
+            return head_output
+        embedding = self.output_embeddings[int(head_index)].weight
+        return head_output @ embedding.t()
+
+    def project_outputs(self, outputs: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            [
+                self.project_head_output(head_index, head_output)
+                for head_index, head_output in enumerate(self.split_head_outputs(outputs))
+            ],
+            dim=1,
+        )
 
     def predict_distributions(self, token_ids: torch.Tensor) -> list[torch.Tensor]:
         """Return one normalized distribution per model output head."""
@@ -513,6 +696,37 @@ class PredicateResMADE(nn.Module):
         return sum(parameter.numel() for parameter in self.parameters())
 
     @staticmethod
+    def _uses_embedding_input(config: PredicateResMADEConfig) -> bool:
+        return config.input_encoding in {"embed", "duet_binary"}
+
+    def _encode_binary_duet_slot(
+        self,
+        column_index: int,
+        operator_ids: torch.Tensor,
+        value_ids: torch.Tensor,
+        slot_network: nn.Module,
+    ) -> torch.Tensor:
+        """Encode one Duet predicate slot as f_i(binary(value), one_hot(op))."""
+
+        import torch.nn.functional as functional
+
+        width = int(self.binary_value_widths_by_column[column_index])
+        op_features = functional.one_hot(
+            operator_ids.long(),
+            num_classes=int(self.config.operator_bins),
+        ).to(dtype=torch.float32)
+        bit_positions = torch.arange(width, device=value_ids.device, dtype=torch.long)
+        raw_bits = (
+            (value_ids.long().unsqueeze(1) >> bit_positions.unsqueeze(0)) & 1
+        ).to(dtype=torch.float32)
+        missing_value_id = int(self.config.value_bins_by_column[column_index] - 1)  # type: ignore[index]
+        empty_mask = (operator_ids == 0) | (value_ids == missing_value_id)
+        raw_bits = torch.where(empty_mask.unsqueeze(1), torch.zeros_like(raw_bits), raw_bits)
+        features = torch.cat([op_features, raw_bits], dim=1)
+        encoded = slot_network(features)
+        return torch.where(empty_mask.unsqueeze(1), torch.zeros_like(encoded), encoded)
+
+    @staticmethod
     def _make_activation(name: str) -> nn.Module:
         if name == "relu":
             return nn.ReLU()
@@ -522,7 +736,7 @@ class PredicateResMADE(nn.Module):
 
     @staticmethod
     def _column_input_widths(config: PredicateResMADEConfig) -> tuple[int, ...]:
-        if config.input_encoding == "embed":
+        if config.input_encoding in {"embed", "duet_binary"}:
             return tuple(config.embedding_size for _ in config.predicate_input_bins)
         return tuple(config.predicate_input_bins)
 
@@ -534,9 +748,27 @@ class PredicateResMADE(nn.Module):
 
     def _expanded_output_degrees(self) -> torch.Tensor:
         degrees = []
-        for spec in self.output_head_specs:
-            degrees.extend([spec.source_column_index] * spec.domain_size)
+        for spec, width in zip(self.output_head_specs, self.output_head_widths):
+            degrees.extend([spec.source_column_index] * int(width))
         return torch.tensor(degrees, dtype=torch.long)
+
+    def _direct_io_mask(self, output_degrees: torch.Tensor) -> torch.Tensor:
+        mask = mask_from_degrees(self.input_degrees, output_degrees, strict=True)
+        allowed_kinds = set(self.config.direct_io_source_kinds)
+        input_allowed: list[float] = []
+        for column_index, width in enumerate(self.column_input_widths):
+            input_allowed.extend(
+                [1.0 if self._column_kind_name(column_index) in allowed_kinds else 0.0]
+                * width
+            )
+        source_mask = torch.tensor(input_allowed, dtype=mask.dtype).unsqueeze(0)
+        return mask * source_mask
+
+    def _column_kind_name(self, column_index: int) -> str:
+        kinds = getattr(self, "column_kinds", None)
+        if kinds is None:
+            return "data"
+        return str(kinds[column_index])
 
     def _build_anpm_decoders(self) -> nn.ModuleDict:
         decoders = nn.ModuleDict()
@@ -551,6 +783,11 @@ class PredicateResMADE(nn.Module):
                 embedding_size=self.anpm_config.previous_factor_embedding_size,
                 hidden_size=self.anpm_config.hidden_size,
                 final_activation=self.anpm_config.final_activation,
+                representation_size=(
+                    self.config.output_embedding_size
+                    if self.config.output_encoding == "embed"
+                    else None
+                ),
             )
         return decoders
 

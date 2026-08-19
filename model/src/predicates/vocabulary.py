@@ -83,8 +83,15 @@ class PredicateVocabularies:
         native_range_max_domain_size: int = 512,
         encoding_mode: str = "categorical",
     ) -> "PredicateVocabularies":
-        if encoding_mode not in {"categorical", "two_slot"}:
-            raise ValueError("predicate vocabulary encoding_mode must be categorical or two_slot")
+        if encoding_mode not in {
+            "categorical",
+            "two_slot",
+            "two_slot_binary_duet",
+        }:
+            raise ValueError(
+                "predicate vocabulary encoding_mode must be categorical, two_slot, "
+                "or two_slot_binary_duet"
+            )
         token_columns = []
         for column in metadata.columns:
             if column.predicate_domain is not None:
@@ -108,7 +115,7 @@ class PredicateVocabularies:
 
     @property
     def input_bins(self) -> tuple[int, ...]:
-        if self.encoding_mode == "two_slot":
+        if self.encoding_mode in {"two_slot", "two_slot_binary_duet"}:
             return tuple(1 for _ in self.token_keys_by_column)
         return tuple(len(tokens) for tokens in self.token_keys_by_column)
 
@@ -128,7 +135,7 @@ class PredicateVocabularies:
     def encode_rows(self, token_rows: list[list[PredicateToken]]) -> list[list[int]]:
         """Encode virtual query tuples as integer token IDs."""
 
-        if self.encoding_mode == "two_slot":
+        if self.encoding_mode in {"two_slot", "two_slot_binary_duet"}:
             return self.encode_rows_two_slot(token_rows)  # type: ignore[return-value]
         encoded_rows = []
         for tokens in token_rows:
@@ -206,6 +213,28 @@ class PredicateVocabularies:
 
 def two_slot_value_bins_by_column(metadata: ModelMetadata) -> tuple[int, ...]:
     return tuple(column.domain_size + 1 for column in metadata.columns)
+
+
+def binary_literal_width(domain_size: int) -> int:
+    """Return Duet-style LSB-first binary width for a column domain."""
+
+    if domain_size <= 0:
+        raise ValueError("domain_size must be positive")
+    return max(1, (int(domain_size) - 1).bit_length())
+
+
+def two_slot_binary_widths_by_column(metadata: ModelMetadata) -> tuple[int, ...]:
+    return tuple(binary_literal_width(column.domain_size) for column in metadata.columns)
+
+
+def binary_bits_lsb(value_id: int, width: int) -> tuple[int, ...]:
+    """Encode a nonnegative integer as least-significant-bit-first bits."""
+
+    if value_id < 0:
+        raise ValueError("value_id must be nonnegative")
+    if width <= 0:
+        raise ValueError("width must be positive")
+    return tuple((int(value_id) >> bit) & 1 for bit in range(width))
 
 
 def _value_id(domain: tuple[Any, ...], value: Any) -> int:

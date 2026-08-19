@@ -54,7 +54,12 @@ class TorchDistributionModel:
             self.last_backbone_seconds = perf_counter() - backbone_start
             outputs = TorchBackboneOutputs(
                 logits=logits,
-                split_logits=self.resmade.split_logits(logits),
+                split_logits=self.resmade.split_head_outputs(logits),
+                output_embeddings=(
+                    [embedding.weight for embedding in self.resmade.output_embeddings]
+                    if getattr(self.resmade.config, "output_encoding", "one_hot") == "embed"
+                    else None
+                ),
             )
             decode_start = perf_counter()
             distributions = [
@@ -86,7 +91,12 @@ class TorchDistributionModel:
             self.last_backbone_seconds = perf_counter() - backbone_start
             outputs = TorchBackboneOutputs(
                 logits=logits,
-                split_logits=self.resmade.split_logits(logits),
+                split_logits=self.resmade.split_head_outputs(logits),
+                output_embeddings=(
+                    [embedding.weight for embedding in self.resmade.output_embeddings]
+                    if getattr(self.resmade.config, "output_encoding", "one_hot") == "embed"
+                    else None
+                ),
             )
             values = []
             decode_start = perf_counter()
