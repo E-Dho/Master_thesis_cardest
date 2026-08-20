@@ -14,6 +14,7 @@ from model.src.predicates.generation import (
     context_satisfies_row,
     inverse_fanouts_for_table_subset,
     neurocard_table_dropout_rooted_subset,
+    present_tables_for_row,
     predicate_context_diagnostics,
     tokens_for_query_tables,
     token_coverage,
@@ -167,7 +168,10 @@ class PredicateTrainingContextTest(unittest.TestCase):
             ["x:less_equal"],
         )
 
-    def test_duet_style_batches_share_one_batch_context(self) -> None:
+    def test_duet_style_batches_have_row_specific_contexts(self) -> None:
+        # Regression guard: `duet_batch_bounds` must not build one shared
+        # optimizer-batch context from batch min/max or table-presence
+        # intersection.
         source = SyntheticFullJoinSampleSource()
         rows = source.dataset.encoded_rows[:3]
         generator = PredicateTrainingContextGenerator(
@@ -191,11 +195,13 @@ class PredicateTrainingContextTest(unittest.TestCase):
 
         self.assertEqual(stats.generated_contexts, len(rows))
         self.assertEqual(repeated_rows.shape[0], len(rows))
-        self.assertEqual(len({context.tokens for context in contexts}), 1)
+        self.assertGreater(len({context.tokens for context in contexts}), 1)
         for context, row in zip(contexts, repeated_rows):
             self.assertTrue(context_satisfies_row(context, row, source.metadata))
 
-    def test_duet_batch_equality_requires_identical_batch_values(self) -> None:
+    def test_duet_equality_uses_each_individual_row_value(self) -> None:
+        # Regression guard: equality must not collapse just because a
+        # heterogeneous optimizer batch has different values in one column.
         source = SyntheticFullJoinSampleSource()
         rows = source.dataset.encoded_rows[:3]
         generator = PredicateTrainingContextGenerator(
@@ -215,20 +221,21 @@ class PredicateTrainingContextTest(unittest.TestCase):
             metadata=source.metadata,
             rng=np.random.default_rng(2),
         )
-        self.assertEqual(len({context.tokens for context in contexts}), 1)
-        token = contexts[0].ordinary_predicates["B.value"]
-        self.assertNotEqual(token.op, PredicateOp.EQUAL)
         for context, row in zip(contexts, repeated_rows):
-            self.assertTrue(token.satisfies(source.metadata.columns[1].domain[int(row[1])]))
-
-        repeated_same_row = np.repeat(source.dataset.encoded_rows[[0]], 5, axis=0)
-        same_contexts, _, _ = generator.generate_batch(
-            encoded_rows=repeated_same_row,
-            metadata=source.metadata,
-            rng=np.random.default_rng(2),
+            for column_index, column in enumerate(source.metadata.columns):
+                if column.kind != ColumnKind.DATA:
+                    continue
+                value = column.domain[int(row[column_index])]
+                if value == OUTER_MISSING:
+                    self.assertEqual(context.tokens[column_index].op, PredicateOp.WILDCARD)
+                    continue
+                token = context.ordinary_predicates[column.name]
+                self.assertEqual(token.op, PredicateOp.EQUAL)
+                self.assertEqual(token.value, value)
+        self.assertGreater(
+            len({context.ordinary_predicates["B.value"].value for context in contexts}),
+            1,
         )
-        self.assertEqual(same_contexts[0].ordinary_predicates["B.value"].op, PredicateOp.EQUAL)
-        self.assertEqual(same_contexts[0].ordinary_predicates["B.value"].value, "b1")
 
     def test_duet_row_lower_bounds_are_no_greater_than_row_value(self) -> None:
         source = SyntheticFullJoinSampleSource()
@@ -252,9 +259,9 @@ class PredicateTrainingContextTest(unittest.TestCase):
         )
         for context, row in zip(contexts, repeated_rows):
             token = context.ordinary_predicates["B.value"]
+            row_value = source.metadata.columns[1].domain[int(row[1])]
             self.assertEqual(token.op, PredicateOp.GREATER_EQUAL)
-            batch_min = min(source.metadata.columns[1].domain[int(row[1])] for row in rows)
-            self.assertLessEqual(token.value, batch_min)
+            self.assertLessEqual(token.value, row_value)
 
     def test_duet_row_upper_bounds_are_no_less_than_row_value(self) -> None:
         source = SyntheticFullJoinSampleSource()
@@ -278,9 +285,9 @@ class PredicateTrainingContextTest(unittest.TestCase):
         )
         for context, row in zip(contexts, repeated_rows):
             token = context.ordinary_predicates["B.value"]
+            row_value = source.metadata.columns[1].domain[int(row[1])]
             self.assertEqual(token.op, PredicateOp.LESS_EQUAL)
-            batch_max = max(source.metadata.columns[1].domain[int(row[1])] for row in rows)
-            self.assertGreaterEqual(token.value, batch_max)
+            self.assertGreaterEqual(token.value, row_value)
 
     def test_duet_batch_native_range_toggle_controls_range_tokens(self) -> None:
         source = SyntheticFullJoinSampleSource()
@@ -323,6 +330,7 @@ class PredicateTrainingContextTest(unittest.TestCase):
             sum(column_counts[PredicateOp.RANGE.value] for column_counts in coverage.values()),
             0,
         )
+        self.assertGreater(len({context.tokens for context in on_contexts}), 1)
         for context, row in zip(on_contexts, rows):
             token = context.ordinary_predicates["B.value"]
             row_value = source.metadata.columns[1].domain[int(row[1])]
@@ -354,9 +362,11 @@ class PredicateTrainingContextTest(unittest.TestCase):
         for fanout_index in source.metadata.fanout_indices():
             self.assertGreater(float(weights[:, fanout_index].sum()), 0.0)
 
-    def test_batch_outer_padding_fallback_wildcards_column_for_all_rows(self) -> None:
+    def test_outer_padding_fallback_is_row_local(self) -> None:
+        # Regression guard: one OUTER_MISSING value must not wildcard the same
+        # column for every row in an optimizer batch.
         source = SyntheticFullJoinSampleSource()
-        rows = source.dataset.encoded_rows
+        rows = source.dataset.encoded_rows[[0, 3]]
         generator = PredicateTrainingContextGenerator(
             {
                 "enabled": True,
@@ -375,13 +385,66 @@ class PredicateTrainingContextTest(unittest.TestCase):
             rng=np.random.default_rng(9),
         )
         b_index = source.metadata.column_index("B.value")
+        saw_padded = False
+        saw_ordinary_equality = False
         for context, row in zip(contexts, repeated_rows):
             row_value = source.metadata.columns[b_index].domain[int(row[b_index])]
             token = context.tokens[b_index]
             if row_value == OUTER_MISSING:
+                saw_padded = True
                 self.assertEqual(token.op, PredicateOp.WILDCARD)
             else:
-                self.assertEqual(token.op, PredicateOp.WILDCARD)
+                saw_ordinary_equality = True
+                self.assertEqual(token.op, PredicateOp.EQUAL)
+                self.assertEqual(token.value, row_value)
+        self.assertTrue(saw_padded)
+        self.assertTrue(saw_ordinary_equality)
+
+    def test_neurocard_table_dropout_is_row_local_not_batch_intersection(self) -> None:
+        # Regression guard: table dropout must sample from each row's present
+        # tables, not from the intersection across the optimizer batch.
+        source = SyntheticFullJoinSampleSource()
+        rows = np.repeat(source.dataset.encoded_rows[[0, 3]], 100, axis=0)
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "duet_batch_bounds",
+                "wildcard_probability": 1.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "table_subset_sampling": "neurocard_table_dropout_rooted",
+            }
+        )
+        contexts, repeated_rows, _ = generator.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(19),
+        )
+        intersection = set(present_tables_for_row(repeated_rows[0], source.metadata))
+        for row in repeated_rows[1:]:
+            intersection.intersection_update(present_tables_for_row(row, source.metadata))
+        self.assertEqual(intersection, {"A"})
+        saw_child_from_full_row = False
+        for context, row in zip(contexts, repeated_rows):
+            present = present_tables_for_row(row, source.metadata)
+            self.assertIn("A", context.included_tables)
+            self.assertTrue(set(context.included_tables).issubset(present))
+            if {"B", "C"}.intersection(context.included_tables):
+                saw_child_from_full_row = True
+                self.assertGreater(set(context.included_tables), intersection)
+            self.assertTrue(context_satisfies_row(context, row, source.metadata))
+            for column, token in zip(source.metadata.columns, context.tokens):
+                if column.kind == ColumnKind.DATA and column.table not in context.included_tables:
+                    self.assertEqual(token.op, PredicateOp.WILDCARD)
+                if column.kind == ColumnKind.FANOUT:
+                    child = column.fanout_source.split("->", 1)[1]
+                    if child in context.included_tables:
+                        self.assertEqual(token.op, PredicateOp.WILDCARD)
+                    else:
+                        self.assertEqual(token.op, PredicateOp.INV_FANOUT)
+        self.assertTrue(saw_child_from_full_row)
 
     def test_job_light_like_metadata_uses_explicit_join_topology(self) -> None:
         metadata = ModelMetadata(

@@ -150,7 +150,23 @@ class PredicateTrainingContextGenerator:
 
         encoded_rows = np.asarray(encoded_rows, dtype=int)
         if self.strategy == "duet_batch_bounds" and not self.legacy_fixed_context:
-            return self._generate_duet_batch_bounds(
+            # IMPORTANT:
+            # `duet_batch_bounds` is intentionally ROW-SPECIFIC in this project.
+            #
+            # Do not construct one predicate context from optimizer-batch min/max
+            # values or from the intersection of table presence across the batch.
+            #
+            # That historical implementation is incorrect for our
+            # predicate-conditioned training semantics because it:
+            #   1. removes almost all equality predicates on heterogeneous batches,
+            #   2. creates artificially broad ranges,
+            #   3. lets one OUTER_MISSING row wildcard a whole batch column, and
+            #   4. collapses NeuroCard table-subset diversity through batch-wide
+            #      table-presence intersection.
+            #
+            # Each sampled FOJ row must receive an independently sampled query
+            # context that is satisfied by that same row.
+            return self._generate_duet_row_specific(
                 encoded_rows=encoded_rows,
                 metadata=metadata,
                 rng=rng,
@@ -191,56 +207,31 @@ class PredicateTrainingContextGenerator:
             ),
         )
 
-    def _generate_duet_batch_bounds(
+    def _generate_duet_row_specific(
         self,
         *,
         encoded_rows: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
-        """Generate one shared Duet-style predicate context for an optimizer batch."""
+        """Generate independent Duet-style query contexts for each sampled row."""
 
-        present_intersection = self._present_table_intersection(encoded_rows, metadata)
-        included_tables = self._sample_included_from_present(
-            present_intersection,
-            metadata,
-            rng,
-        )
-        if self._requires_root(metadata) and not included_tables:
-            raise ValueError("predicate generation rejected every sampled context")
-        inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
-        ordinary = self._ordinary_batch_predicates(
-            encoded_rows,
-            metadata,
-            rng,
-            included_tables,
-        )
-        tokens = tuple(
-            tokens_for_query_tables(
-                metadata,
-                set(included_tables),
-                set(inverse_fanouts),
-                dict(ordinary),
-            )
-        )
-        shared_context = GeneratedTrainingContext(
-            tokens=tokens,
-            included_tables=frozenset(included_tables),
-            inverse_fanout_columns=frozenset(inverse_fanouts),
-            ordinary_predicates=ordinary,
-        )
-        contexts = []
-        repeated_rows = []
+        contexts: list[GeneratedTrainingContext] = []
+        repeated_rows: list[np.ndarray] = []
         rejected = 0
         contradictions = 0
         repeats = self.per_row_contexts if self.enabled else 1
         for row in encoded_rows:
             for _ in range(repeats):
-                contradictions += included_indicator_contradictions(shared_context, row, metadata)
-                if not context_satisfies_row(shared_context, row, metadata):
+                context = self._generate_one(row, metadata, rng)
+                if self._requires_root(metadata) and not context.included_tables:
                     rejected += 1
                     continue
-                contexts.append(shared_context)
+                contradictions += included_indicator_contradictions(context, row, metadata)
+                if not context_satisfies_row(context, row, metadata):
+                    rejected += 1
+                    continue
+                contexts.append(context)
                 repeated_rows.append(row)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
@@ -364,18 +355,6 @@ class PredicateTrainingContextGenerator:
             and bool(infer_join_graph(metadata).root_table)
         )
 
-    def _present_table_intersection(
-        self,
-        encoded_rows: np.ndarray,
-        metadata: ModelMetadata,
-    ) -> frozenset[str]:
-        if len(encoded_rows) == 0:
-            return frozenset()
-        present = set(present_tables_for_row(encoded_rows[0], metadata))
-        for row in encoded_rows[1:]:
-            present.intersection_update(present_tables_for_row(row, metadata))
-        return frozenset(present)
-
     def _ordinary_predicates(
         self,
         encoded_row: np.ndarray,
@@ -395,122 +374,6 @@ class PredicateTrainingContextGenerator:
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
         return ordinary
-
-    def _ordinary_batch_predicates(
-        self,
-        encoded_rows: np.ndarray,
-        metadata: ModelMetadata,
-        rng: np.random.Generator,
-        included_tables: frozenset[str],
-    ) -> dict[str, PredicateToken]:
-        ordinary: dict[str, PredicateToken] = {}
-        caches = self._column_caches(metadata)
-        for column_index, column in enumerate(metadata.columns):
-            if column.kind != ColumnKind.DATA:
-                continue
-            if column.table is not None and column.table not in included_tables:
-                continue
-            token = self._sample_batch_satisfied_predicate(
-                cache=caches[column_index],
-                column=column,
-                encoded_values=encoded_rows[:, column_index],
-                rng=rng,
-            )
-            if token.op != PredicateOp.WILDCARD:
-                ordinary[column.name] = token
-        return ordinary
-
-    def _sample_batch_satisfied_predicate(
-        self,
-        *,
-        cache: _ColumnPredicateCache | None,
-        column: Any,
-        encoded_values: np.ndarray,
-        rng: np.random.Generator,
-    ) -> PredicateToken:
-        if not self.enabled or cache is None:
-            return PredicateToken.wildcard()
-        values = [column.domain[int(value_id)] for value_id in encoded_values]
-        if any(value not in cache.comparable_set for value in values):
-            return PredicateToken.wildcard()
-        try:
-            batch_min = min(values)
-            batch_max = max(values)
-        except TypeError:
-            return PredicateToken.wildcard()
-        comparable_values = cache.comparable_values
-        roll = float(rng.random() * self._probability_total)
-        if roll < self.wildcard_probability:
-            return PredicateToken.wildcard()
-        roll -= self.wildcard_probability
-        if roll < self.equality_probability:
-            if all(value == values[0] for value in values):
-                return PredicateToken.equal(values[0])
-            return self._sample_batch_range_style_predicate(
-                comparable_values,
-                batch_min=batch_min,
-                batch_max=batch_max,
-                rng=rng,
-            )
-        roll -= self.equality_probability
-        if roll < self.lower_bound_probability:
-            return self._sample_batch_lower_bound(comparable_values, batch_min, rng)
-        roll -= self.lower_bound_probability
-        if roll < self.upper_bound_probability:
-            return self._sample_batch_upper_bound(comparable_values, batch_max, rng)
-        return self._sample_batch_range_style_predicate(
-            comparable_values,
-            batch_min=batch_min,
-            batch_max=batch_max,
-            rng=rng,
-        )
-
-    def _sample_batch_lower_bound(
-        self,
-        comparable_values: tuple[Any, ...],
-        batch_min: Any,
-        rng: np.random.Generator,
-    ) -> PredicateToken:
-        stop = bisect_right(comparable_values, batch_min)
-        if stop <= 0:
-            return PredicateToken.wildcard()
-        threshold = comparable_values[int(rng.integers(0, stop))]
-        return PredicateToken(PredicateOp.GREATER_EQUAL, value=threshold)
-
-    def _sample_batch_upper_bound(
-        self,
-        comparable_values: tuple[Any, ...],
-        batch_max: Any,
-        rng: np.random.Generator,
-    ) -> PredicateToken:
-        start = bisect_left(comparable_values, batch_max)
-        if start >= len(comparable_values):
-            return PredicateToken.wildcard()
-        threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
-        return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
-
-    def _sample_batch_range_style_predicate(
-        self,
-        comparable_values: tuple[Any, ...],
-        *,
-        batch_min: Any,
-        batch_max: Any,
-        rng: np.random.Generator,
-    ) -> PredicateToken:
-        if not (
-            self.enable_native_range_tokens
-            and self.native_range_probability > 0.0
-        ):
-            if bool(rng.integers(0, 2)):
-                return self._sample_batch_lower_bound(comparable_values, batch_min, rng)
-            return self._sample_batch_upper_bound(comparable_values, batch_max, rng)
-        lower_stop = bisect_right(comparable_values, batch_min)
-        upper_start = bisect_left(comparable_values, batch_max)
-        if lower_stop <= 0 or upper_start >= len(comparable_values):
-            return PredicateToken.wildcard()
-        lower = comparable_values[int(rng.integers(0, lower_stop))]
-        upper = comparable_values[int(rng.integers(upper_start, len(comparable_values)))]
-        return PredicateToken.range(lower, upper)
 
     def _sample_satisfied_predicate(
         self,
