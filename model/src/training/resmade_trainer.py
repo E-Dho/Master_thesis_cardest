@@ -111,6 +111,13 @@ def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> Predi
                     ["data", "indicator", "fanout"],
                 )
             ),
+            direct_io_destination_kinds=tuple(
+                str(kind)
+                for kind in model_config.get(
+                    "direct_io_destination_kinds",
+                    ["data", "indicator", "fanout"],
+                )
+            ),
             activation=str(model_config.get("activation", "relu")),
             input_encoding=str(model_config.get("input_encoding", "embed")),
             output_encoding=str(model_config.get("output_encoding", "one_hot")),
@@ -611,6 +618,9 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         ),
         "direct_io_parameter_count": direct_io_parameter_count,
         "direct_io_source_kinds": tuple(getattr(model.config, "direct_io_source_kinds", ())),
+        "direct_io_destination_kinds": tuple(
+            getattr(model.config, "direct_io_destination_kinds", ())
+        ),
         "output_encoding": getattr(model.config, "output_encoding", "one_hot"),
         "output_embedding_parameter_count": output_embedding_parameter_count,
         "backbone_output_width": int(getattr(model, "output_width", 0)),
@@ -620,6 +630,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             else None
         ),
         "high_cardinality_binary_columns": high_cardinality_columns,
+        "predicate_vocabulary_metadata": vocabularies.metadata_size_diagnostics(),
         "peak_gpu_memory_bytes": peak_gpu_memory_bytes,
         "last_original_column_losses": last_original_column_losses,
         "last_factor_losses": last_factor_losses,
@@ -721,6 +732,20 @@ def _train_one_batch(
         metadata,
     )
     context_diagnostics = predicate_context_diagnostics(contexts, metadata)
+    context_diagnostics["predicate_probability_configuration"] = (
+        context_generator.probability_diagnostics()
+    )
+    context_diagnostics["table_subset_sampling_mode"] = (
+        context_generator.table_subset_sampling
+    )
+    context_diagnostics["upstream_neurocard_table_dropout_probability_law"] = (
+        "num_dropped_tables ~ Uniform{1,...,num_tables-1}; "
+        "P(drop table | num_dropped_tables)=num_dropped_tables/num_tables; "
+        "primary/root table forced included"
+    )
+    context_diagnostics["rooted_adjustment_applied"] = (
+        context_generator.table_subset_sampling == "neurocard_table_dropout_rooted"
+    )
     weights = cumulative_inverse_fanout_weights(
         target_rows,
         token_rows,

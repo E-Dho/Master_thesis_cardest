@@ -8,7 +8,7 @@ import numpy as np
 
 from model.src.data.full_join_sampler import SyntheticFullJoinSampleSource
 from model.src.predicates.generation import tokens_for_query_tables
-from model.src.predicates.vocabulary import PredicateVocabularies
+from model.src.predicates.vocabulary import PredicateVocabularies, binary_literal_width
 from model.src.training.losses import cumulative_inverse_fanout_weights, weighted_cross_entropy
 
 if importlib.util.find_spec("torch") is None:
@@ -193,6 +193,47 @@ class ResMADETorchTest(unittest.TestCase):
             tuple(binary_literal_width(column.domain_size) for column in source.metadata.columns),
         )
 
+    def test_binary_duet_checkpoint_roundtrip_rehydrates_compact_vocab(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+        config["model"]["input_encoding"] = "duet_binary"
+        config["model"]["embedding_size"] = 8
+        config["predicate_encoding"] = {
+            "mode": "two_slot_binary_duet",
+            "multi_predicate_merge": "sum",
+            "merge_hidden_size": 8,
+            "max_predicates_per_column": 2,
+        }
+        model = build_resmade_from_config(source.metadata, config)
+        vocabularies = PredicateVocabularies.from_metadata(
+            source.metadata,
+            encoding_mode="two_slot_binary_duet",
+        )
+        tokens = [[PredicateToken.equal("a1")] + [PredicateToken.wildcard()] * 7]
+        token_ids = encode_tokens_tensor(tokens, vocabularies)
+        before = model(token_ids)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/binary_duet.pt"
+            save_resmade_checkpoint(
+                path,
+                model,
+                None,
+                epoch=0,
+                step=0,
+                metadata=source.metadata,
+                predicate_vocabularies=vocabularies,
+                config=config,
+            )
+            loaded, payload = load_resmade_checkpoint(path)
+        roundtrip_vocab = PredicateVocabularies.from_json_dict(
+            payload["predicate_vocabularies"],
+            source.metadata,
+        )
+        self.assertNotIn("domains_by_column", payload["predicate_vocabularies"])
+        roundtrip_ids = encode_tokens_tensor(tokens, roundtrip_vocab)
+        after = loaded(roundtrip_ids)
+        self.assertTrue(torch.allclose(before, after))
+
     def test_binary_duet_range_sums_shared_slot_encodings(self) -> None:
         source = SyntheticFullJoinSampleSource()
         config = load_simple_yaml("model/configs/resmade_smoke.yaml")
@@ -330,7 +371,7 @@ class ResMADETorchTest(unittest.TestCase):
         self.assertEqual(loaded.output_slices, model.output_slices)
         self.assertEqual(payload["metadata"]["column_order"], "data_indicators_fanouts")
 
-    def test_direct_io_mask_allows_only_past_data_indicator_sources(self) -> None:
+    def test_direct_io_mask_is_strictly_causal_across_all_kinds(self) -> None:
         source = SyntheticFullJoinSampleSource()
         vocabularies = PredicateVocabularies.from_metadata(source.metadata)
         model = PredicateResMADE(
@@ -340,7 +381,8 @@ class ResMADETorchTest(unittest.TestCase):
                 column_kinds=tuple(column.kind.value for column in source.metadata.columns),
                 hidden_sizes=(16, 16),
                 direct_io_connections=True,
-                direct_io_source_kinds=("data", "indicator"),
+                direct_io_source_kinds=("data", "indicator", "fanout"),
+                direct_io_destination_kinds=("data", "indicator", "fanout"),
                 embedding_size=4,
             )
         )
@@ -353,8 +395,51 @@ class ResMADETorchTest(unittest.TestCase):
                 in_start = int(column_starts[input_column_index])
                 in_stop = in_start + model.column_input_widths[input_column_index]
                 block = mask[out_start:out_stop, in_start:in_stop]
-                if column.kind == ColumnKind.FANOUT or input_column_index >= spec.source_column_index:
+                if input_column_index >= spec.source_column_index:
                     self.assertEqual(float(block.sum()), 0.0)
+                else:
+                    self.assertGreater(float(block.sum()), 0.0)
+
+        f_ab = source.metadata.column_index("F_A_to_B")
+        f_bc = source.metadata.column_index("F_B_to_C")
+        f_bc_head = next(
+            index
+            for index, spec in enumerate(model.output_head_specs)
+            if spec.source_column_index == f_bc
+        )
+        out_start, out_stop = model.output_slices[f_bc_head]
+        in_start = int(column_starts[f_ab])
+        in_stop = in_start + model.column_input_widths[f_ab]
+        self.assertGreater(float(mask[out_start:out_stop, in_start:in_stop].sum()), 0.0)
+        for head_index, spec in enumerate(model.output_head_specs):
+            if source.metadata.columns[spec.source_column_index].kind != ColumnKind.FANOUT:
+                out_start, out_stop = model.output_slices[head_index]
+                self.assertEqual(float(mask[out_start:out_stop, in_start:in_stop].sum()), 0.0)
+
+    def test_direct_io_destination_kind_filter_blocks_disallowed_outputs(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        vocabularies = PredicateVocabularies.from_metadata(source.metadata)
+        model = PredicateResMADE(
+            PredicateResMADEConfig(
+                predicate_input_bins=vocabularies.input_bins,
+                data_output_bins=source.metadata.data_output_bins,
+                column_kinds=tuple(column.kind.value for column in source.metadata.columns),
+                hidden_sizes=(16, 16),
+                direct_io_connections=True,
+                direct_io_source_kinds=("data", "indicator", "fanout"),
+                direct_io_destination_kinds=("fanout",),
+                embedding_size=4,
+            )
+        )
+        assert model.direct_io_layer is not None
+        mask = model.direct_io_layer.mask
+        for output_head_index, spec in enumerate(model.output_head_specs):
+            out_start, out_stop = model.output_slices[output_head_index]
+            block = mask[out_start:out_stop, :]
+            if source.metadata.columns[spec.source_column_index].kind == ColumnKind.FANOUT:
+                self.assertGreater(float(block.sum()), 0.0)
+            else:
+                self.assertEqual(float(block.sum()), 0.0)
 
     def test_factorized_heads_use_original_column_degrees(self) -> None:
         metadata = self._factorized_metadata()
@@ -370,6 +455,40 @@ class ResMADETorchTest(unittest.TestCase):
             start, stop = model.output_slices[head_index]
             self.assertTrue(torch.allclose(logits_a[:, start:stop], logits_b[:, start:stop]))
             self.assertTrue(torch.allclose(logits_a[:, start:stop], logits_c[:, start:stop]))
+
+    def test_direct_io_factor_heads_inherit_original_column_degree(self) -> None:
+        metadata = self._factorized_metadata()
+        vocabularies = PredicateVocabularies.from_metadata(metadata)
+        model = PredicateResMADE(
+            PredicateResMADEConfig(
+                predicate_input_bins=vocabularies.input_bins,
+                data_output_bins=metadata.data_output_bins,
+                column_kinds=tuple(column.kind.value for column in metadata.columns),
+                hidden_sizes=(16, 16),
+                direct_io_connections=True,
+                direct_io_source_kinds=("data", "indicator", "fanout"),
+                direct_io_destination_kinds=("data", "indicator", "fanout"),
+                embedding_size=4,
+                output_head_specs=metadata.factorization_plan.output_head_specs,
+                factorization_plan=metadata.factorization_plan,
+                anpm_config=ANPMConfig(enabled=True, previous_factor_embedding_size=4),
+            )
+        )
+        assert model.direct_io_layer is not None
+        mask = model.direct_io_layer.mask
+        column_starts = np.cumsum((0, *model.column_input_widths[:-1]))
+        x_input_start = int(column_starts[0])
+        x_input_stop = x_input_start + model.column_input_widths[0]
+        y_input_start = int(column_starts[1])
+        y_input_stop = y_input_start + model.column_input_widths[1]
+        for head_index in metadata.factorization_plan.output_heads_for_column(0):
+            out_start, out_stop = model.output_slices[head_index]
+            self.assertEqual(float(mask[out_start:out_stop, x_input_start:x_input_stop].sum()), 0.0)
+            self.assertEqual(float(mask[out_start:out_stop, y_input_start:y_input_stop].sum()), 0.0)
+        y_heads = metadata.factorization_plan.output_heads_for_column(1)
+        self.assertTrue(y_heads)
+        y_start, y_stop = model.output_slices[y_heads[0]]
+        self.assertGreater(float(mask[y_start:y_stop, x_input_start:x_input_stop].sum()), 0.0)
 
     def test_anpm_prefix_dependency_and_grouped_loss_gradients(self) -> None:
         metadata = self._factorized_metadata()

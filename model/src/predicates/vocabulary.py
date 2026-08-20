@@ -74,6 +74,10 @@ class PredicateVocabularies:
     encoding_mode: str = "categorical"
     domains_by_column: tuple[tuple[Any, ...], ...] = ()
 
+    def __post_init__(self) -> None:
+        value_maps = tuple(_value_lookup(domain) for domain in self.domains_by_column)
+        object.__setattr__(self, "_value_id_by_column", value_maps)
+
     @classmethod
     def from_metadata(
         cls,
@@ -94,7 +98,9 @@ class PredicateVocabularies:
             )
         token_columns = []
         for column in metadata.columns:
-            if column.predicate_domain is not None:
+            if encoding_mode == "two_slot_binary_duet":
+                token_columns.append(_compact_binary_token_keys(column))
+            elif column.predicate_domain is not None:
                 token_columns.append(tuple(str(value) for value in column.predicate_domain))
             else:
                 token_columns.append(
@@ -162,6 +168,11 @@ class PredicateVocabularies:
         return encoded_rows
 
     def encode_token_two_slot(self, column_index: int, token: PredicateToken) -> list[int]:
+        if not self.domains_by_column:
+            raise ValueError(
+                "two-slot predicate encoding requires domains_by_column; "
+                "rehydrate binary vocabularies from checkpoint metadata"
+            )
         domain = self.domains_by_column[column_index]
         missing_value_id = len(domain)
         empty = [TWO_SLOT_EMPTY_OPERATOR_ID, missing_value_id]
@@ -180,34 +191,92 @@ class PredicateVocabularies:
             )
             return [
                 TWO_SLOT_OP_TO_ID[lower_op],
-                _value_id(domain, token.value),
+                self._value_id(column_index, token.value),
                 TWO_SLOT_OP_TO_ID[upper_op],
-                _value_id(domain, token.upper),
+                self._value_id(column_index, token.upper),
             ]
         if token.op in TWO_SLOT_OP_TO_ID:
             value_id = (
                 missing_value_id
                 if token.op == PredicateOp.INV_FANOUT
-                else _value_id(domain, token.value)
+                else self._value_id(column_index, token.value)
             )
             return [TWO_SLOT_OP_TO_ID[token.op], value_id, *empty]
         raise ValueError(f"unsupported predicate token {token!r}")
 
-    def to_json_dict(self) -> dict[str, Any]:
-        return {
+    def _value_id(self, column_index: int, value: Any) -> int:
+        domain = self.domains_by_column[column_index]
+        lookups = getattr(self, "_value_id_by_column", ())
+        if lookups:
+            lookup = lookups[column_index]
+            try:
+                return lookup[value]
+            except TypeError:
+                pass
+            except KeyError:
+                pass
+        return _value_id(domain, value)
+
+    def structural_entry_count(self) -> int:
+        return sum(len(keys) for keys in self.token_keys_by_column)
+
+    def metadata_size_diagnostics(self) -> dict[str, float | int | str]:
+        binary_payload = {
             "token_keys_by_column": self.token_keys_by_column,
             "encoding_mode": self.encoding_mode,
-            "domains_by_column": self.domains_by_column,
+        }
+        binary_bytes = len(json.dumps(binary_payload, sort_keys=True, default=str).encode("utf-8"))
+        legacy_estimate = 0
+        if self.domains_by_column:
+            token_estimate = 0
+            for domain in self.domains_by_column:
+                token_estimate += 1 + 3 * len(domain)
+            legacy_payload = {
+                "encoding_mode": "two_slot",
+                "estimated_token_entries": token_estimate,
+            }
+            legacy_estimate = len(
+                json.dumps(legacy_payload, sort_keys=True, default=str).encode("utf-8")
+            )
+            legacy_estimate += sum(
+                len(str(value).encode("utf-8")) * 3 + 64 * 3
+                for domain in self.domains_by_column
+                for value in domain
+            )
+        return {
+            "encoding_mode": self.encoding_mode,
+            "structural_predicate_entries": int(self.structural_entry_count()),
+            "binary_predicate_metadata_bytes": int(binary_bytes),
+            "legacy_categorical_predicate_metadata_bytes_estimate": int(legacy_estimate),
+            "compression_ratio": (
+                float(legacy_estimate / binary_bytes) if binary_bytes and legacy_estimate else 1.0
+            ),
         }
 
+    def to_json_dict(self) -> dict[str, Any]:
+        data = {
+            "token_keys_by_column": self.token_keys_by_column,
+            "encoding_mode": self.encoding_mode,
+        }
+        if self.encoding_mode != "two_slot_binary_duet":
+            data["domains_by_column"] = self.domains_by_column
+        return data
+
     @classmethod
-    def from_json_dict(cls, data: dict[str, Any]) -> "PredicateVocabularies":
+    def from_json_dict(
+        cls,
+        data: dict[str, Any],
+        metadata: ModelMetadata | None = None,
+    ) -> "PredicateVocabularies":
+        domains = data.get("domains_by_column")
+        if domains is None and metadata is not None:
+            domains = tuple(column.domain for column in metadata.columns)
+        if domains is None:
+            domains = ()
         return cls(
             tuple(tuple(values) for values in data["token_keys_by_column"]),
             encoding_mode=str(data.get("encoding_mode", "categorical")),
-            domains_by_column=tuple(
-                tuple(values) for values in data.get("domains_by_column", ())
-            ),
+            domains_by_column=tuple(tuple(values) for values in domains),
         )
 
 
@@ -242,6 +311,25 @@ def _value_id(domain: tuple[Any, ...], value: Any) -> int:
         return domain.index(value)
     except ValueError as exc:
         raise ValueError(f"value {value!r} is outside predicate slot domain") from exc
+
+
+def _value_lookup(domain: tuple[Any, ...]) -> dict[Any, int]:
+    lookup: dict[Any, int] = {}
+    for index, value in enumerate(domain):
+        try:
+            hash(value)
+        except TypeError:
+            continue
+        lookup[value] = index
+    return lookup
+
+
+def _compact_binary_token_keys(column: ColumnMetadata) -> tuple[str, ...]:
+    if column.kind == ColumnKind.FANOUT:
+        return ("__binary_duet_fanout_specials__",)
+    if column.kind == ColumnKind.INDICATOR:
+        return ("__binary_duet_indicator_structural__",)
+    return ("__binary_duet_data_structural__",)
 
 
 def _comparable_domain_values(domain: tuple[Any, ...]) -> list[Any]:

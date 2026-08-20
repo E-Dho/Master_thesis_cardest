@@ -111,11 +111,33 @@ class PredicateTrainingContextGenerator:
         )
         if any(probability < 0.0 for probability in probabilities):
             raise ValueError("predicate_generation probabilities must be nonnegative")
+        self.normalize_predicate_probabilities = bool(
+            self.config.get("normalize_predicate_probabilities", True)
+        )
         self._probability_total = float(sum(probabilities))
         if self._probability_total <= 0.0:
             raise ValueError("predicate_generation probabilities must have positive total")
+        if (
+            not self.normalize_predicate_probabilities
+            and abs(self._probability_total - 1.0) > 1.0e-8
+        ):
+            raise ValueError(
+                "predicate_generation probabilities must sum to 1.0 when "
+                "normalize_predicate_probabilities=false"
+            )
         self.table_subset_sampling = str(self.config.get("table_subset_sampling", "full"))
         self._cache_by_metadata_id: dict[int, tuple[_ColumnPredicateCache | None, ...]] = {}
+
+    def probability_diagnostics(self) -> dict[str, float | bool]:
+        return {
+            "wildcard_probability": self.wildcard_probability,
+            "equality_probability": self.equality_probability,
+            "lower_bound_probability": self.lower_bound_probability,
+            "upper_bound_probability": self.upper_bound_probability,
+            "native_range_probability": self.native_range_probability,
+            "probability_total": self._probability_total,
+            "normalize_predicate_probabilities": self.normalize_predicate_probabilities,
+        }
 
     def generate_batch(
         self,
@@ -128,7 +150,7 @@ class PredicateTrainingContextGenerator:
 
         encoded_rows = np.asarray(encoded_rows, dtype=int)
         if self.strategy == "duet_batch_bounds" and not self.legacy_fixed_context:
-            return self._generate_duet_row_specific(
+            return self._generate_duet_batch_bounds(
                 encoded_rows=encoded_rows,
                 metadata=metadata,
                 rng=rng,
@@ -169,28 +191,56 @@ class PredicateTrainingContextGenerator:
             ),
         )
 
-    def _generate_duet_row_specific(
+    def _generate_duet_batch_bounds(
         self,
         *,
         encoded_rows: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
-        """Generate row-specific Duet-style contexts for one optimizer batch."""
+        """Generate one shared Duet-style predicate context for an optimizer batch."""
 
-        contexts: list[GeneratedTrainingContext] = []
-        repeated_rows: list[np.ndarray] = []
+        present_intersection = self._present_table_intersection(encoded_rows, metadata)
+        included_tables = self._sample_included_from_present(
+            present_intersection,
+            metadata,
+            rng,
+        )
+        if self._requires_root(metadata) and not included_tables:
+            raise ValueError("predicate generation rejected every sampled context")
+        inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
+        ordinary = self._ordinary_batch_predicates(
+            encoded_rows,
+            metadata,
+            rng,
+            included_tables,
+        )
+        tokens = tuple(
+            tokens_for_query_tables(
+                metadata,
+                set(included_tables),
+                set(inverse_fanouts),
+                dict(ordinary),
+            )
+        )
+        shared_context = GeneratedTrainingContext(
+            tokens=tokens,
+            included_tables=frozenset(included_tables),
+            inverse_fanout_columns=frozenset(inverse_fanouts),
+            ordinary_predicates=ordinary,
+        )
+        contexts = []
+        repeated_rows = []
         rejected = 0
+        contradictions = 0
+        repeats = self.per_row_contexts if self.enabled else 1
         for row in encoded_rows:
-            for _ in range(self.per_row_contexts if self.enabled else 1):
-                context = self._generate_one(row, metadata, rng)
-                if self._requires_root(metadata) and not context.included_tables:
+            for _ in range(repeats):
+                contradictions += included_indicator_contradictions(shared_context, row, metadata)
+                if not context_satisfies_row(shared_context, row, metadata):
                     rejected += 1
                     continue
-                if not context_satisfies_row(context, row, metadata):
-                    rejected += 1
-                    continue
-                contexts.append(context)
+                contexts.append(shared_context)
                 repeated_rows.append(row)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
@@ -200,7 +250,7 @@ class PredicateTrainingContextGenerator:
             PredicateGenerationStats(
                 generated_contexts=len(contexts),
                 rejected_unsatisfied_contexts=rejected,
-                included_indicator_contradictions=0,
+                included_indicator_contradictions=contradictions,
             ),
         )
 
@@ -262,11 +312,22 @@ class PredicateTrainingContextGenerator:
         rng: np.random.Generator,
     ) -> frozenset[str]:
         present = present_tables_for_row(encoded_row, metadata)
+        return self._sample_included_from_present(present, metadata, rng)
+
+    def _sample_included_from_present(
+        self,
+        present: frozenset[str],
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> frozenset[str]:
         if not present:
             return frozenset()
         if self.table_subset_sampling == "full" or not self.enabled:
             return frozenset(present)
-        if self.table_subset_sampling == "neurocard_rooted_connected":
+        if self.table_subset_sampling in {
+            "neurocard_rooted_connected",
+            "rooted_connected_uniform_legacy",
+        }:
             graph = infer_join_graph(metadata)
             if graph.root_table not in present:
                 return frozenset()
@@ -279,6 +340,8 @@ class PredicateTrainingContextGenerator:
                 return frozenset({graph.root_table})
             index = int(rng.integers(0, len(candidates)))
             return frozenset(candidates[index])
+        if self.table_subset_sampling == "neurocard_table_dropout_rooted":
+            return neurocard_table_dropout_rooted_subset(metadata, present, rng)
         if self.table_subset_sampling != "connected":
             raise ValueError(
                 f"unsupported predicate_generation.table_subset_sampling "
@@ -293,9 +356,25 @@ class PredicateTrainingContextGenerator:
     def _requires_root(self, metadata: ModelMetadata) -> bool:
         return (
             self.enabled
-            and self.table_subset_sampling == "neurocard_rooted_connected"
+            and self.table_subset_sampling in {
+                "neurocard_rooted_connected",
+                "rooted_connected_uniform_legacy",
+                "neurocard_table_dropout_rooted",
+            }
             and bool(infer_join_graph(metadata).root_table)
         )
+
+    def _present_table_intersection(
+        self,
+        encoded_rows: np.ndarray,
+        metadata: ModelMetadata,
+    ) -> frozenset[str]:
+        if len(encoded_rows) == 0:
+            return frozenset()
+        present = set(present_tables_for_row(encoded_rows[0], metadata))
+        for row in encoded_rows[1:]:
+            present.intersection_update(present_tables_for_row(row, metadata))
+        return frozenset(present)
 
     def _ordinary_predicates(
         self,
@@ -316,6 +395,122 @@ class PredicateTrainingContextGenerator:
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
         return ordinary
+
+    def _ordinary_batch_predicates(
+        self,
+        encoded_rows: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+        included_tables: frozenset[str],
+    ) -> dict[str, PredicateToken]:
+        ordinary: dict[str, PredicateToken] = {}
+        caches = self._column_caches(metadata)
+        for column_index, column in enumerate(metadata.columns):
+            if column.kind != ColumnKind.DATA:
+                continue
+            if column.table is not None and column.table not in included_tables:
+                continue
+            token = self._sample_batch_satisfied_predicate(
+                cache=caches[column_index],
+                column=column,
+                encoded_values=encoded_rows[:, column_index],
+                rng=rng,
+            )
+            if token.op != PredicateOp.WILDCARD:
+                ordinary[column.name] = token
+        return ordinary
+
+    def _sample_batch_satisfied_predicate(
+        self,
+        *,
+        cache: _ColumnPredicateCache | None,
+        column: Any,
+        encoded_values: np.ndarray,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        if not self.enabled or cache is None:
+            return PredicateToken.wildcard()
+        values = [column.domain[int(value_id)] for value_id in encoded_values]
+        if any(value not in cache.comparable_set for value in values):
+            return PredicateToken.wildcard()
+        try:
+            batch_min = min(values)
+            batch_max = max(values)
+        except TypeError:
+            return PredicateToken.wildcard()
+        comparable_values = cache.comparable_values
+        roll = float(rng.random() * self._probability_total)
+        if roll < self.wildcard_probability:
+            return PredicateToken.wildcard()
+        roll -= self.wildcard_probability
+        if roll < self.equality_probability:
+            if all(value == values[0] for value in values):
+                return PredicateToken.equal(values[0])
+            return self._sample_batch_range_style_predicate(
+                comparable_values,
+                batch_min=batch_min,
+                batch_max=batch_max,
+                rng=rng,
+            )
+        roll -= self.equality_probability
+        if roll < self.lower_bound_probability:
+            return self._sample_batch_lower_bound(comparable_values, batch_min, rng)
+        roll -= self.lower_bound_probability
+        if roll < self.upper_bound_probability:
+            return self._sample_batch_upper_bound(comparable_values, batch_max, rng)
+        return self._sample_batch_range_style_predicate(
+            comparable_values,
+            batch_min=batch_min,
+            batch_max=batch_max,
+            rng=rng,
+        )
+
+    def _sample_batch_lower_bound(
+        self,
+        comparable_values: tuple[Any, ...],
+        batch_min: Any,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        stop = bisect_right(comparable_values, batch_min)
+        if stop <= 0:
+            return PredicateToken.wildcard()
+        threshold = comparable_values[int(rng.integers(0, stop))]
+        return PredicateToken(PredicateOp.GREATER_EQUAL, value=threshold)
+
+    def _sample_batch_upper_bound(
+        self,
+        comparable_values: tuple[Any, ...],
+        batch_max: Any,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        start = bisect_left(comparable_values, batch_max)
+        if start >= len(comparable_values):
+            return PredicateToken.wildcard()
+        threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
+        return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
+
+    def _sample_batch_range_style_predicate(
+        self,
+        comparable_values: tuple[Any, ...],
+        *,
+        batch_min: Any,
+        batch_max: Any,
+        rng: np.random.Generator,
+    ) -> PredicateToken:
+        if not (
+            self.enable_native_range_tokens
+            and self.native_range_probability > 0.0
+        ):
+            if bool(rng.integers(0, 2)):
+                return self._sample_batch_lower_bound(comparable_values, batch_min, rng)
+            return self._sample_batch_upper_bound(comparable_values, batch_max, rng)
+        lower_stop = bisect_right(comparable_values, batch_min)
+        upper_start = bisect_left(comparable_values, batch_max)
+        if lower_stop <= 0 or upper_start >= len(comparable_values):
+            return PredicateToken.wildcard()
+        lower = comparable_values[int(rng.integers(0, lower_stop))]
+        upper = comparable_values[int(rng.integers(upper_start, len(comparable_values)))]
+        return PredicateToken.range(lower, upper)
 
     def _sample_satisfied_predicate(
         self,
@@ -566,6 +761,32 @@ def inverse_fanouts_for_table_subset(
     return frozenset(inverse)
 
 
+def neurocard_table_dropout_rooted_subset(
+    metadata: ModelMetadata,
+    present_tables: frozenset[str] | set[str],
+    rng: np.random.Generator,
+) -> frozenset[str]:
+    """Map NeuroCard's root-protected table dropout law to query subsets."""
+
+    graph = infer_join_graph(metadata)
+    tables = tuple(graph.tables)
+    present = set(present_tables)
+    if not tables or graph.root_table not in present:
+        return frozenset()
+    if len(tables) <= 1:
+        return frozenset({graph.root_table})
+    dropped_count = int(rng.integers(1, len(tables)))
+    drop_probability = dropped_count / len(tables)
+    proposed = {
+        table
+        for table in tables
+        if table == graph.root_table or float(rng.random()) > drop_probability
+    }
+    proposed.intersection_update(present)
+    proposed.add(graph.root_table)
+    return frozenset(_root_connected_component(proposed, graph.root_table, graph.edges))
+
+
 def token_coverage(
     token_rows: list[list[PredicateToken]] | list[tuple[PredicateToken, ...]],
     metadata: ModelMetadata,
@@ -664,7 +885,7 @@ def predicate_context_diagnostics(
         for column in metadata.columns
     }
     table_subset_distribution: dict[str, int] = {}
-    full_table_count = len(
+    tables_for_diagnostics = tuple(
         metadata.join_tables
         or tuple(
             dict.fromkeys(
@@ -674,12 +895,39 @@ def predicate_context_diagnostics(
             )
         )
     )
+    per_table_inclusion_counts: dict[str, int] = {
+        table: 0 for table in tables_for_diagnostics
+    }
+    predicate_choice_counts = {
+        "wildcard": 0,
+        "equality": 0,
+        "lower": 0,
+        "upper": 0,
+        "two_sided_range": 0,
+    }
+    full_table_count = len(
+        tables_for_diagnostics
+    )
     for context in contexts:
         table_count = len(context.included_tables)
         key = "full-query" if full_table_count and table_count == full_table_count else f"{table_count}-table"
         table_subset_distribution[key] = int(table_subset_distribution.get(key, 0)) + 1
+        for table in context.included_tables:
+            if table in per_table_inclusion_counts:
+                per_table_inclusion_counts[table] += 1
         for column, token in zip(metadata.columns, context.tokens):
             column_stats = per_column[column.name]
+            if column.kind == ColumnKind.DATA:
+                if token.op == PredicateOp.WILDCARD:
+                    predicate_choice_counts["wildcard"] += 1
+                elif token.op == PredicateOp.EQUAL:
+                    predicate_choice_counts["equality"] += 1
+                elif token.op in {PredicateOp.GREATER_EQUAL, PredicateOp.GREATER_THAN}:
+                    predicate_choice_counts["lower"] += 1
+                elif token.op in {PredicateOp.LESS_EQUAL, PredicateOp.LESS_THAN}:
+                    predicate_choice_counts["upper"] += 1
+                elif token.op == PredicateOp.RANGE:
+                    predicate_choice_counts["two_sided_range"] += 1
             if token.op == PredicateOp.WILDCARD:
                 column_stats["wildcard_rows"] += 1
             elif token.op == PredicateOp.EQUAL:
@@ -706,6 +954,15 @@ def predicate_context_diagnostics(
         ),
         "per_column": per_column,
         "table_subset_cardinality_distribution": table_subset_distribution,
+        "table_inclusion_probability": {
+            table: count / max(len(contexts), 1)
+            for table, count in per_table_inclusion_counts.items()
+        },
+        "empirical_predicate_choice_counts": predicate_choice_counts,
+        "empirical_predicate_choice_frequencies": {
+            key: count / max(sum(predicate_choice_counts.values()), 1)
+            for key, count in predicate_choice_counts.items()
+        },
     }
 
 
@@ -803,6 +1060,31 @@ def _is_connected_subset(subset: frozenset[str], edges: tuple[tuple[str, str], .
         seen.add(table)
         stack.extend(adjacency[table] - seen)
     return seen == set(subset)
+
+
+def _root_connected_component(
+    tables: set[str],
+    root_table: str,
+    edges: tuple[tuple[str, str], ...],
+) -> set[str]:
+    if root_table not in tables:
+        return set()
+    if not edges:
+        return {root_table}
+    adjacency = {table: set() for table in tables}
+    for left, right in edges:
+        if left in tables and right in tables:
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+    seen = {root_table}
+    stack = [root_table]
+    while stack:
+        table = stack.pop()
+        for neighbor in adjacency.get(table, set()):
+            if neighbor not in seen:
+                seen.add(neighbor)
+                stack.append(neighbor)
+    return seen
 
 
 def _coverage_key(column: Any, token: PredicateToken) -> str:

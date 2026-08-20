@@ -35,7 +35,10 @@ def main() -> None:
             f"checkpoint={model_metadata.factorization_plan.enabled}, "
             f"config={requested_factorization}"
         )
-    vocabularies = PredicateVocabularies.from_json_dict(payload["predicate_vocabularies"])
+    vocabularies = PredicateVocabularies.from_json_dict(
+        payload["predicate_vocabularies"],
+        model_metadata,
+    )
     tokens = tokens_for_query_tables(
         model_metadata,
         {column.table for column in model_metadata.columns if column.table is not None},

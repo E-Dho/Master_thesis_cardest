@@ -70,7 +70,10 @@ def main() -> None:
 
     model, payload = load_resmade_checkpoint(checkpoint, map_location="cpu")
     metadata = ModelMetadata.from_json_dict(payload["metadata"])
-    vocabularies = PredicateVocabularies.from_json_dict(payload["predicate_vocabularies"])
+    vocabularies = PredicateVocabularies.from_json_dict(
+        payload["predicate_vocabularies"],
+        metadata,
+    )
     wrapped = TorchDistributionModel(model, metadata, vocabularies)
     estimator = OnePassEstimator(wrapped, metadata)
 
@@ -93,6 +96,14 @@ def main() -> None:
         factors, native_range_count, predicate_columns, predicate_operators = query_eval[8:]
         qe = q_error(estimate, true_cardinality)
         qe_floor_one = q_error_floor_one(estimate, true_cardinality)
+        if len(factors):
+            smallest_factor_index = int(np.argmin(factors))
+            smallest_factor = float(factors[smallest_factor_index])
+            smallest_factor_name = metadata.columns[smallest_factor_index].name
+        else:
+            smallest_factor_index = -1
+            smallest_factor = float("nan")
+            smallest_factor_name = ""
         rows.append(
             {
                 "query_id": query_id,
@@ -119,6 +130,9 @@ def main() -> None:
                 "log_per_column_factors": ";".join(
                     "-inf" if value <= 0.0 else f"{log(value):.12g}" for value in factors
                 ),
+                "smallest_column_factor": smallest_factor,
+                "smallest_column_factor_index": smallest_factor_index,
+                "smallest_column_factor_name": smallest_factor_name,
                 "branch_estimates": branches,
                 "missing_domain_predicates": detail if status == "zero_due_to_missing_domain" else "",
                 "unsupported_predicates": detail if status == "unsupported" else "",
@@ -539,10 +553,36 @@ def summarize(
         status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
     all_q = [float(row["q_error"]) for row in scored]
     all_q_floor_one = [float(row["q_error_floor_one"]) for row in scored]
+    estimates = [float(row["estimated_cardinality"]) for row in scored]
     ok_q = [float(row["q_error"]) for row in ok_rows]
     native_q = [float(row["q_error"]) for row in rows if int(row["native_range_count"]) > 0]
     normal_q = [float(row["q_error"]) for row in rows if int(row["native_range_count"]) == 0 and row["status"] == "ok"]
     parameter_size = sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
+    estimate_lt_1_count = sum(1 for value in estimates if value < 1.0)
+    estimate_lt_0_1_count = sum(1 for value in estimates if value < 0.1)
+    estimate_lt_0_01_count = sum(1 for value in estimates if value < 0.01)
+    sub_one_estimate_queries = [
+        {
+            "query_id": row["query_id"],
+            "true_cardinality": row["true_cardinality"],
+            "estimated_cardinality": row["estimated_cardinality"],
+            "raw_q_error": row["q_error"],
+            "floor_one_q_error": row["q_error_floor_one"],
+            "tables": row["tables"],
+            "filters": row["filters"],
+            "smallest_column_factor": row.get("smallest_column_factor"),
+            "smallest_column_factor_index": row.get("smallest_column_factor_index"),
+            "smallest_column_factor_name": row.get("smallest_column_factor_name"),
+        }
+        for row in scored
+        if float(row["estimated_cardinality"]) < 1.0
+    ]
+    sub_one_estimate_queries.sort(
+        key=lambda row: (
+            float(row["estimated_cardinality"]),
+            -float(row["raw_q_error"]),
+        )
+    )
     return {
         "checkpoint": str(checkpoint),
         "checkpoint_size_bytes": checkpoint.stat().st_size,
@@ -564,6 +604,12 @@ def summarize(
         "queries_ok_or_inclusion_exclusion": len(ok_rows),
         "queries_ok_or_native_range": len(ok_rows),
         "zero_estimate_count": sum(1 for row in rows if str(row["zero_estimate"]) == "True"),
+        "estimate_lt_1_count": estimate_lt_1_count,
+        "estimate_lt_0_1_count": estimate_lt_0_1_count,
+        "estimate_lt_0_01_count": estimate_lt_0_01_count,
+        "estimate_lt_1_fraction": estimate_lt_1_count / max(len(scored), 1),
+        "estimate_lt_0_1_fraction": estimate_lt_0_1_count / max(len(scored), 1),
+        "estimate_lt_0_01_fraction": estimate_lt_0_01_count / max(len(scored), 1),
         "results_path": str(results_path),
         "status_counts": status_counts,
         "summary_path": str(summary_path),
@@ -573,8 +619,24 @@ def summarize(
         "all_scored_p99_q_error": _percentile(all_q, 99),
         "all_scored_max_q_error": max(all_q) if all_q else None,
         "all_scored_median_q_error_floor_one": _percentile(all_q_floor_one, 50),
+        "all_scored_p90_q_error_floor_one": _percentile(all_q_floor_one, 90),
         "all_scored_p95_q_error_floor_one": _percentile(all_q_floor_one, 95),
+        "all_scored_p99_q_error_floor_one": _percentile(all_q_floor_one, 99),
         "all_scored_max_q_error_floor_one": max(all_q_floor_one) if all_q_floor_one else None,
+        "raw": {
+            "median": _percentile(all_q, 50),
+            "p90": _percentile(all_q, 90),
+            "p95": _percentile(all_q, 95),
+            "p99": _percentile(all_q, 99),
+            "max": max(all_q) if all_q else None,
+        },
+        "floor_one": {
+            "median": _percentile(all_q_floor_one, 50),
+            "p90": _percentile(all_q_floor_one, 90),
+            "p95": _percentile(all_q_floor_one, 95),
+            "p99": _percentile(all_q_floor_one, 99),
+            "max": max(all_q_floor_one) if all_q_floor_one else None,
+        },
         "ok_median_q_error": _percentile(ok_q, 50),
         "ok_p90_q_error": _percentile(ok_q, 90),
         "ok_p95_q_error": _percentile(ok_q, 95),
@@ -590,6 +652,7 @@ def summarize(
             key=lambda row: float(row["q_error"]),
             reverse=True,
         )[:20],
+        "sub_one_estimate_queries": sub_one_estimate_queries,
     }
 
 

@@ -51,6 +51,10 @@ class SamplerMetadataTest(unittest.TestCase):
             "model/configs/resmade_factorized_smoke.yaml",
             "model/configs/job_light_resmade_factorized_smoke.yaml",
             "model/configs/job_light_resmade_factorized_anpm.yaml",
+            "model/configs/job_light_duet_binary_native_anpm_smoke.yaml",
+            "model/configs/job_light_duet_binary_native_anpm.yaml",
+            "model/configs/job_light_duet_binary_native_anpm_10k_early_stop.yaml",
+            "model/configs/job_light_duet_binary_native_anpm_20k_patience_3000.yaml",
         ):
             validate_config(load_simple_yaml(path))
 
@@ -82,6 +86,17 @@ class SamplerMetadataTest(unittest.TestCase):
         self.assertEqual(config["factorization"]["blacklist_kinds"], ["indicator", "fanout"])
         validate_config(config)
         config["model"]["direct_io_source_kinds"] = ["data", "future"]
+        with self.assertRaises(ValueError):
+            validate_config(config)
+        config["model"]["direct_io_source_kinds"] = ["data", "indicator", "fanout"]
+        config["model"]["direct_io_destination_kinds"] = ["data", "future"]
+        with self.assertRaises(ValueError):
+            validate_config(config)
+
+    def test_strict_production_predicate_probabilities_must_sum_to_one(self) -> None:
+        config = load_simple_yaml("model/configs/job_light_duet_binary_native_anpm_smoke.yaml")
+        validate_config(config)
+        config["predicate_generation"]["equality_probability"] = 0.4
         with self.assertRaises(ValueError):
             validate_config(config)
 

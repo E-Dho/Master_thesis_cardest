@@ -19,7 +19,8 @@ model:
   hidden_sizes: [512, 512, 512, 512]
   residual_connections: true
   direct_io_connections: true
-  direct_io_source_kinds: [data, indicator]
+  direct_io_source_kinds: [data, indicator, fanout]
+  direct_io_destination_kinds: [data, indicator, fanout]
   activation: relu
   input_encoding: duet_binary
   output_encoding: embed
@@ -58,10 +59,11 @@ fanout:
 predicate_generation:
   enabled: true
   strategy: duet_batch_bounds
-  table_subset_sampling: neurocard_rooted_connected
+  table_subset_sampling: neurocard_table_dropout_rooted
   enable_native_range_tokens: true
+  normalize_predicate_probabilities: false
   wildcard_probability: 0.2
-  equality_probability: 0.4
+  equality_probability: 0.2
   lower_bound_probability: 0.2
   upper_bound_probability: 0.2
   native_range_probability: 0.2

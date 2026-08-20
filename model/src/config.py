@@ -117,6 +117,17 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "model.direct_io_source_kinds must contain only data, indicator, or fanout"
         )
+    direct_io_destination_kinds = tuple(
+        str(kind)
+        for kind in model.get(
+            "direct_io_destination_kinds",
+            ["data", "indicator", "fanout"],
+        )
+    )
+    if any(kind not in {"data", "indicator", "fanout"} for kind in direct_io_destination_kinds):
+        raise ValueError(
+            "model.direct_io_destination_kinds must contain only data, indicator, or fanout"
+        )
     if factorization_config.enabled:
         if not anpm_config.enabled:
             raise ValueError("factorization.enabled=true requires anpm.enabled=true")
@@ -135,6 +146,14 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("predicate_generation probabilities must be nonnegative")
     if sum(probabilities) <= 0.0:
         raise ValueError("predicate_generation probabilities must have positive total")
+    normalize_probabilities = bool(
+        predicate_generation.get("normalize_predicate_probabilities", True)
+    )
+    if not normalize_probabilities and abs(sum(probabilities) - 1.0) > 1.0e-8:
+        raise ValueError(
+            "predicate_generation probabilities must sum to 1.0 when "
+            "normalize_predicate_probabilities=false"
+        )
     strategy = str(predicate_generation.get("strategy", "row_satisfied"))
     if strategy not in {"row_satisfied", "duet_batch_bounds"}:
         raise ValueError(
@@ -151,10 +170,17 @@ def validate_config(config: dict[str, Any]) -> None:
     if per_row_contexts <= 0:
         raise ValueError("predicate_generation.per_row_contexts must be positive")
     table_subset_sampling = str(predicate_generation.get("table_subset_sampling", "full"))
-    if table_subset_sampling not in {"full", "connected", "neurocard_rooted_connected"}:
+    if table_subset_sampling not in {
+        "full",
+        "connected",
+        "neurocard_rooted_connected",
+        "rooted_connected_uniform_legacy",
+        "neurocard_table_dropout_rooted",
+    }:
         raise ValueError(
             "predicate_generation.table_subset_sampling must be 'full', 'connected', "
-            "or 'neurocard_rooted_connected'"
+            "'rooted_connected_uniform_legacy', 'neurocard_rooted_connected', "
+            "or 'neurocard_table_dropout_rooted'"
         )
     predicate_encoding = config.get("predicate_encoding", {})
     encoding_mode = str(predicate_encoding.get("mode", "categorical_legacy"))

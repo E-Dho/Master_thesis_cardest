@@ -24,6 +24,7 @@ class PredicateResMADEConfig:
     residual_connections: bool = True
     direct_io_connections: bool = True
     direct_io_source_kinds: tuple[str, ...] = ("data", "indicator", "fanout")
+    direct_io_destination_kinds: tuple[str, ...] = ("data", "indicator", "fanout")
     activation: str = "relu"
     input_encoding: str = "embed"
     output_encoding: str = "one_hot"
@@ -179,6 +180,10 @@ class PredicateResMADEConfig:
             raise ValueError(
                 "direct_io_source_kinds must contain only data, indicator, or fanout"
             )
+        if any(kind not in {"data", "indicator", "fanout"} for kind in self.direct_io_destination_kinds):
+            raise ValueError(
+                "direct_io_destination_kinds must contain only data, indicator, or fanout"
+            )
         plan = self.factorization_plan
         if plan is not None and plan.enabled and specs != plan.output_head_specs:
             raise ValueError("factorized ResMADE output heads must match metadata plan")
@@ -209,6 +214,7 @@ class PredicateResMADEConfig:
             "residual_connections": self.residual_connections,
             "direct_io_connections": self.direct_io_connections,
             "direct_io_source_kinds": self.direct_io_source_kinds,
+            "direct_io_destination_kinds": self.direct_io_destination_kinds,
             "activation": self.activation,
             "input_encoding": self.input_encoding,
             "output_encoding": self.output_encoding,
@@ -277,6 +283,13 @@ class PredicateResMADEConfig:
                 str(value)
                 for value in data.get(
                     "direct_io_source_kinds",
+                    ("data", "indicator", "fanout"),
+                )
+            ),
+            direct_io_destination_kinds=tuple(
+                str(value)
+                for value in data.get(
+                    "direct_io_destination_kinds",
                     ("data", "indicator", "fanout"),
                 )
             ),
@@ -754,15 +767,32 @@ class PredicateResMADE(nn.Module):
 
     def _direct_io_mask(self, output_degrees: torch.Tensor) -> torch.Tensor:
         mask = mask_from_degrees(self.input_degrees, output_degrees, strict=True)
-        allowed_kinds = set(self.config.direct_io_source_kinds)
+        allowed_source_kinds = set(self.config.direct_io_source_kinds)
         input_allowed: list[float] = []
         for column_index, width in enumerate(self.column_input_widths):
             input_allowed.extend(
-                [1.0 if self._column_kind_name(column_index) in allowed_kinds else 0.0]
+                [
+                    1.0
+                    if self._column_kind_name(column_index) in allowed_source_kinds
+                    else 0.0
+                ]
                 * width
             )
         source_mask = torch.tensor(input_allowed, dtype=mask.dtype).unsqueeze(0)
-        return mask * source_mask
+        allowed_destination_kinds = set(self.config.direct_io_destination_kinds)
+        output_allowed: list[float] = []
+        for spec, width in zip(self.output_head_specs, self.output_head_widths):
+            output_allowed.extend(
+                [
+                    1.0
+                    if self._column_kind_name(spec.source_column_index)
+                    in allowed_destination_kinds
+                    else 0.0
+                ]
+                * int(width)
+            )
+        destination_mask = torch.tensor(output_allowed, dtype=mask.dtype).unsqueeze(1)
+        return mask * source_mask * destination_mask
 
     def _column_kind_name(self, column_index: int) -> str:
         kinds = getattr(self, "column_kinds", None)

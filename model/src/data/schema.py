@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -192,13 +193,30 @@ class ColumnMetadata:
             return len(self.predicate_domain)
         return len(self.domain)
 
+    @cached_property
+    def _hashable_value_to_id(self) -> dict[Any, int]:
+        lookup: dict[Any, int] = {}
+        for index, value in enumerate(self.domain):
+            try:
+                hash(value)
+            except TypeError:
+                continue
+            lookup[value] = index
+        return lookup
+
     def encode_value(self, value: Any) -> int:
         try:
-            return self.domain.index(value)
-        except ValueError as exc:
-            raise ValueError(
-                f"value {value!r} is outside domain for column {self.name!r}"
-            ) from exc
+            return self._hashable_value_to_id[value]
+        except TypeError:
+            pass
+        except KeyError:
+            pass
+        for index, candidate in enumerate(self.domain):
+            if candidate == value:
+                return index
+        raise ValueError(
+            f"value {value!r} is outside domain for column {self.name!r}"
+        )
 
 
 @dataclass(frozen=True)
