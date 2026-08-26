@@ -33,18 +33,26 @@ def parse_source(value: str) -> Tuple[str, Path]:
     return category, Path(path)
 
 
-def selected_rows(category: str, path: Path, queries_per_category: int) -> List[Dict[str, Any]]:
-    rows = [row for row in load_jsonl(path) if row["category"]["key"] == category]
-    rows.sort(key=lambda row: row["category"]["category_index"])
-    if len(rows) < queries_per_category:
+def selected_rows(category: str, paths: List[Path], queries_per_category: int) -> List[Dict[str, Any]]:
+    rows_by_index: Dict[int, Dict[str, Any]] = {}
+    for path in paths:
+        for row in load_jsonl(path):
+            if row["category"]["key"] != category:
+                continue
+            category_index = int(row["category"]["category_index"])
+            if category_index in rows_by_index:
+                continue
+            rows_by_index[category_index] = row
+
+    if len(rows_by_index) < queries_per_category:
         raise SystemExit(
-            f"{path} has {len(rows)} rows for {category}, expected at least {queries_per_category}"
+            f"{category} has {len(rows_by_index)} rows across sources, expected at least {queries_per_category}"
         )
-    rows = rows[:queries_per_category]
+    rows = [rows_by_index[index] for index in sorted(rows_by_index)[:queries_per_category]]
     expected_indexes = list(range(queries_per_category))
     indexes = [row["category"]["category_index"] for row in rows]
     if indexes != expected_indexes:
-        raise SystemExit(f"{path} has non-contiguous indexes for {category}: first mismatch in {indexes[:10]}")
+        raise SystemExit(f"{category} has non-contiguous indexes: first indexes are {indexes[:10]}")
     return rows
 
 
@@ -55,7 +63,7 @@ def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
             handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
 
 
-def write_summary(path: Path, rows: List[Dict[str, Any]], sources: Dict[str, Path]) -> None:
+def write_summary(path: Path, rows: List[Dict[str, Any]], sources: Dict[str, List[Path]]) -> None:
     category_counts = Counter(row["category"]["key"] for row in rows)
     multi = [row for row in rows if row["category"]["relation"] == "multi"]
     bad_multi = [
@@ -72,7 +80,7 @@ def write_summary(path: Path, rows: List[Dict[str, Any]], sources: Dict[str, Pat
         "bad_multi_entity_gt_join": bad_multi,
         "min_join_cardinality": min(row["join_cardinality"] for row in rows),
         "max_join_cardinality": max(row["join_cardinality"] for row in rows),
-        "sources": {category: str(path) for category, path in sorted(sources.items())},
+        "sources": {category: [str(path) for path in paths] for category, paths in sorted(sources.items())},
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -94,7 +102,9 @@ def main() -> None:
     if args.queries_per_category <= 0:
         raise SystemExit("--queries-per-category must be positive")
 
-    sources = dict(args.source)
+    sources: Dict[str, List[Path]] = {}
+    for category, path in args.source:
+        sources.setdefault(category, []).append(path)
     expected = category_order()
     missing = [category for category in expected if category not in sources]
     if missing:
@@ -105,7 +115,7 @@ def main() -> None:
         for row in selected_rows(category, sources[category], args.queries_per_category):
             output_row = dict(row)
             output_row["source_query_id"] = row["query_id"]
-            output_row["source_jsonl"] = str(sources[category])
+            output_row["source_jsonl"] = [str(path) for path in sources[category]]
             output_row["query_id"] = f"q{len(merged) + 1:08d}"
             merged.append(output_row)
 

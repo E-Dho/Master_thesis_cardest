@@ -377,12 +377,20 @@ class LiveCenterCache:
 
 
 class QueryGenerator:
-    def __init__(self, config: Dict[str, Any], seed: int, executor: Optional[QueryExecutor] = None, sample_cache_size: int = 2048):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        seed: int,
+        executor: Optional[QueryExecutor] = None,
+        sample_cache_size: int = 2048,
+        evaluate_cardinalities: bool = True,
+    ):
         self.config = config
         self.seed = seed
         self.rng = random.Random(seed)
         self.executor = executor
         self.live_centers = LiveCenterCache(config, executor, sample_cache_size)
+        self.evaluate_cardinalities = evaluate_cardinalities
         self.hash = config_hash(config)
         self.generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -431,7 +439,7 @@ class QueryGenerator:
             "config_hash": self.hash,
             "generated_at": self.generated_at,
         }
-        if self.executor is not None:
+        if self.executor is not None and self.evaluate_cardinalities:
             record["join_cardinality"] = int(self.executor.scalar(sql))
             if entity_sql:
                 record["entity_cardinality"] = int(self.executor.scalar(entity_sql))
@@ -748,6 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--sample-cache-size", type=int, default=2048, help="Live-row centers cached per ordered attribute in execute mode; use 0 to disable live center caching.")
     parser.add_argument("--progress-interval", type=int, default=100, help="Write a progress line every N generated queries; use 0 to disable.")
+    parser.add_argument("--skip-cardinality-execution", action="store_true", help="Connect for live center sampling but leave cardinality fields null.")
     execute_group = parser.add_mutually_exclusive_group()
     execute_group.add_argument("--execute", dest="execute", action="store_true", default=None)
     execute_group.add_argument("--no-execute", dest="execute", action="store_false")
@@ -770,7 +779,13 @@ def main() -> None:
 
     if execute:
         with QueryExecutor(host=args.host, port=args.port, dbname=args.dbname, user=args.user) as executor:
-            generator = QueryGenerator(config, args.seed, executor, sample_cache_size=args.sample_cache_size)
+            generator = QueryGenerator(
+                config,
+                args.seed,
+                executor,
+                sample_cache_size=args.sample_cache_size,
+                evaluate_cardinalities=not args.skip_cardinality_execution,
+            )
             written = stream_jsonl(Path(args.output), generator.iter_generate(categories, args.queries_per_category), args.progress_interval)
     else:
         generator = QueryGenerator(config, args.seed, None, sample_cache_size=args.sample_cache_size)
