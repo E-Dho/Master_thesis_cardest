@@ -93,6 +93,8 @@ importance_sampling:
     strategy: support_deficit
   diagnostics:
     enabled: true
+    global_rho_reservoir_size: 100000
+    per_stratum_rho_reservoir_size: 1000
 
 training:
   seed: 0

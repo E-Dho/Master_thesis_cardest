@@ -203,6 +203,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         self._sampler: Any | None = None
         self._factorized_sampler_module: Any | None = None
         self._root_jct_value_cache: dict[str, np.ndarray] = {}
+        self._root_jct_weight_cache: dict[str, np.ndarray] = {}
         self._root_stratum_candidate_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._startup_callback = startup_callback
         self._startup_event(
@@ -451,9 +452,31 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         root_weight_column = f"{root}.weight"
         values = self._root_jct_values_for_stratum(stratum)
         mask = _vectorized_root_stratum_mask(values, stratum)
-        weights = root_jct.loc[mask, root_weight_column].to_numpy(dtype=float)
+        root_weights = self._root_jct_weight_cache.get(root)
+        if root_weights is None:
+            root_weights = root_jct[root_weight_column].to_numpy(dtype=float)
+            self._root_jct_weight_cache[root] = root_weights
+        weights = root_weights[mask]
         if weights.size == 0 or float(weights.sum()) <= 0.0:
             raise ValueError(f"stratum {stratum.stratum_id!r} has no positive root JCT mass")
+        restricted_root_mass = float(weights.sum())
+        expected_mass = float(getattr(stratum, "foj_count", 0.0))
+        tolerance = max(1.0e-6, max(abs(restricted_root_mass), abs(expected_mass)) * 1.0e-10)
+        if abs(restricted_root_mass - expected_mass) > tolerance:
+            absolute_difference = abs(restricted_root_mass - expected_mass)
+            relative_difference = (
+                absolute_difference / abs(expected_mass)
+                if expected_mass
+                else float("inf")
+            )
+            raise ValueError(
+                "conditional root stratum candidate mass does not match discovery mass: "
+                f"stratum_id={stratum.stratum_id!r}, "
+                f"stratum_foj_count={expected_mass}, "
+                f"restricted_root_mass={restricted_root_mass}, "
+                f"absolute_difference={absolute_difference}, "
+                f"relative_difference={relative_difference}"
+            )
         candidate_indices = np.flatnonzero(mask)
         cached = (candidate_indices, weights)
         self._root_stratum_candidate_cache[stratum.stratum_id] = cached
@@ -484,6 +507,15 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
 
         root_values = table_actor.df[[root_key, data_column]]
         merged = root_jct[[root_key]].merge(root_values, how="left", on=root_key, indicator=True)
+        raw_values = merged[data_column].to_numpy(dtype=object)
+        merge_states = merged["_merge"].to_numpy(dtype=object)
+        if np.all(merge_states == "both"):
+            try:
+                cached_values = raw_values.astype(float)
+                self._root_jct_value_cache[data_column] = cached_values
+                return cached_values
+            except (TypeError, ValueError):
+                pass
         values = np.array(
             [
                 (
@@ -491,15 +523,16 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                     if matched == "both"
                     else OUTER_MISSING
                 )
-                for raw_value, matched in zip(
-                    merged[data_column].to_numpy(dtype=object),
-                    merged["_merge"].to_numpy(dtype=object),
-                )
+                for raw_value, matched in zip(raw_values, merge_states)
             ],
             dtype=object,
         )
-        self._root_jct_value_cache[data_column] = values
-        return values
+        try:
+            cached_values = values.astype(float)
+        except (TypeError, ValueError):
+            cached_values = values
+        self._root_jct_value_cache[data_column] = cached_values
+        return cached_values
 
     def _startup_event(
         self,

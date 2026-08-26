@@ -818,11 +818,15 @@ def _train_one_batch(
             None,
         )
         if update_importance_context_statistics is not None:
+            # ``weights`` above are batch/head-rescaled for stable normalized WCE.
+            # Long-running ESS diagnostics need true cross-batch relative weights,
+            # so pass rho and INV separately and let the diagnostic layer combine
+            # log(rho)+log(INV) without the per-batch rescaling constant.
             update_importance_context_statistics(
                 generation_stats=generation_stats,
                 token_rows=token_rows,
                 inv_only_weights=inv_only_weights,
-                combined_weights=weights,
+                rho=rho,
                 batch_metadata=batch.importance_metadata,
             )
     token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)

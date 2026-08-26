@@ -301,6 +301,15 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError(
                 "importance_sampling.allocation.strategy must be support_deficit"
             )
+        diagnostics = importance.get("diagnostics", {})
+        if int(diagnostics.get("global_rho_reservoir_size", 100_000)) < 0:
+            raise ValueError(
+                "importance_sampling.diagnostics.global_rho_reservoir_size must be nonnegative"
+            )
+        if int(diagnostics.get("per_stratum_rho_reservoir_size", 1_000)) < 0:
+            raise ValueError(
+                "importance_sampling.diagnostics.per_stratum_rho_reservoir_size must be nonnegative"
+            )
 
 
 def resolve_device(config: dict[str, Any]) -> str:

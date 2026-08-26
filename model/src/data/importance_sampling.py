@@ -11,6 +11,8 @@ from model.src.data.full_join_sampler import FullJoinBatch, SyntheticFullJoinSam
 from model.src.data.strata import (
     ExactRootStratumProvider,
     RootDataStratum,
+    RootStratumMembershipLookup,
+    build_membership_lookup,
     membership_matrix,
     predicate_probability_map,
     rho_for_memberships,
@@ -47,6 +49,8 @@ class StreamingWeightStats:
         self.maximum = max(self.maximum, float(np.max(array)))
         for value in array:
             self.count += 1
+            if self.reservoir_size <= 0:
+                continue
             if len(self.reservoir) < self.reservoir_size:
                 self.reservoir.append(float(value))
                 continue
@@ -85,23 +89,132 @@ class StreamingWeightStats:
                 else 0.0
             ),
             "percentile_reservoir_size": int(len(self.reservoir)),
+            "percentiles_are_approximate": bool(sample.size),
             **percentiles,
         }
 
 
 @dataclass
-class FanoutConditionalContextStats:
-    inv_only: StreamingWeightStats = field(default_factory=StreamingWeightStats)
-    importance_times_inv: StreamingWeightStats = field(default_factory=StreamingWeightStats)
-    relevant_inv_only: StreamingWeightStats = field(default_factory=StreamingWeightStats)
-    relevant_importance_times_inv: StreamingWeightStats = field(default_factory=StreamingWeightStats)
+class StreamingMomentStats:
+    """Constant-size streaming moments and ESS; retains no per-row history."""
 
-    def update(self, inv_value: float, combined_value: float, *, relevant: bool) -> None:
-        self.inv_only.update([inv_value])
-        self.importance_times_inv.update([combined_value])
-        if relevant:
-            self.relevant_inv_only.update([inv_value])
-            self.relevant_importance_times_inv.update([combined_value])
+    count: int = 0
+    total: float = 0.0
+    total_squared: float = 0.0
+    minimum: float = float("inf")
+    maximum: float = float("-inf")
+
+    def update(self, values: np.ndarray | list[float] | tuple[float, ...]) -> None:
+        array = np.asarray(values, dtype=float).reshape(-1)
+        if array.size == 0:
+            return
+        if np.any(array < 0.0) or not np.all(np.isfinite(array)):
+            raise ValueError("moment statistics require finite nonnegative values")
+        self.count += int(array.size)
+        self.total += float(np.sum(array))
+        self.total_squared += float(np.dot(array, array))
+        self.minimum = min(self.minimum, float(np.min(array)))
+        self.maximum = max(self.maximum, float(np.max(array)))
+
+    def to_json_dict(self) -> dict[str, float]:
+        if self.count == 0:
+            return _empty_moment_summary()
+        mean = self.total / float(self.count)
+        variance = max(0.0, self.total_squared / float(self.count) - mean * mean)
+        return {
+            "count": int(self.count),
+            "min": float(self.minimum),
+            "max": float(self.maximum),
+            "mean": float(mean),
+            "std": float(np.sqrt(variance)),
+            "sum": float(self.total),
+            "sum_squared": float(self.total_squared),
+            "ess": (
+                float(self.total * self.total / self.total_squared)
+                if self.total_squared > 0.0
+                else 0.0
+            ),
+            "retains_sample_history": False,
+        }
+
+
+@dataclass
+class StreamingLogWeightStats:
+    """Constant-size log-domain accumulator for global true rho*INV ESS."""
+
+    count: int = 0
+    log_sum_w: float = float("-inf")
+    log_sum_w2: float = float("-inf")
+    minimum_log: float = float("inf")
+    maximum_log: float = float("-inf")
+
+    def update_log_weights(self, log_values: np.ndarray) -> None:
+        values = np.asarray(log_values, dtype=float).reshape(-1)
+        if values.size == 0:
+            return
+        if not np.all(np.isfinite(values)):
+            raise ValueError("log weight statistics require finite log weights")
+        self.count += int(values.size)
+        self.log_sum_w = float(np.logaddexp(self.log_sum_w, _logsumexp(values)))
+        self.log_sum_w2 = float(np.logaddexp(self.log_sum_w2, _logsumexp(2.0 * values)))
+        self.minimum_log = min(self.minimum_log, float(np.min(values)))
+        self.maximum_log = max(self.maximum_log, float(np.max(values)))
+
+    def update_from_weights(self, values: np.ndarray | list[float] | tuple[float, ...]) -> None:
+        array = np.asarray(values, dtype=float).reshape(-1)
+        if array.size == 0:
+            return
+        if np.any(array <= 0.0) or not np.all(np.isfinite(array)):
+            raise ValueError("log weight statistics require finite positive weights")
+        self.update_log_weights(np.log(array))
+
+    def to_json_dict(self) -> dict[str, float]:
+        if self.count == 0:
+            payload = _empty_moment_summary()
+            payload.update({"log_sum": float("-inf"), "log_sum_squared": float("-inf")})
+            return payload
+        log_ess = 2.0 * self.log_sum_w - self.log_sum_w2
+        ess = float(np.exp(log_ess)) if log_ess < 700.0 else float("inf")
+        mean = float(np.exp(self.log_sum_w - np.log(float(self.count))))
+        return {
+            "count": int(self.count),
+            "min": float(np.exp(self.minimum_log)) if self.minimum_log < 700.0 else float("inf"),
+            "max": float(np.exp(self.maximum_log)) if self.maximum_log < 700.0 else float("inf"),
+            "mean": mean,
+            "std": float("nan"),
+            "sum": float(np.exp(self.log_sum_w)) if self.log_sum_w < 700.0 else float("inf"),
+            "sum_squared": (
+                float(np.exp(self.log_sum_w2)) if self.log_sum_w2 < 700.0 else float("inf")
+            ),
+            "log_sum": float(self.log_sum_w),
+            "log_sum_squared": float(self.log_sum_w2),
+            "ess": ess,
+            "retains_sample_history": False,
+            "log_domain": True,
+        }
+
+
+@dataclass
+class FanoutConditionalContextStats:
+    inv_only: StreamingMomentStats = field(default_factory=StreamingMomentStats)
+    importance_times_inv: StreamingLogWeightStats = field(default_factory=StreamingLogWeightStats)
+    relevant_inv_only: StreamingMomentStats = field(default_factory=StreamingMomentStats)
+    relevant_importance_times_inv: StreamingLogWeightStats = field(default_factory=StreamingLogWeightStats)
+
+    def update_arrays(
+        self,
+        *,
+        inv_values: np.ndarray,
+        log_combined_values: np.ndarray,
+        relevant_mask: np.ndarray,
+    ) -> None:
+        self.inv_only.update(inv_values)
+        self.importance_times_inv.update_log_weights(log_combined_values)
+        if np.any(relevant_mask):
+            self.relevant_inv_only.update(inv_values[relevant_mask])
+            self.relevant_importance_times_inv.update_log_weights(
+                log_combined_values[relevant_mask]
+            )
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -120,41 +233,89 @@ class StratumPredicateContextStats:
     relevant_context_count: int = 0
     root_predicate_operator_count: Counter[str] = field(default_factory=Counter)
     stratum_relevant_operator_count: Counter[str] = field(default_factory=Counter)
-    boundary_literal_count: Counter[str] = field(default_factory=Counter)
+    equality_literal_counts: Counter[str] = field(default_factory=Counter)
+    lower_threshold_counts: Counter[str] = field(default_factory=Counter)
+    upper_threshold_counts: Counter[str] = field(default_factory=Counter)
+    range_lower_counts: Counter[str] = field(default_factory=Counter)
+    range_upper_counts: Counter[str] = field(default_factory=Counter)
+    relevant_fanout_token_signature_count: Counter[str] = field(default_factory=Counter)
     fanouts: dict[str, FanoutConditionalContextStats] = field(
         default_factory=lambda: defaultdict(FanoutConditionalContextStats)
     )
 
-    def update(
+    def update_tokens(
         self,
         *,
-        token: PredicateToken,
+        tokens: list[PredicateToken],
         stratum: RootDataStratum,
-        fanout_values: Mapping[str, tuple[float, float]],
+        fanout_signatures: list[str],
+    ) -> np.ndarray:
+        relevant_mask = np.zeros(len(tokens), dtype=bool)
+        self.context_count += len(tokens)
+        for context_index, token in enumerate(tokens):
+            self.root_predicate_operator_count[token.op.value] += 1
+            self._update_boundary_counters(token)
+            relevant = _token_relevant_to_stratum(token, stratum)
+            relevant_mask[context_index] = relevant
+            if relevant:
+                self.relevant_context_count += 1
+                self.stratum_relevant_operator_count[token.op.value] += 1
+                self.relevant_fanout_token_signature_count[
+                    fanout_signatures[context_index]
+                ] += 1
+        return relevant_mask
+
+    def update_fanouts(
+        self,
+        *,
+        fanout_name: str,
+        inv_values: np.ndarray,
+        log_combined_values: np.ndarray,
+        relevant_mask: np.ndarray,
     ) -> None:
-        relevant = _token_relevant_to_stratum(token, stratum)
-        self.context_count += 1
-        self.root_predicate_operator_count[token.op.value] += 1
-        if relevant:
-            self.relevant_context_count += 1
-            self.stratum_relevant_operator_count[token.op.value] += 1
-        for literal in (token.value, token.upper):
-            if literal is not None:
-                self.boundary_literal_count[_bounded_literal_key(literal)] += 1
-        for fanout_name, (inv_value, combined_value) in fanout_values.items():
-            self.fanouts[fanout_name].update(
-                float(inv_value),
-                float(combined_value),
-                relevant=relevant,
-            )
+        self.fanouts[fanout_name].update_arrays(
+            inv_values=inv_values,
+            log_combined_values=log_combined_values,
+            relevant_mask=relevant_mask,
+        )
+
+    def _update_boundary_counters(self, token: PredicateToken) -> None:
+        if token.op == PredicateOp.EQUAL and token.value is not None:
+            self.equality_literal_counts[_bounded_literal_key(token.value)] += 1
+        elif token.op in {PredicateOp.GREATER_EQUAL, PredicateOp.GREATER_THAN} and token.value is not None:
+            self.lower_threshold_counts[_bounded_literal_key(token.value)] += 1
+        elif token.op in {PredicateOp.LESS_EQUAL, PredicateOp.LESS_THAN} and token.value is not None:
+            self.upper_threshold_counts[_bounded_literal_key(token.value)] += 1
+        elif token.op == PredicateOp.RANGE:
+            if token.value is not None:
+                self.range_lower_counts[_bounded_literal_key(token.value)] += 1
+            if token.upper is not None:
+                self.range_upper_counts[_bounded_literal_key(token.upper)] += 1
 
     def to_json_dict(self) -> dict[str, Any]:
+        boundary_counters = {
+            "equality_literal_counts": self.equality_literal_counts,
+            "lower_threshold_counts": self.lower_threshold_counts,
+            "upper_threshold_counts": self.upper_threshold_counts,
+            "range_lower_counts": self.range_lower_counts,
+            "range_upper_counts": self.range_upper_counts,
+        }
         return {
             "context_count": int(self.context_count),
             "stratum_relevant_context_count": int(self.relevant_context_count),
             "root_predicate_operator_count": dict(self.root_predicate_operator_count),
             "stratum_relevant_operator_count": dict(self.stratum_relevant_operator_count),
-            "boundary_literal_count": dict(self.boundary_literal_count.most_common(256)),
+            **{
+                name: dict(counter.most_common(512))
+                for name, counter in boundary_counters.items()
+            },
+            "boundary_counter_summaries": {
+                name: _counter_boundary_summary(counter)
+                for name, counter in boundary_counters.items()
+            },
+            "relevant_fanout_token_signature_count": dict(
+                self.relevant_fanout_token_signature_count.most_common(256)
+            ),
             "fanout_effective_sample_size": {
                 name: stats.to_json_dict() for name, stats in self.fanouts.items()
             },
@@ -168,6 +329,8 @@ class ImportanceSamplingRunningStats:
     enabled: bool
     mixture_probability: float
     selected_strata: tuple[RootDataStratum, ...]
+    global_rho_reservoir_size: int = 100_000
+    per_stratum_rho_reservoir_size: int = 1_000
     uniform_component_samples: int = 0
     rare_component_samples: int = 0
     selected_stratum_sample_count: Counter[str] = field(default_factory=Counter)
@@ -183,6 +346,8 @@ class ImportanceSamplingRunningStats:
     conditional_sampler_seconds: float = 0.0
     proposal_selection_seconds: float = 0.0
     importance_weight_seconds: float = 0.0
+    membership_computation_seconds: float = 0.0
+    context_statistics_seconds: float = 0.0
 
     def update_batch(
         self,
@@ -215,12 +380,16 @@ class ImportanceSamplingRunningStats:
             if values.size:
                 self.rho_stats_by_stratum.setdefault(
                     stratum.stratum_id,
-                    StreamingWeightStats(seed=stratum_index + 1),
+                    StreamingWeightStats(
+                        reservoir_size=self.per_stratum_rho_reservoir_size,
+                        seed=stratum_index + 1,
+                    ),
                 ).update(values)
         self.ordinary_sampler_seconds += float(timing.get("ordinary_sampler_seconds", 0.0))
         self.conditional_sampler_seconds += float(timing.get("conditional_sampler_seconds", 0.0))
         self.proposal_selection_seconds += float(timing.get("proposal_selection_seconds", 0.0))
         self.importance_weight_seconds += float(timing.get("importance_weight_seconds", 0.0))
+        self.membership_computation_seconds += float(timing.get("membership_computation_seconds", 0.0))
 
     def update_context_batch(
         self,
@@ -231,7 +400,9 @@ class ImportanceSamplingRunningStats:
         memberships: np.ndarray,
         inv_only_weights: np.ndarray,
         combined_weights: np.ndarray,
+        rho: np.ndarray,
     ) -> None:
+        started = time.perf_counter()
         source_indices = tuple(getattr(generation_stats, "source_row_indices", ()) or ())
         if not source_indices:
             if len(token_rows) % memberships.shape[0] != 0:
@@ -240,29 +411,45 @@ class ImportanceSamplingRunningStats:
             source_indices = tuple(np.repeat(np.arange(memberships.shape[0]), repeats))
         if len(source_indices) != len(token_rows):
             raise ValueError("source_row_indices must match generated predicate contexts")
+        source_index_array = np.asarray(source_indices, dtype=int)
+        context_memberships = memberships[source_index_array]
+        log_rho = np.log(np.asarray(rho, dtype=float))
+        if log_rho.shape != (len(token_rows),):
+            raise ValueError("rho must have one value per generated context")
+        fanout_signatures = _fanout_token_signatures(token_rows, metadata)
         fanout_indices = tuple(metadata.fanout_indices())
-        for context_index, source_row_index in enumerate(source_indices):
-            active = np.flatnonzero(memberships[int(source_row_index)])
-            if active.size == 0:
+        for stratum_index, stratum in enumerate(self.selected_strata):
+            context_mask = context_memberships[:, stratum_index]
+            if not np.any(context_mask):
                 continue
-            fanout_values = {
-                metadata.columns[fanout_index].name: (
-                    float(inv_only_weights[context_index, fanout_index]),
-                    float(combined_weights[context_index, fanout_index]),
+            selected_context_indices = np.flatnonzero(context_mask)
+            stratum_tokens = [
+                token_rows[int(context_index)][stratum.column_index]
+                for context_index in selected_context_indices
+            ]
+            stratum_signatures = [
+                fanout_signatures[int(context_index)]
+                for context_index in selected_context_indices
+            ]
+            stratum_stats = self.context_stats_by_stratum.setdefault(
+                stratum.stratum_id,
+                StratumPredicateContextStats(),
+            )
+            relevant_mask = stratum_stats.update_tokens(
+                tokens=stratum_tokens,
+                stratum=stratum,
+                fanout_signatures=stratum_signatures,
+            )
+            for fanout_index in fanout_indices:
+                inv_values = inv_only_weights[selected_context_indices, fanout_index]
+                log_combined = log_rho[selected_context_indices] + np.log(inv_values)
+                stratum_stats.update_fanouts(
+                    fanout_name=metadata.columns[fanout_index].name,
+                    inv_values=inv_values,
+                    log_combined_values=log_combined,
+                    relevant_mask=relevant_mask,
                 )
-                for fanout_index in fanout_indices
-            }
-            token_row = token_rows[context_index]
-            for stratum_index in active:
-                stratum = self.selected_strata[int(stratum_index)]
-                self.context_stats_by_stratum.setdefault(
-                    stratum.stratum_id,
-                    StratumPredicateContextStats(),
-                ).update(
-                    token=token_row[stratum.column_index],
-                    stratum=stratum,
-                    fanout_values=fanout_values,
-                )
+        self.context_statistics_seconds += time.perf_counter() - started
 
     def to_json_dict(self) -> dict[str, Any]:
         total = self.uniform_component_samples + self.rare_component_samples
@@ -292,6 +479,13 @@ class ImportanceSamplingRunningStats:
             "conditional_sampler_seconds": self.conditional_sampler_seconds,
             "proposal_selection_seconds": self.proposal_selection_seconds,
             "importance_weight_computation_seconds": self.importance_weight_seconds,
+            "membership_computation_seconds": self.membership_computation_seconds,
+            "context_statistics_seconds": self.context_statistics_seconds,
+            "statistics_memory_configuration": {
+                "global_rho_reservoir_size": int(self.global_rho_reservoir_size),
+                "per_stratum_rho_reservoir_size": int(self.per_stratum_rho_reservoir_size),
+                "fanout_reservoirs_enabled": False,
+            },
         }
 
 
@@ -331,7 +525,14 @@ class ImportanceSamplingSampleSource:
             * int(predicate.get("per_row_contexts", 1))
             * int(training.get("epochs", 1))
         )
-        diagnostics_enabled = bool(self.importance_config.get("diagnostics", {}).get("enabled", False))
+        diagnostics_config = dict(self.importance_config.get("diagnostics", {}))
+        diagnostics_enabled = bool(diagnostics_config.get("enabled", False))
+        self.global_rho_reservoir_size = int(
+            diagnostics_config.get("global_rho_reservoir_size", 100_000)
+        )
+        self.per_stratum_rho_reservoir_size = int(
+            diagnostics_config.get("per_stratum_rho_reservoir_size", 1_000)
+        )
         started = time.perf_counter()
         if diagnostics_enabled:
             print(
@@ -408,7 +609,14 @@ class ImportanceSamplingSampleSource:
             enabled=True,
             mixture_probability=self.mixture_probability,
             selected_strata=self.selected_strata,
+            global_rho_reservoir_size=self.global_rho_reservoir_size,
+            per_stratum_rho_reservoir_size=self.per_stratum_rho_reservoir_size,
+            rho_stats=StreamingWeightStats(
+                reservoir_size=self.global_rho_reservoir_size,
+                seed=int(training.get("seed", 0)),
+            ),
         )
+        self._membership_lookup = build_membership_lookup(self.metadata, self.selected_strata)  # type: ignore[arg-type]
         self._alpha = np.array([stratum.alpha for stratum in self.selected_strata], dtype=float)
         self._batch_calls = 0
 
@@ -482,13 +690,27 @@ class ImportanceSamplingSampleSource:
         encoded = np.empty((batch_size, len(self.metadata.columns)), dtype=np.int64)  # type: ignore[attr-defined]
         for rows, row_positions in zip(pieces, positions):
             encoded[row_positions] = rows
+        membership_start = time.perf_counter()
+        memberships = membership_matrix(
+            self.metadata,
+            encoded,
+            self.selected_strata,
+            lookup=self._membership_lookup,
+        )  # type: ignore[arg-type]
+        membership_seconds = time.perf_counter() - membership_start
+        if rare_count:
+            self._assert_rare_rows_match_selected_strata(
+                rare_positions=np.flatnonzero(rare_mask),
+                selected_ids=selected_ids,
+                memberships=memberships,
+            )
         weight_start = time.perf_counter()
-        memberships = membership_matrix(self.metadata, encoded, self.selected_strata)  # type: ignore[arg-type]
         rho = rho_for_memberships(
             memberships,
             self.selected_strata,
             self.mixture_probability,
         )
+        _assert_rho_defensive_bound(rho, self.mixture_probability)
         weight_seconds = time.perf_counter() - weight_start
         self.stats.update_batch(
             component=component,
@@ -499,6 +721,7 @@ class ImportanceSamplingSampleSource:
                 "ordinary_sampler_seconds": ordinary_seconds,
                 "conditional_sampler_seconds": conditional_seconds,
                 "proposal_selection_seconds": proposal_seconds,
+                "membership_computation_seconds": membership_seconds,
                 "importance_weight_seconds": weight_seconds,
             },
         )
@@ -517,13 +740,43 @@ class ImportanceSamplingSampleSource:
             },
         )
 
+    def _assert_rare_rows_match_selected_strata(
+        self,
+        *,
+        rare_positions: np.ndarray,
+        selected_ids: list[str | None],
+        memberships: np.ndarray,
+    ) -> None:
+        stratum_index_by_id = {
+            stratum.stratum_id: index for index, stratum in enumerate(self.selected_strata)
+        }
+        failures: list[dict[str, Any]] = []
+        for row_position in rare_positions:
+            selected_id = selected_ids[int(row_position)]
+            if selected_id is None:
+                failures.append({"row_position": int(row_position), "selected_stratum": None})
+                continue
+            stratum_index = stratum_index_by_id[selected_id]
+            if not bool(memberships[int(row_position), stratum_index]):
+                failures.append(
+                    {
+                        "row_position": int(row_position),
+                        "selected_stratum": selected_id,
+                    }
+                )
+        if failures:
+            raise ValueError(
+                "rare importance samples failed selected-stratum membership check: "
+                f"{failures[:10]}"
+            )
+
     def update_importance_context_statistics(
         self,
         *,
         generation_stats: Any,
         token_rows: list[list[PredicateToken]],
         inv_only_weights: np.ndarray,
-        combined_weights: np.ndarray,
+        rho: np.ndarray,
         batch_metadata: Mapping[str, Any] | None,
     ) -> None:
         if not batch_metadata:
@@ -537,7 +790,8 @@ class ImportanceSamplingSampleSource:
             token_rows=token_rows,
             memberships=memberships,
             inv_only_weights=inv_only_weights,
-            combined_weights=combined_weights,
+            combined_weights=np.empty((0, 0), dtype=float),
+            rho=rho,
         )
 
     def importance_sampling_summary(self) -> dict[str, Any]:
@@ -690,6 +944,21 @@ def _empty_weight_summary() -> dict[str, float]:
         "p95": 0.0,
         "p99": 0.0,
         "p999": 0.0,
+        "percentiles_are_approximate": False,
+    }
+
+
+def _empty_moment_summary() -> dict[str, float]:
+    return {
+        "count": 0,
+        "min": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "std": 0.0,
+        "sum": 0.0,
+        "sum_squared": 0.0,
+        "ess": 0.0,
+        "retains_sample_history": False,
     }
 
 
@@ -717,10 +986,24 @@ def _token_relevant_to_stratum(token: PredicateToken, stratum: RootDataStratum) 
             return (
                 token.value is not None
                 and token.upper is not None
-                and _safe_le(token.value, stratum.value)
-                and _safe_ge(token.upper, stratum.value)
+                and _literal_equal(token.value, stratum.value)
+                and _literal_equal(token.upper, stratum.value)
+            )
+        if stratum.region_type == "range":
+            return (
+                token.value is not None
+                and token.upper is not None
+                and _safe_ge(token.value, stratum.lower)
+                and _safe_le(token.upper, stratum.upper)
             )
     return False
+
+
+def _literal_equal(left: Any, right: Any) -> bool:
+    try:
+        return float(left) == float(right)
+    except (TypeError, ValueError):
+        return left == right
 
 
 def _safe_ge(left: Any, right: Any) -> bool:
@@ -742,6 +1025,65 @@ def _bounded_literal_key(value: Any, *, max_len: int = 80) -> str:
     if len(text) > max_len:
         return text[: max_len - 3] + "..."
     return text
+
+
+def _counter_boundary_summary(counter: Counter[str], *, limit: int = 16) -> dict[str, Any]:
+    if not counter:
+        return {
+            "observed_distinct": 0,
+            "least_supported": [],
+            "most_supported": [],
+        }
+    least = sorted(counter.items(), key=lambda item: (item[1], item[0]))[:limit]
+    return {
+        "observed_distinct": len(counter),
+        "least_supported": [{"literal": key, "count": int(value)} for key, value in least],
+        "most_supported": [
+            {"literal": key, "count": int(value)}
+            for key, value in counter.most_common(limit)
+        ],
+    }
+
+
+def _fanout_token_signatures(token_rows: list[list[PredicateToken]], metadata: Any) -> list[str]:
+    fanout_indices = tuple(metadata.fanout_indices())
+    signatures: list[str] = []
+    for token_row in token_rows:
+        parts = []
+        for fanout_index in fanout_indices:
+            column_name = metadata.columns[fanout_index].name
+            state = "INV" if token_row[fanout_index].op == PredicateOp.INV_FANOUT else "WILDCARD"
+            parts.append(f"{column_name}:{state}")
+        signatures.append("|".join(parts))
+    return signatures
+
+
+def _assert_rho_defensive_bound(
+    rho: np.ndarray,
+    mixture_probability: float,
+    *,
+    tolerance: float = 1.0e-9,
+) -> None:
+    values = np.asarray(rho, dtype=float)
+    if values.size == 0:
+        return
+    if np.any(values <= 0.0) or not np.all(np.isfinite(values)):
+        raise ValueError("importance weights rho must be finite and positive")
+    upper_bound = 1.0 / (1.0 - float(mixture_probability))
+    max_rho = float(np.max(values))
+    if max_rho > upper_bound + tolerance:
+        raise ValueError(
+            f"importance weights exceed defensive mixture bound: max_rho={max_rho}, "
+            f"bound={upper_bound}, mixture_probability={mixture_probability}"
+        )
+
+
+def _logsumexp(values: np.ndarray) -> float:
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return float("-inf")
+    maximum = float(np.max(values))
+    return float(maximum + np.log(np.sum(np.exp(values - maximum))))
 
 
 def _sampler_counters(source: object) -> dict[str, Any]:

@@ -30,10 +30,10 @@ class RootDataStratum:
     foj_count: float = 0.0
     probability: float = 0.0
     expected_target_rows: float = 0.0
-    expected_equality_count: float = 0.0
-    expected_lower_count: float = 0.0
-    expected_upper_count: float = 0.0
-    expected_range_support: float = 0.0
+    expected_equality_count: float | None = None
+    expected_lower_count: float | None = None
+    expected_upper_count: float | None = None
+    expected_range_support: float | None = None
     support_score: float = 0.0
     support_deficit: float = 0.0
     alpha: float = 0.0
@@ -70,6 +70,13 @@ class RootColumnMass:
     source: str
     semantic_type: str = "categorical"
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RootStratumMembershipLookup:
+    """Precomputed encoded-domain masks for vectorized root-stratum membership."""
+
+    by_column: Mapping[int, tuple[np.ndarray, np.ndarray]]
 
 
 class ExactRootStratumProvider:
@@ -377,6 +384,12 @@ class ExactRootStratumProvider:
         )
         return np.array([stratum.contains_value(value) for value in values], dtype=bool)
 
+    def membership_lookup(
+        self,
+        strata: tuple[RootDataStratum, ...],
+    ) -> RootStratumMembershipLookup:
+        return build_membership_lookup(self.metadata, strata)
+
 
 def rho_for_memberships(
     memberships: np.ndarray,
@@ -409,14 +422,43 @@ def membership_matrix(
     metadata: ModelMetadata,
     encoded_rows: np.ndarray,
     strata: tuple[RootDataStratum, ...],
+    lookup: RootStratumMembershipLookup | None = None,
 ) -> np.ndarray:
     rows = np.asarray(encoded_rows, dtype=np.int64)
+    if lookup is not None:
+        matrix = np.zeros((rows.shape[0], len(strata)), dtype=bool)
+        for column_index, (stratum_indices, lookup_matrix) in lookup.by_column.items():
+            matrix[:, stratum_indices] = lookup_matrix[rows[:, column_index]]
+        return matrix
     matrix = np.zeros((rows.shape[0], len(strata)), dtype=bool)
     for stratum_index, stratum in enumerate(strata):
         column = metadata.columns[stratum.column_index]
         values = [column.domain[int(value)] for value in rows[:, stratum.column_index]]
         matrix[:, stratum_index] = [stratum.contains_value(value) for value in values]
     return matrix
+
+
+def build_membership_lookup(
+    metadata: ModelMetadata,
+    strata: tuple[RootDataStratum, ...],
+) -> RootStratumMembershipLookup:
+    grouped: dict[int, list[int]] = {}
+    for stratum_index, stratum in enumerate(strata):
+        grouped.setdefault(stratum.column_index, []).append(stratum_index)
+    by_column: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for column_index, stratum_indices in grouped.items():
+        column = metadata.columns[column_index]
+        lookup_matrix = np.zeros((column.domain_size, len(stratum_indices)), dtype=bool)
+        for local_index, stratum_index in enumerate(stratum_indices):
+            stratum = strata[stratum_index]
+            lookup_matrix[:, local_index] = [
+                stratum.contains_value(value) for value in column.domain
+            ]
+        by_column[column_index] = (
+            np.asarray(stratum_indices, dtype=int),
+            lookup_matrix,
+        )
+    return RootStratumMembershipLookup(by_column=by_column)
 
 
 def predicate_probability_map(config: Mapping[str, Any]) -> dict[str, float]:
@@ -489,8 +531,6 @@ def _numeric_root_candidates(
                     probability=probability,
                     expected_target_rows=n_total * probability,
                     expected_equality_count=expected_equality,
-                    expected_lower_count=float(lower_support_by_threshold[rank]),
-                    expected_upper_count=float(upper_support_by_threshold[rank]),
                     expected_range_support=float(range_equality_support[rank]),
                     source=source,
                     semantic_type=semantic_type,
@@ -583,7 +623,6 @@ def _categorical_root_candidates(
                     probability=probability,
                     expected_target_rows=n_total * probability,
                     expected_equality_count=expected,
-                    expected_range_support=0.0,
                     source=source,
                     semantic_type=semantic_type,
                 ),
@@ -652,16 +691,21 @@ def _expected_native_range_interval_counts(
 
 
 def _with_score(stratum: RootDataStratum, threshold: float) -> RootDataStratum:
-    support = min(
-        value
+    applicable_values = [
+        float(value)
         for value in (
             stratum.expected_target_rows,
-            stratum.expected_equality_count or float("inf"),
-            stratum.expected_lower_count or float("inf"),
-            stratum.expected_upper_count or float("inf"),
-            stratum.expected_range_support or float("inf"),
+            stratum.expected_equality_count,
+            stratum.expected_lower_count,
+            stratum.expected_upper_count,
+            stratum.expected_range_support,
         )
-        if isfinite(float(value))
+        if value is not None and isfinite(float(value))
+    ]
+    if not applicable_values:
+        raise ValueError(f"stratum {stratum.stratum_id!r} has no applicable support metrics")
+    support = min(
+        applicable_values
     )
     deficit = max(0.0, float(threshold) - float(support))
     return RootDataStratum(

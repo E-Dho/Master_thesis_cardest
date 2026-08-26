@@ -7,15 +7,28 @@ import numpy as np
 import pandas as pd
 
 from model.src.config import load_simple_yaml, validate_config
-from model.src.data.full_join_sampler import FullJoinBatch, SyntheticDataset
-from model.src.data.importance_sampling import ImportanceSamplingSampleSource, _sampler_counters
+from model.src.data.full_join_sampler import (
+    FullJoinBatch,
+    LiveNeuroCardFullJoinSampleSource,
+    SyntheticDataset,
+)
+from model.src.data.importance_sampling import (
+    ImportanceSamplingRunningStats,
+    ImportanceSamplingSampleSource,
+    StreamingMomentStats,
+    _assert_rho_defensive_bound,
+    _sampler_counters,
+    _token_relevant_to_stratum,
+)
 from model.src.data.sample_sources import sample_source_from_config
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
     ExactRootStratumProvider,
     RootDataStratum,
     SQL_NULL,
+    build_membership_lookup,
     _expected_native_range_interval_counts,
+    _with_score,
     membership_matrix,
     rho_for_memberships,
 )
@@ -104,6 +117,11 @@ class ImportanceSamplingTest(unittest.TestCase):
                     "root_column_semantics": {"A.x": "ordered"},
                 },
                 "allocation": {"strategy": "support_deficit"},
+                "diagnostics": {
+                    "enabled": False,
+                    "global_rho_reservoir_size": 5,
+                    "per_stratum_rho_reservoir_size": 2,
+                },
             },
         }
 
@@ -171,6 +189,9 @@ class ImportanceSamplingTest(unittest.TestCase):
         self.assertGreater(summary["rare_component_sample_count"], 0)
         self.assertGreater(summary["rho"]["ess"], 0)
         self.assertNotIn("rho_values", summary)
+        self.assertLessEqual(summary["rho"]["percentile_reservoir_size"], 5)
+        for stratum_summary in summary["rho_by_stratum"].values():
+            self.assertLessEqual(stratum_summary["percentile_reservoir_size"], 2)
 
     def test_context_diagnostics_align_repeated_contexts_to_source_rows(self) -> None:
         source = self._numeric_source()
@@ -186,12 +207,11 @@ class ImportanceSamplingTest(unittest.TestCase):
         ]
         generation_stats = SimpleNamespace(source_row_indices=tuple(np.repeat(np.arange(32), 2)))
         inv_only = np.ones((64, len(source.metadata.columns)), dtype=float)
-        combined = inv_only * np.repeat(batch.importance_weights, 2)[:, None]
         wrapped.update_importance_context_statistics(
             generation_stats=generation_stats,
             token_rows=tokens,
             inv_only_weights=inv_only,
-            combined_weights=combined,
+            rho=np.repeat(batch.importance_weights, 2),
             batch_metadata=batch.importance_metadata,
         )
         summary = wrapped.importance_sampling_summary()
@@ -200,6 +220,170 @@ class ImportanceSamplingTest(unittest.TestCase):
         first = next(iter(context_stats.values()))
         self.assertGreater(first["context_count"], 0)
         self.assertIn("F_A", first["fanout_effective_sample_size"])
+        fanout_stats = first["fanout_effective_sample_size"]["F_A"]
+        self.assertFalse(fanout_stats["inv_only"]["retains_sample_history"])
+        self.assertFalse(fanout_stats["importance_times_inv"]["retains_sample_history"])
+        self.assertIn("lower_threshold_counts", first)
+        self.assertIn("relevant_fanout_token_signature_count", first)
+
+    def test_fanout_conditional_stats_are_constant_size_after_many_updates(self) -> None:
+        source = self._numeric_source()
+        wrapped = ImportanceSamplingSampleSource(source, self._config())
+        batch = wrapped.batches(16, seed=4)
+        generation_stats = SimpleNamespace(source_row_indices=tuple(range(16)))
+        tokens = [
+            [
+                PredicateToken(PredicateOp.RANGE, value=3, upper=3),
+                PredicateToken.wildcard(),
+                PredicateToken.inv_fanout(),
+            ]
+            for _ in range(16)
+        ]
+        inv_only = np.ones((16, len(source.metadata.columns)), dtype=float)
+        for _ in range(200):
+            wrapped.update_importance_context_statistics(
+                generation_stats=generation_stats,
+                token_rows=tokens,
+                inv_only_weights=inv_only,
+                rho=batch.importance_weights,
+                batch_metadata=batch.importance_metadata,
+            )
+        summary = wrapped.importance_sampling_summary()
+        first = next(iter(summary["conditional_context_stats_by_stratum"].values()))
+        fanout_stats = first["fanout_effective_sample_size"]["F_A"]
+        self.assertFalse(hasattr(StreamingMomentStats(), "reservoir"))
+        self.assertFalse(fanout_stats["inv_only"]["retains_sample_history"])
+        self.assertFalse(fanout_stats["importance_times_inv"]["retains_sample_history"])
+        self.assertLessEqual(summary["rho"]["percentile_reservoir_size"], 5)
+
+    def test_vectorized_membership_lookup_matches_direct_contains_value(self) -> None:
+        source = self._numeric_source()
+        strata = (
+            RootDataStratum("eq2", 0, "A.x", "equality", value=2),
+            RootDataStratum("ge1", 0, "A.x", "lower_tail", lower=1),
+            RootDataStratum("le1", 0, "A.x", "upper_tail", upper=1),
+        )
+        lookup = build_membership_lookup(source.metadata, strata)
+        vectorized = membership_matrix(source.metadata, source.dataset.encoded_rows, strata, lookup)
+        direct = membership_matrix(source.metadata, source.dataset.encoded_rows, strata)
+        self.assertTrue(np.array_equal(vectorized, direct))
+        self.assertTrue(np.any(vectorized[:, 1] & vectorized[:, 2]))
+
+    def test_rho_defensive_bound_is_enforced(self) -> None:
+        _assert_rho_defensive_bound(np.array([0.1, 1.25]), 0.2)
+        with self.assertRaisesRegex(ValueError, "defensive mixture bound"):
+            _assert_rho_defensive_bound(np.array([1.250001]), 0.2)
+
+    def test_rare_selected_stratum_membership_assertion_raises(self) -> None:
+        source = self._numeric_source()
+        wrapped = ImportanceSamplingSampleSource(source, self._config())
+        with self.assertRaisesRegex(ValueError, "selected-stratum membership"):
+            wrapped._assert_rare_rows_match_selected_strata(
+                rare_positions=np.array([0]),
+                selected_ids=[wrapped.selected_strata[0].stratum_id],
+                memberships=np.zeros((1, len(wrapped.selected_strata)), dtype=bool),
+            )
+
+    def test_global_true_rho_inv_ess_uses_unscaled_weights_across_batches(self) -> None:
+        source = self._numeric_source()
+        stratum = RootDataStratum("all", 0, "A.x", "lower_tail", lower=0, probability=1.0)
+        stats = ImportanceSamplingRunningStats(
+            enabled=True,
+            mixture_probability=0.2,
+            selected_strata=(stratum,),
+        )
+        memberships = np.ones((2, 1), dtype=bool)
+        token_rows = [
+            [PredicateToken.wildcard(), PredicateToken.wildcard(), PredicateToken.inv_fanout()],
+            [PredicateToken.wildcard(), PredicateToken.wildcard(), PredicateToken.inv_fanout()],
+        ]
+        generation_stats = SimpleNamespace(source_row_indices=(0, 1))
+        batch1_inv = np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]])
+        batch2_inv = np.array([[1.0, 1.0, 1000.0], [1.0, 1.0, 1.0]])
+        rho1 = np.array([1.0, 0.5])
+        rho2 = np.array([0.25, 0.25])
+        stats.update_context_batch(
+            metadata=source.metadata,
+            generation_stats=generation_stats,
+            token_rows=token_rows,
+            memberships=memberships,
+            inv_only_weights=batch1_inv,
+            combined_weights=np.empty((0, 0)),
+            rho=rho1,
+        )
+        stats.update_context_batch(
+            metadata=source.metadata,
+            generation_stats=generation_stats,
+            token_rows=token_rows,
+            memberships=memberships,
+            inv_only_weights=batch2_inv,
+            combined_weights=np.empty((0, 0)),
+            rho=rho2,
+        )
+        summary = stats.to_json_dict()["conditional_context_stats_by_stratum"]["all"]
+        observed = summary["fanout_effective_sample_size"]["F_A"]["importance_times_inv"]["ess"]
+        true_values = np.array([1.0, 0.5, 250.0, 0.25])
+        expected = float(true_values.sum() ** 2 / np.dot(true_values, true_values))
+        self.assertAlmostEqual(observed, expected)
+
+        naive = np.concatenate(
+            [
+                stable_combine_importance_and_inverse_weights(batch1_inv, rho1)[:, 2],
+                stable_combine_importance_and_inverse_weights(batch2_inv, rho2)[:, 2],
+            ]
+        )
+        naive_ess = float(naive.sum() ** 2 / np.dot(naive, naive))
+        self.assertNotAlmostEqual(naive_ess, expected)
+
+    def test_range_relevance_matches_stratum_semantics(self) -> None:
+        eq = RootDataStratum("eq", 0, "A.x", "equality", value=3)
+        self.assertTrue(_token_relevant_to_stratum(PredicateToken(PredicateOp.RANGE, value=3, upper=3), eq))
+        self.assertFalse(_token_relevant_to_stratum(PredicateToken(PredicateOp.RANGE, value=2, upper=3), eq))
+        self.assertFalse(_token_relevant_to_stratum(PredicateToken(PredicateOp.RANGE, value=3, upper=4), eq))
+        self.assertTrue(
+            _token_relevant_to_stratum(
+                PredicateToken(PredicateOp.RANGE, value=3, upper=5),
+                RootDataStratum("ge", 0, "A.x", "lower_tail", lower=3),
+            )
+        )
+        self.assertTrue(
+            _token_relevant_to_stratum(
+                PredicateToken(PredicateOp.RANGE, value=1, upper=3),
+                RootDataStratum("le", 0, "A.x", "upper_tail", upper=3),
+            )
+        )
+        self.assertTrue(
+            _token_relevant_to_stratum(
+                PredicateToken(PredicateOp.RANGE, value=3, upper=4),
+                RootDataStratum("range", 0, "A.x", "range", lower=2, upper=5),
+            )
+        )
+
+    def test_zero_expected_support_is_not_treated_as_non_applicable(self) -> None:
+        scored = _with_score(
+            RootDataStratum(
+                "zero",
+                0,
+                "A.x",
+                "equality",
+                value=3,
+                expected_target_rows=10.0,
+                expected_equality_count=0.0,
+                expected_range_support=None,
+            ),
+            threshold=5.0,
+        )
+        self.assertEqual(scored.support_score, 0.0)
+        self.assertEqual(scored.support_deficit, 5.0)
+
+    def test_rng_reproducibility_and_step_variation(self) -> None:
+        source = self._numeric_source()
+        first = ImportanceSamplingSampleSource(source, self._config()).batches(128, seed=7)
+        second = ImportanceSamplingSampleSource(source, self._config()).batches(128, seed=7)
+        third = ImportanceSamplingSampleSource(source, self._config()).batches(128, seed=8)
+        self.assertTrue(np.array_equal(first.encoded_values, second.encoded_values))
+        self.assertTrue(np.array_equal(first.importance_weights, second.importance_weights))
+        self.assertFalse(np.array_equal(first.encoded_values, third.encoded_values))
 
     def test_sampler_counter_summary_unwraps_nested_sources(self) -> None:
         inner = SimpleNamespace(
@@ -277,6 +461,76 @@ class ImportanceSamplingTest(unittest.TestCase):
         self.assertTrue(np.allclose(provider.column_masses[1].counts, [1.0, 2.0, 3.0, 1.0]))
         self.assertEqual(provider.column_masses[1].total_count, 7.0)
         self.assertEqual(provider.mass_diagnostics["root_jct_total_weight"], 7.0)
+
+    def test_conditional_candidate_mass_matches_stratum_foj_count(self) -> None:
+        source = self._fake_live_root_source()
+        stratum = RootDataStratum(
+            "title:production_year:ge:2015",
+            0,
+            "title:production_year",
+            "lower_tail",
+            lower=2015,
+            foj_count=5.0,
+        )
+        _, weights = source._root_stratum_candidates(stratum)
+        self.assertEqual(float(weights.sum()), 5.0)
+        cached_values = source._root_jct_value_cache["title.production_year"]
+        self.assertTrue(np.issubdtype(cached_values.dtype, np.number))
+
+    def test_conditional_candidate_mass_mismatch_raises(self) -> None:
+        source = self._fake_live_root_source()
+        stratum = RootDataStratum(
+            "title:production_year:ge:2015",
+            0,
+            "title:production_year",
+            "lower_tail",
+            lower=2015,
+            foj_count=4.0,
+        )
+        with self.assertRaisesRegex(ValueError, "candidate mass does not match"):
+            source._root_stratum_candidates(stratum)
+
+    def _fake_live_root_source(self) -> LiveNeuroCardFullJoinSampleSource:
+        metadata = ModelMetadata(
+            columns=(
+                ColumnMetadata(
+                    "title:production_year",
+                    ColumnKind.DATA,
+                    (2014, 2015, 2016),
+                    table="title",
+                ),
+            ),
+            full_join_cardinality=6,
+            join_root="title",
+            join_tables=("title",),
+            join_edges=(),
+        )
+        table_actor = SimpleNamespace(
+            table="title",
+            join_keys=["id"],
+            df=pd.DataFrame(
+                {
+                    "id": [1, 2, 3],
+                    "title.production_year": [2014, 2015, 2016],
+                }
+            ),
+        )
+        jct_actor = SimpleNamespace(
+            jct=pd.DataFrame(
+                {"id": [1, 2, 3], "title.weight": [1.0, 2.0, 3.0]}
+            )
+        )
+        source = LiveNeuroCardFullJoinSampleSource.__new__(LiveNeuroCardFullJoinSampleSource)
+        source._metadata = metadata
+        source._sampler = SimpleNamespace(
+            join_spec=SimpleNamespace(join_root="title"),
+            dt_actors=[table_actor],
+            jct_actors={"title": jct_actor},
+        )
+        source._root_jct_value_cache = {}
+        source._root_jct_weight_cache = {}
+        source._root_stratum_candidate_cache = {}
+        return source
 
     def test_numeric_root_columns_default_to_categorical_without_semantics(self) -> None:
         source = self._numeric_source()
@@ -411,6 +665,11 @@ class ImportanceSamplingTest(unittest.TestCase):
         validate_config(
             load_simple_yaml(
                 "model/configs/job_light_duet_binary_native_anpm_importance_sampling_smoke.yaml"
+            )
+        )
+        validate_config(
+            load_simple_yaml(
+                "model/configs/job_light_duet_binary_native_anpm_importance_sampling_performance_smoke.yaml"
             )
         )
 
