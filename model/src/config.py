@@ -261,6 +261,27 @@ def validate_config(config: dict[str, Any]) -> None:
                 "validation.selection_metric must be validation_nll or "
                 "validation_weighted_nll in this milestone"
             )
+    importance = config.get("importance_sampling", {})
+    if bool(importance.get("enabled", False)):
+        mixture = float(importance.get("mixture_probability", 0.2))
+        if not (0.0 <= mixture < 1.0):
+            raise ValueError("importance_sampling.mixture_probability must be in [0, 1)")
+        discovery = importance.get("discovery", {})
+        if not bool(discovery.get("root_data_only", True)):
+            raise ValueError(
+                "importance_sampling.discovery.root_data_only=false is not supported yet"
+            )
+        if float(discovery.get("minimum_expected_context_support", 100.0)) <= 0.0:
+            raise ValueError(
+                "importance_sampling.discovery.minimum_expected_context_support must be positive"
+            )
+        if int(discovery.get("max_selected_strata", 64)) <= 0:
+            raise ValueError("importance_sampling.discovery.max_selected_strata must be positive")
+        allocation = str(importance.get("allocation", {}).get("strategy", "support_deficit"))
+        if allocation != "support_deficit":
+            raise ValueError(
+                "importance_sampling.allocation.strategy must be support_deficit"
+            )
 
 
 def resolve_device(config: dict[str, Any]) -> str:

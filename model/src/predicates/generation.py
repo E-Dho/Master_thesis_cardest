@@ -37,6 +37,7 @@ class PredicateGenerationStats:
     generated_contexts: int = 0
     rejected_unsatisfied_contexts: int = 0
     included_indicator_contradictions: int = 0
+    source_row_indices: tuple[int, ...] = ()
 
     def to_json_dict(self) -> dict[str, int]:
         return {
@@ -173,9 +174,10 @@ class PredicateTrainingContextGenerator:
             )
         contexts: list[GeneratedTrainingContext] = []
         repeated_rows: list[np.ndarray] = []
+        source_row_indices: list[int] = []
         rejected = 0
         contradictions = 0
-        for row in encoded_rows:
+        for row_index, row in enumerate(encoded_rows):
             for _ in range(self.per_row_contexts if self.enabled else 1):
                 context = (
                     self._generate_legacy_fixed_context(metadata)
@@ -186,6 +188,7 @@ class PredicateTrainingContextGenerator:
                     contradictions += included_indicator_contradictions(context, row, metadata)
                     contexts.append(context)
                     repeated_rows.append(row)
+                    source_row_indices.append(row_index)
                     continue
                 if self._requires_root(metadata) and not context.included_tables:
                     rejected += 1
@@ -195,6 +198,7 @@ class PredicateTrainingContextGenerator:
                     continue
                 contexts.append(context)
                 repeated_rows.append(row)
+                source_row_indices.append(row_index)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
         return (
@@ -204,6 +208,7 @@ class PredicateTrainingContextGenerator:
                 generated_contexts=len(contexts),
                 rejected_unsatisfied_contexts=rejected,
                 included_indicator_contradictions=contradictions,
+                source_row_indices=tuple(source_row_indices),
             ),
         )
 
@@ -218,10 +223,11 @@ class PredicateTrainingContextGenerator:
 
         contexts: list[GeneratedTrainingContext] = []
         repeated_rows: list[np.ndarray] = []
+        source_row_indices: list[int] = []
         rejected = 0
         contradictions = 0
         repeats = self.per_row_contexts if self.enabled else 1
-        for row in encoded_rows:
+        for row_index, row in enumerate(encoded_rows):
             for _ in range(repeats):
                 context = self._generate_one(row, metadata, rng)
                 if self._requires_root(metadata) and not context.included_tables:
@@ -233,6 +239,7 @@ class PredicateTrainingContextGenerator:
                     continue
                 contexts.append(context)
                 repeated_rows.append(row)
+                source_row_indices.append(row_index)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
         return (
@@ -242,6 +249,7 @@ class PredicateTrainingContextGenerator:
                 generated_contexts=len(contexts),
                 rejected_unsatisfied_contexts=rejected,
                 included_indicator_contradictions=contradictions,
+                source_row_indices=tuple(source_row_indices),
             ),
         )
 

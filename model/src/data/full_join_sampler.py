@@ -33,6 +33,8 @@ class FullJoinBatch:
     raw_values: tuple[tuple[object, ...], ...] | None = None
     fresh_rows_drawn: int = 0
     fixture_rows_reused: int = 0
+    importance_weights: np.ndarray | None = None
+    importance_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,8 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         self._buffer_cursor = 0
         self._sampler: Any | None = None
         self._factorized_sampler_module: Any | None = None
+        self._root_jct_value_cache: dict[str, np.ndarray] = {}
+        self._root_stratum_candidate_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._startup_callback = startup_callback
         self._startup_event(
             "neurocard_path_resolved",
@@ -333,6 +337,155 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         self.sample_batches_generated += 1
         return int(self._buffer.shape[0])
 
+    def sample_root_stratum_rows(
+        self,
+        stratum: Any,
+        num_rows: int,
+        *,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """Draw exact NeuroCard rows conditional on a supported root-table stratum.
+
+        NeuroCard's Exact Weight sampler first samples a row from the root join
+        count table with probability proportional to ``{root}.weight`` and then
+        samples child join-count rows using ``IndexProvider.sample_indices``.
+        For root-table strata we can condition exactly by replacing only the
+        root distribution with the root-weight distribution restricted to the
+        stratum, then reusing the existing child JCT and data-table actors.
+        """
+
+        from model.src.data.complete_domain_preparation import encode_sample_dataframe
+
+        if self._sampler is None:
+            raise RuntimeError("live NeuroCard sampler was not initialized")
+        if num_rows <= 0:
+            return np.empty((0, len(self.metadata.columns)), dtype=np.int64)
+        candidate_indices, weights = self._root_stratum_candidates(stratum)
+        selected = rng.choice(
+            candidate_indices,
+            size=int(num_rows),
+            replace=True,
+            p=weights / float(weights.sum()),
+        )
+        root = self._sampler.join_spec.join_root
+        root_jct = self._sampler.jct_actors[root].jct
+        with _pushd(self.neurocard_workdir):
+            sample = root_jct.iloc[selected].reset_index(drop=True)
+            for table in self._sampler.sampling_tables_ordering[1:]:
+                sample = self._sampler.jct_actors[table].take_sample(
+                    sample,
+                    int(num_rows),
+                    rng,
+                )
+            frame = self._sampler._construct_complete_sample(sample)
+            frame = self._sampler._rearrange_columns(frame)
+            frame.replace(-1, np.nan, inplace=True)
+        encoded_sample = encode_sample_dataframe(frame, self.metadata, strict=True)
+        self.sampler_run_calls += 1
+        self.sample_batches_generated += 1
+        self.fresh_rows_drawn += int(num_rows)
+        return encoded_sample.encoded_rows
+
+    def sample_root_strata_rows(
+        self,
+        strata: Any,
+        *,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """Draw one conditional row for each stratum in a single child-sampling pass."""
+
+        from model.src.data.complete_domain_preparation import encode_sample_dataframe
+
+        if self._sampler is None:
+            raise RuntimeError("live NeuroCard sampler was not initialized")
+        strata = tuple(strata)
+        if not strata:
+            return np.empty((0, len(self.metadata.columns)), dtype=np.int64)
+        root = self._sampler.join_spec.join_root
+        root_jct = self._sampler.jct_actors[root].jct
+        selected_indices = np.empty(len(strata), dtype=int)
+        for row_index, stratum in enumerate(strata):
+            candidate_indices, weights = self._root_stratum_candidates(stratum)
+            selected_indices[row_index] = int(
+                rng.choice(
+                    candidate_indices,
+                    replace=True,
+                    p=weights / float(weights.sum()),
+                )
+            )
+        with _pushd(self.neurocard_workdir):
+            sample = root_jct.iloc[selected_indices].reset_index(drop=True)
+            for table in self._sampler.sampling_tables_ordering[1:]:
+                sample = self._sampler.jct_actors[table].take_sample(
+                    sample,
+                    len(strata),
+                    rng,
+                )
+            frame = self._sampler._construct_complete_sample(sample)
+            frame = self._sampler._rearrange_columns(frame)
+            frame.replace(-1, np.nan, inplace=True)
+        encoded_sample = encode_sample_dataframe(frame, self.metadata, strict=True)
+        self.sampler_run_calls += 1
+        self.sample_batches_generated += 1
+        self.fresh_rows_drawn += len(strata)
+        return encoded_sample.encoded_rows
+
+    def prepare_root_strata(self, strata: Any) -> None:
+        """Precompute root-JCT candidate distributions for selected strata."""
+
+        for stratum in strata:
+            self._root_stratum_candidates(stratum)
+
+    def _root_stratum_candidates(self, stratum: Any) -> tuple[np.ndarray, np.ndarray]:
+        if self._sampler is None:
+            raise RuntimeError("live NeuroCard sampler was not initialized")
+        cached = self._root_stratum_candidate_cache.get(stratum.stratum_id)
+        if cached is not None:
+            return cached
+        root = self._sampler.join_spec.join_root
+        root_jct = self._sampler.jct_actors[root].jct
+        root_weight_column = f"{root}.weight"
+        values = self._root_jct_values_for_stratum(stratum)
+        mask = _vectorized_root_stratum_mask(values, stratum)
+        weights = root_jct.loc[mask, root_weight_column].to_numpy(dtype=float)
+        if weights.size == 0 or float(weights.sum()) <= 0.0:
+            raise ValueError(f"stratum {stratum.stratum_id!r} has no positive root JCT mass")
+        candidate_indices = np.flatnonzero(mask)
+        cached = (candidate_indices, weights)
+        self._root_stratum_candidate_cache[stratum.stratum_id] = cached
+        return cached
+
+    def _root_jct_values_for_stratum(self, stratum: Any) -> np.ndarray:
+        if self._sampler is None:
+            raise RuntimeError("live NeuroCard sampler was not initialized")
+        root = self._sampler.join_spec.join_root
+        source_column = stratum.column_name.split(":", 1)[1]
+        data_column = f"{root}.{source_column}"
+        cached = self._root_jct_value_cache.get(data_column)
+        if cached is not None:
+            return cached
+        root_jct = self._sampler.jct_actors[root].jct
+        table_actor = next(actor for actor in self._sampler.dt_actors if actor.table == root)
+        if data_column not in table_actor.df.columns:
+            raise ValueError(f"root data column {data_column!r} is unavailable in NeuroCard table")
+        if len(table_actor.join_keys) != 1:
+            raise NotImplementedError("root stratum sampling currently supports one root join key")
+        root_key = table_actor.join_keys[0]
+        if table_actor.df[root_key].duplicated().any():
+            raise NotImplementedError(
+                "root stratum sampling requires a unique root join key so root JCT "
+                "weights can be restricted by root DATA values exactly"
+            )
+        root_values = table_actor.df[[root_key, data_column]]
+        merged = root_jct[[root_key]].merge(root_values, how="left", on=root_key)
+        raw_values = merged[data_column].to_numpy(dtype=object)
+        try:
+            values = raw_values.astype(float)
+        except (TypeError, ValueError):
+            values = raw_values
+        self._root_jct_value_cache[data_column] = values
+        return values
+
     def _startup_event(
         self,
         name: str,
@@ -373,6 +526,41 @@ def _pushd(path: Path) -> Any:
         yield
     finally:
         os.chdir(previous)
+
+
+def _root_jct_mask_for_stratum(sampler: Any, root_jct: Any, stratum: Any) -> np.ndarray:
+    root = sampler.join_spec.join_root
+    table_actor = next(actor for actor in sampler.dt_actors if actor.table == root)
+    source_column = stratum.column_name.split(":", 1)[1]
+    data_column = f"{root}.{source_column}"
+    if data_column not in table_actor.df.columns:
+        raise ValueError(f"root data column {data_column!r} is unavailable in NeuroCard table")
+    if len(table_actor.join_keys) != 1:
+        raise NotImplementedError("root stratum sampling currently supports one root join key")
+    root_key = table_actor.join_keys[0]
+    if table_actor.df[root_key].duplicated().any():
+        raise NotImplementedError(
+            "root stratum sampling requires a unique root join key so root JCT "
+            "weights can be restricted by root DATA values exactly"
+        )
+    values = table_actor.df[[root_key, data_column]]
+    merged = root_jct[[root_key]].merge(values, how="left", on=root_key)
+    column_values = merged[data_column].to_numpy(dtype=object)
+    return np.array([stratum.contains_value(value) for value in column_values], dtype=bool)
+
+
+def _vectorized_root_stratum_mask(values: np.ndarray, stratum: Any) -> np.ndarray:
+    if np.issubdtype(values.dtype, np.number):
+        numeric = values.astype(float, copy=False)
+        if stratum.region_type == "equality":
+            return numeric == float(stratum.value)
+        if stratum.region_type == "lower_tail":
+            return numeric >= float(stratum.lower)
+        if stratum.region_type == "upper_tail":
+            return numeric <= float(stratum.upper)
+        if stratum.region_type == "range":
+            return (numeric >= float(stratum.lower)) & (numeric <= float(stratum.upper))
+    return np.array([stratum.contains_value(value) for value in values], dtype=bool)
 
 
 def _encode_rows(metadata: ModelMetadata, rows: tuple[tuple[object, ...], ...]) -> np.ndarray:

@@ -9,6 +9,7 @@ from model.src.data.full_join_sampler import (
     NeuroCardFullJoinSampleSource,
     SyntheticFullJoinSampleSource,
 )
+from model.src.data.importance_sampling import ImportanceSamplingSampleSource
 from model.src.model.factorization import (
     FactorizationConfig,
     apply_factorization_to_metadata,
@@ -48,8 +49,13 @@ def sample_source_from_config(
         raise ValueError(f"unsupported dataset.type {dataset_type!r}")
     factorization = FactorizationConfig.from_dict(config.get("factorization", {}))
     if not factorization.enabled:
-        return source
-    return FactorizedMetadataSampleSource(source, factorization)
+        wrapped = source
+    else:
+        wrapped = FactorizedMetadataSampleSource(source, factorization)
+    importance = config.get("importance_sampling", {})
+    if bool(importance.get("enabled", False)):
+        return ImportanceSamplingSampleSource(wrapped, config)
+    return wrapped
 
 
 class FactorizedMetadataSampleSource:
@@ -77,6 +83,8 @@ class FactorizedMetadataSampleSource:
             raw_values=batch.raw_values,
             fresh_rows_drawn=batch.fresh_rows_drawn,
             fixture_rows_reused=batch.fixture_rows_reused,
+            importance_weights=batch.importance_weights,
+            importance_metadata=batch.importance_metadata,
         )
 
     @property
@@ -91,3 +99,14 @@ class FactorizedMetadataSampleSource:
         discard = getattr(self.base_source, "discard_buffer", None)
         if discard is not None:
             discard()
+
+    def prepare_root_strata(self, strata: object) -> None:
+        prepare = getattr(self.base_source, "prepare_root_strata", None)
+        if prepare is not None:
+            prepare(strata)
+
+    def sample_root_strata_rows(self, strata: object, *, rng: object) -> object:
+        sample = getattr(self.base_source, "sample_root_strata_rows", None)
+        if sample is None:
+            raise AttributeError("base source does not support batched root strata sampling")
+        return sample(strata, rng=rng)

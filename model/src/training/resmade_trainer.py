@@ -29,7 +29,12 @@ from model.src.predicates.vocabulary import (
     two_slot_binary_widths_by_column,
     two_slot_value_bins_by_column,
 )
-from model.src.training.losses import cumulative_inverse_fanout_weights, effective_sample_size
+from model.src.training.losses import (
+    cumulative_inverse_fanout_weights,
+    effective_sample_size,
+    importance_weights_for_generated_contexts,
+    stable_combine_importance_and_inverse_weights,
+)
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
 
 
@@ -71,6 +76,8 @@ class TrainingResult:
 class TrainingStepResult:
     loss: float
     fanout_effective_sample_size: dict[str, float]
+    fanout_inv_only_effective_sample_size: dict[str, float]
+    importance_weight_stats: dict[str, Any]
     original_column_losses: dict[str, float]
     factor_losses: dict[str, float]
     generated_contexts: int
@@ -261,6 +268,9 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     fanout_ess_values: dict[str, list[float]] = {
         metadata.columns[index].name: [] for index in metadata.fanout_indices()
     }
+    fanout_inv_only_ess_values: dict[str, list[float]] = {
+        metadata.columns[index].name: [] for index in metadata.fanout_indices()
+    }
     total_generated_contexts = 0
     total_rejected_contexts = 0
     total_indicator_contradictions = 0
@@ -351,6 +361,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             global_step += 1
             for fanout_name, fanout_ess in step_result.fanout_effective_sample_size.items():
                 fanout_ess_values[fanout_name].append(float(fanout_ess))
+            for fanout_name, fanout_ess in step_result.fanout_inv_only_effective_sample_size.items():
+                fanout_inv_only_ess_values[fanout_name].append(float(fanout_ess))
             last_original_column_losses = step_result.original_column_losses
             last_factor_losses = step_result.factor_losses
             total_generated_contexts += step_result.generated_contexts
@@ -377,6 +389,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     "fixture_rows_reused": fixture_rows_reused,
                     "loss": loss,
                     "fanout_effective_sample_size": step_result.fanout_effective_sample_size,
+                    "fanout_inv_only_effective_sample_size": (
+                        step_result.fanout_inv_only_effective_sample_size
+                    ),
+                    "importance_weight_stats": step_result.importance_weight_stats,
                     "original_column_losses": step_result.original_column_losses,
                     "factor_losses": step_result.factor_losses,
                     "predicate_token_coverage": aggregate_token_coverage,
@@ -519,6 +535,21 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         for fanout_name, values in fanout_ess_values.items()
         if values
     }
+    fanout_inv_only_ess_summary = {
+        fanout_name: {
+            "last": values[-1],
+            "mean": float(np.mean(values)),
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+        }
+        for fanout_name, values in fanout_inv_only_ess_values.items()
+        if values
+    }
+    importance_summary = (
+        sample_source.importance_sampling_summary()
+        if hasattr(sample_source, "importance_sampling_summary")
+        else {"enabled": False}
+    )
     output_embedding_parameter_count = int(
         sum(parameter.numel() for parameter in getattr(model, "output_embeddings").parameters())
     )
@@ -604,6 +635,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "columns_with_unseen_evaluation_token_types": [],
         "training_seconds": training_seconds,
         "fanout_effective_sample_size": fanout_ess_summary,
+        "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
+        "importance_sampling": importance_summary,
         "output_width_original": output_width_original,
         "output_width_factorized": output_width_factorized,
         "predicate_encoding_mode": getattr(
@@ -746,12 +779,36 @@ def _train_one_batch(
     context_diagnostics["rooted_adjustment_applied"] = (
         context_generator.table_subset_sampling == "neurocard_table_dropout_rooted"
     )
-    weights = cumulative_inverse_fanout_weights(
+    inv_only_weights = cumulative_inverse_fanout_weights(
         target_rows,
         token_rows,
         metadata,
         compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
     )
+    weights = inv_only_weights
+    importance_stats: dict[str, Any] = {"enabled": False}
+    if batch.importance_weights is not None:
+        rho = importance_weights_for_generated_contexts(
+            batch.importance_weights,
+            target_rows.shape[0],
+            generation_stats,
+        )
+        if np.any(rho <= 0.0) or not np.all(np.isfinite(rho)):
+            raise ValueError("importance weights rho must be finite and positive")
+        # p/q corrects tuple-sampling bias; INV products below correct
+        # query-measure fanout potentials. They are intentionally multiplied.
+        # We combine them in log space and subtract a per-head constant before
+        # exponentiation; normalized WCE is invariant to that common scaling.
+        weights = stable_combine_importance_and_inverse_weights(inv_only_weights, rho)
+        importance_stats = {
+            "enabled": True,
+            "rho_min": float(np.min(rho)),
+            "rho_max": float(np.max(rho)),
+            "rho_mean": float(np.mean(rho)),
+            "rho_sum": float(np.sum(rho)),
+            "rho_sum_squared": float(np.dot(rho, rho)),
+            "rho_ess": effective_sample_size(rho),
+        }
     token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)
     targets = torch.tensor(target_rows, dtype=torch.long, device=device)
     head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
@@ -790,14 +847,20 @@ def _train_one_batch(
     if not torch.isfinite(breakdown.total_loss):
         raise ValueError("training loss became non-finite")
     fanout_effective_sample_sizes = {}
+    fanout_inv_only_effective_sample_sizes = {}
     for fanout_index in metadata.fanout_indices():
         fanout_ess = effective_sample_size(weights[:, fanout_index])
         if fanout_ess <= 0:
             raise ValueError("fanout effective sample size is non-positive")
         fanout_effective_sample_sizes[metadata.columns[fanout_index].name] = float(fanout_ess)
+        fanout_inv_only_effective_sample_sizes[metadata.columns[fanout_index].name] = float(
+            effective_sample_size(inv_only_weights[:, fanout_index])
+        )
     return TrainingStepResult(
         loss=float(breakdown.total_loss.detach().cpu()),
         fanout_effective_sample_size=fanout_effective_sample_sizes,
+        fanout_inv_only_effective_sample_size=fanout_inv_only_effective_sample_sizes,
+        importance_weight_stats=importance_stats,
         original_column_losses=breakdown.original_column_losses,
         factor_losses=breakdown.factor_losses,
         generated_contexts=generation_stats.generated_contexts,
@@ -864,6 +927,15 @@ def _run_validation(
                     config["fanout"].get("compute_weights_in_log_space", True)
                 ),
             )
+            if batch.importance_weights is not None:
+                rho = importance_weights_for_generated_contexts(
+                    batch.importance_weights,
+                    target_rows.shape[0],
+                    _,
+                )
+                if np.any(rho <= 0.0) or not np.all(np.isfinite(rho)):
+                    raise ValueError("importance weights rho must be finite and positive")
+                weights = stable_combine_importance_and_inverse_weights(weights, rho)
             token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)
             targets = torch.tensor(target_rows, dtype=torch.long, device=device)
             head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
