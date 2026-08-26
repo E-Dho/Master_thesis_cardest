@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass
+from collections import Counter
+from dataclasses import asdict, dataclass, field
 from math import isfinite
 from typing import Any, Iterable, Mapping
 
@@ -37,6 +38,7 @@ class RootDataStratum:
     support_deficit: float = 0.0
     alpha: float = 0.0
     source: str = "unknown"
+    semantic_type: str = "categorical"
 
     def contains_value(self, value: Any) -> bool:
         if _is_structural_value(value):
@@ -66,6 +68,8 @@ class RootColumnMass:
     counts: np.ndarray
     total_count: float
     source: str
+    semantic_type: str = "categorical"
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
 
 class ExactRootStratumProvider:
@@ -79,12 +83,14 @@ class ExactRootStratumProvider:
         encoded_rows: np.ndarray | None = None,
         row_weights: np.ndarray | None = None,
         source: str = "exact",
+        mass_diagnostics: Mapping[str, Any] | None = None,
     ) -> None:
         self.metadata = metadata
         self.column_masses = dict(column_masses)
         self.encoded_rows = None if encoded_rows is None else np.asarray(encoded_rows, dtype=np.int64)
         self.row_weights = None if row_weights is None else np.asarray(row_weights, dtype=float)
         self.source = source
+        self.mass_diagnostics = dict(mass_diagnostics or {})
         if self.encoded_rows is not None and self.row_weights is None:
             self.row_weights = np.ones(self.encoded_rows.shape[0], dtype=float)
 
@@ -95,6 +101,7 @@ class ExactRootStratumProvider:
         encoded_rows: np.ndarray,
         *,
         source: str = "materialized_full_join",
+        root_column_semantics: Mapping[str, str] | None = None,
     ) -> "ExactRootStratumProvider":
         encoded_rows = np.asarray(encoded_rows, dtype=np.int64)
         root = metadata.join_root
@@ -112,6 +119,7 @@ class ExactRootStratumProvider:
                 counts=counts,
                 total_count=float(counts.sum()),
                 source=source,
+                semantic_type=_semantic_for_column(column.name, root_column_semantics),
             )
         return cls(metadata, masses, encoded_rows=encoded_rows, source=source)
 
@@ -124,6 +132,7 @@ class ExactRootStratumProvider:
         include_categorical: bool = True,
         max_domain_size: int | None = None,
         column_names: Iterable[str] | None = None,
+        root_column_semantics: Mapping[str, str] | None = None,
         diagnostics: bool = False,
     ) -> "ExactRootStratumProvider":
         root = sampler.join_spec.join_root
@@ -137,13 +146,31 @@ class ExactRootStratumProvider:
             )
         root_jct = sampler.jct_actors[root].jct
         root_weight_column = f"{root}.weight"
+        total_root_mass = float(root_jct[root_weight_column].sum())
+        sampler_join_cardinality = _optional_float(getattr(sampler, "join_card", None))
+        metadata_join_cardinality = _optional_float(metadata.full_join_cardinality)
+        _require_mass_close(
+            total_root_mass,
+            sampler_join_cardinality,
+            "root JCT total weight",
+            "sampler join cardinality",
+        )
+        _require_mass_close(
+            total_root_mass,
+            metadata_join_cardinality,
+            "root JCT total weight",
+            "metadata full join cardinality",
+        )
         root_values = table_actor.df.set_index(root_key, drop=False)
         allowed_columns = None if column_names is None else set(column_names)
         max_size = None if max_domain_size is None else int(max_domain_size)
         masses: dict[int, RootColumnMass] = {}
+        mapped_mass_by_column: dict[str, float] = {}
+        mass_difference_by_column: dict[str, float] = {}
         for column_index, column in enumerate(metadata.columns):
             if column.kind != ColumnKind.DATA or column.table != root:
                 continue
+            semantic_type = _semantic_for_column(column.name, root_column_semantics)
             if allowed_columns is not None and column.name not in allowed_columns:
                 if diagnostics:
                     print(
@@ -165,14 +192,20 @@ class ExactRootStratumProvider:
                         flush=True,
                     )
                 continue
-            if not include_categorical and not _ordered_numeric_values(column.domain):
+            if not include_categorical and semantic_type == "categorical":
                 if diagnostics:
                     print(
                         "[importance_sampling] skip root column",
                         {"column": column.name, "reason": "categorical_disabled"},
                         flush=True,
-                    )
+                )
                 continue
+            if semantic_type == "ordered" and not _ordered_numeric_values(column.domain):
+                raise ValueError(
+                    f"importance_sampling.discovery.root_column_semantics declares "
+                    f"{column.name!r} as ordered, but its complete domain is not "
+                    "comparable numeric"
+                )
             source_name = column.name.split(":", 1)[1]
             data_column = f"{root}.{source_name}"
             if data_column not in table_actor.df.columns:
@@ -189,23 +222,46 @@ class ExactRootStratumProvider:
                 how="left",
                 left_on=root_key,
                 right_index=True,
+                indicator=True,
             )
-            domain_to_id = {value: index for index, value in enumerate(column.domain)}
+            domain_to_id = _domain_index(column.domain)
             counts = np.zeros(column.domain_size, dtype=float)
-            for raw_value, weight in zip(
+            unmapped: Counter[str] = Counter()
+            for raw_value, matched, weight in zip(
                 merged[data_column].to_numpy(dtype=object),
+                merged["_merge"].to_numpy(dtype=object),
                 merged[root_weight_column].to_numpy(dtype=float),
             ):
-                value = _canonical_numeric(raw_value)
+                value = _canonical_root_value(raw_value, matched == "both")
                 index = domain_to_id.get(value)
                 if index is not None:
                     counts[index] += float(weight)
+                else:
+                    unmapped[_literal_id(value)] += 1
+            mapped_mass = float(counts.sum())
+            difference = float(total_root_mass - mapped_mass)
+            if unmapped or abs(difference) > max(1.0e-6, abs(total_root_mass) * 1.0e-10):
+                raise ValueError(
+                    "root JCT DATA mass mapping is not lossless for "
+                    f"{column.name!r}: mapped={mapped_mass}, "
+                    f"root_jct_total={total_root_mass}, difference={difference}, "
+                    f"unmapped_literals={dict(unmapped)}"
+                )
+            mapped_mass_by_column[column.name] = mapped_mass
+            mass_difference_by_column[column.name] = difference
             masses[column_index] = RootColumnMass(
                 column_index=column_index,
                 values=column.domain,
                 counts=counts,
-                total_count=float(counts.sum()),
+                total_count=float(total_root_mass),
                 source="neurocard_root_jct_weight",
+                semantic_type=semantic_type,
+                diagnostics={
+                    "mapped_mass": mapped_mass,
+                    "root_jct_total_weight": total_root_mass,
+                    "difference": difference,
+                    "semantic_type": semantic_type,
+                },
             )
             if diagnostics:
                 print(
@@ -214,12 +270,25 @@ class ExactRootStratumProvider:
                         "column": column.name,
                         "domain_size": column.domain_size,
                         "nonzero_values": int(np.count_nonzero(counts)),
-                        "total_count": float(counts.sum()),
+                        "mapped_mass": mapped_mass,
+                        "total_count": float(total_root_mass),
+                        "semantic_type": semantic_type,
                         "seconds": time.perf_counter() - started,
                     },
                     flush=True,
                 )
-        return cls(metadata, masses, source="neurocard_root_jct_weight")
+        return cls(
+            metadata,
+            masses,
+            source="neurocard_root_jct_weight",
+            mass_diagnostics={
+                "root_jct_total_weight": total_root_mass,
+                "sampler_join_cardinality": sampler_join_cardinality,
+                "metadata_join_cardinality": metadata_join_cardinality,
+                "mapped_mass_by_column": mapped_mass_by_column,
+                "mass_difference_by_column": mass_difference_by_column,
+            },
+        )
 
     def discover(
         self,
@@ -234,8 +303,7 @@ class ExactRootStratumProvider:
             column = self.metadata.columns[column_index]
             values = mass.values
             counts = mass.counts
-            numeric = _ordered_numeric_values(values)
-            if numeric:
+            if mass.semantic_type == "ordered":
                 candidates.extend(
                     _numeric_root_candidates(
                         column_index,
@@ -247,6 +315,7 @@ class ExactRootStratumProvider:
                         predicate_probabilities=predicate_probabilities,
                         threshold=minimum_expected_context_support,
                         source=mass.source,
+                        semantic_type=mass.semantic_type,
                     )
                 )
             else:
@@ -261,19 +330,23 @@ class ExactRootStratumProvider:
                         predicate_probabilities=predicate_probabilities,
                         threshold=minimum_expected_context_support,
                         source=mass.source,
+                        semantic_type=mass.semantic_type,
                     )
                 )
         selected = sorted(
-            (candidate for candidate in candidates if candidate.probability > 0.0),
+            (
+                candidate
+                for candidate in candidates
+                if candidate.probability > 0.0 and candidate.support_deficit > 0.0
+            ),
             key=lambda item: (-item.support_deficit, item.expected_target_rows, item.stratum_id),
         )[: max(0, int(max_selected_strata))]
         if not selected:
             return ()
         deficits = np.array([max(0.0, item.support_deficit) for item in selected], dtype=float)
         if float(deficits.sum()) <= 0.0:
-            alpha = np.full(len(selected), 1.0 / len(selected), dtype=float)
-        else:
-            alpha = deficits / float(deficits.sum())
+            return ()
+        alpha = deficits / float(deficits.sum())
         return tuple(
             RootDataStratum(**{**item.to_json_dict(), "alpha": float(alpha[index])})
             for index, item in enumerate(selected)
@@ -367,6 +440,7 @@ def _numeric_root_candidates(
     predicate_probabilities: Mapping[str, float],
     threshold: float,
     source: str,
+    semantic_type: str,
 ) -> Iterable[RootDataStratum]:
     comparable = [(index, float(value)) for index, value in enumerate(values) if _is_plain_number(value)]
     comparable.sort(key=lambda item: item[1])
@@ -388,9 +462,15 @@ def _numeric_root_candidates(
         n_total=n_total,
         p_upper=float(predicate_probabilities.get("upper", 0.0)),
     )
+    range_equality_support, range_lower_support, range_upper_support = (
+        _expected_native_range_interval_counts(
+            probabilities,
+            n_total=n_total,
+            p_range=float(predicate_probabilities.get("range", 0.0)),
+        )
+    )
     candidates: list[RootDataStratum] = []
     p_equal = float(predicate_probabilities.get("equality", 0.0))
-    p_range = float(predicate_probabilities.get("range", 0.0))
     for rank, (domain_index, value) in enumerate(comparable):
         foj_count = float(ordered_counts[rank])
         probability = float(probabilities[rank])
@@ -411,8 +491,9 @@ def _numeric_root_candidates(
                     expected_equality_count=expected_equality,
                     expected_lower_count=float(lower_support_by_threshold[rank]),
                     expected_upper_count=float(upper_support_by_threshold[rank]),
-                    expected_range_support=n_total * probability * p_range,
+                    expected_range_support=float(range_equality_support[rank]),
                     source=source,
+                    semantic_type=semantic_type,
                 ),
                 threshold,
             )
@@ -435,8 +516,9 @@ def _numeric_root_candidates(
                         probability=probability,
                         expected_target_rows=n_total * probability,
                         expected_lower_count=expected_lower,
-                        expected_range_support=expected_lower,
+                        expected_range_support=float(range_lower_support[rank]),
                         source=source,
+                        semantic_type=semantic_type,
                     ),
                     threshold,
                 )
@@ -457,8 +539,9 @@ def _numeric_root_candidates(
                         probability=probability,
                         expected_target_rows=n_total * probability,
                         expected_upper_count=expected_upper,
-                        expected_range_support=expected_upper,
+                        expected_range_support=float(range_upper_support[rank]),
                         source=source,
+                        semantic_type=semantic_type,
                     ),
                     threshold,
                 )
@@ -477,6 +560,7 @@ def _categorical_root_candidates(
     predicate_probabilities: Mapping[str, float],
     threshold: float,
     source: str,
+    semantic_type: str,
 ) -> Iterable[RootDataStratum]:
     p_equal = float(predicate_probabilities.get("equality", 0.0))
     candidates = []
@@ -499,7 +583,9 @@ def _categorical_root_candidates(
                     probability=probability,
                     expected_target_rows=n_total * probability,
                     expected_equality_count=expected,
+                    expected_range_support=0.0,
                     source=source,
+                    semantic_type=semantic_type,
                 ),
                 threshold,
             )
@@ -525,6 +611,44 @@ def _expected_upper_threshold_counts(
 ) -> np.ndarray:
     ranks_from_right = np.arange(probabilities.shape[0], 0, -1, dtype=float)
     return n_total * p_upper * np.cumsum(probabilities / ranks_from_right)
+
+
+def _expected_native_range_interval_counts(
+    probabilities: np.ndarray,
+    *,
+    n_total: int,
+    p_range: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Expected native RANGE coverage for eq/lower-tail/upper-tail intervals.
+
+    Duet row-specific range generation samples a literal row value X, then
+    chooses L uniformly among ranks <= X and U uniformly among ranks >= X.
+    These vectors return support for [v,v], [v,+inf], and [-inf,v].
+    """
+
+    probabilities = np.asarray(probabilities, dtype=float)
+    if probabilities.size == 0:
+        empty = np.zeros(0, dtype=float)
+        return empty, empty, empty
+    ranks = np.arange(1, probabilities.shape[0] + 1, dtype=float)
+    right_counts = np.arange(probabilities.shape[0], 0, -1, dtype=float)
+    equality = n_total * p_range * probabilities / (ranks * right_counts)
+
+    suffix_p = np.cumsum(probabilities[::-1])[::-1]
+    suffix_p_over_rank = np.cumsum((probabilities / ranks)[::-1])[::-1]
+    lower = n_total * p_range * (
+        suffix_p - (ranks - 1.0) * suffix_p_over_rank
+    )
+
+    prefix_p_over_right = np.cumsum(probabilities / right_counts)
+    zero_based_rank = ranks - 1.0
+    prefix_zero_rank_p_over_right = np.cumsum(
+        probabilities * zero_based_rank / right_counts
+    )
+    upper = n_total * p_range * (
+        ranks * prefix_p_over_right - prefix_zero_rank_p_over_right
+    )
+    return equality, lower, upper
 
 
 def _with_score(stratum: RootDataStratum, threshold: float) -> RootDataStratum:
@@ -582,6 +706,71 @@ def _canonical_numeric(value: Any) -> Any:
     if isinstance(value, (np.floating,)):
         return float(value)
     return value
+
+
+def _canonical_root_value(value: Any, matched_root_row: bool) -> Any:
+    if not matched_root_row:
+        return OUTER_MISSING
+    from model.src.data.complete_domain_preparation import canonicalize_base_value
+
+    return canonicalize_base_value(value)
+
+
+def _domain_index(values: tuple[Any, ...]) -> dict[Any, int]:
+    mapping: dict[Any, int] = {}
+    for index, value in enumerate(values):
+        try:
+            mapping[value] = index
+        except TypeError as exc:
+            raise TypeError(
+                "importance root domains must contain hashable canonical values"
+            ) from exc
+    return mapping
+
+
+def _semantic_for_column(
+    column_name: str,
+    root_column_semantics: Mapping[str, Any] | None,
+) -> str:
+    semantics = root_column_semantics or {}
+    configured: Any = semantics.get(column_name)
+    if configured is None and ":" in column_name:
+        table, source_column = column_name.split(":", 1)
+        nested = semantics.get(table)
+        if isinstance(nested, Mapping):
+            configured = nested.get(source_column)
+    value = str(configured or "categorical").lower()
+    if value not in {"ordered", "categorical"}:
+        raise ValueError(
+            "importance_sampling.discovery.root_column_semantics values must be "
+            f"'ordered' or 'categorical', got {value!r} for {column_name!r}"
+        )
+    return value
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _require_mass_close(
+    left: float,
+    right: float | None,
+    left_name: str,
+    right_name: str,
+) -> None:
+    if right is None:
+        return
+    tolerance = max(1.0e-6, max(abs(left), abs(right)) * 1.0e-10)
+    if abs(left - right) > tolerance:
+        raise ValueError(
+            f"{left_name} ({left}) does not match {right_name} ({right}) "
+            f"within tolerance {tolerance}"
+        )
 
 
 def _jsonable(value: Any) -> Any:

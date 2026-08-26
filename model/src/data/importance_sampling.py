@@ -15,6 +15,150 @@ from model.src.data.strata import (
     predicate_probability_map,
     rho_for_memberships,
 )
+from model.src.predicates.operators import PredicateOp, PredicateToken
+
+
+@dataclass
+class StreamingWeightStats:
+    """Streaming moments plus a bounded deterministic reservoir for percentiles."""
+
+    reservoir_size: int = 100_000
+    seed: int = 0
+    count: int = 0
+    total: float = 0.0
+    total_squared: float = 0.0
+    minimum: float = float("inf")
+    maximum: float = float("-inf")
+    reservoir: list[float] = field(default_factory=list)
+    _rng: np.random.Generator = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._rng = np.random.default_rng(self.seed)
+
+    def update(self, values: np.ndarray | list[float] | tuple[float, ...]) -> None:
+        array = np.asarray(values, dtype=float).reshape(-1)
+        if array.size == 0:
+            return
+        if np.any(array < 0.0) or not np.all(np.isfinite(array)):
+            raise ValueError("streaming weight statistics require finite nonnegative values")
+        self.total += float(np.sum(array))
+        self.total_squared += float(np.dot(array, array))
+        self.minimum = min(self.minimum, float(np.min(array)))
+        self.maximum = max(self.maximum, float(np.max(array)))
+        for value in array:
+            self.count += 1
+            if len(self.reservoir) < self.reservoir_size:
+                self.reservoir.append(float(value))
+                continue
+            replacement = int(self._rng.integers(0, self.count))
+            if replacement < self.reservoir_size:
+                self.reservoir[replacement] = float(value)
+
+    def to_json_dict(self) -> dict[str, float]:
+        if self.count == 0:
+            return _empty_weight_summary()
+        mean = self.total / float(self.count)
+        variance = max(0.0, self.total_squared / float(self.count) - mean * mean)
+        sample = np.asarray(self.reservoir, dtype=float)
+        percentiles = (
+            {
+                "p50": float(np.percentile(sample, 50)),
+                "p90": float(np.percentile(sample, 90)),
+                "p95": float(np.percentile(sample, 95)),
+                "p99": float(np.percentile(sample, 99)),
+                "p999": float(np.percentile(sample, 99.9)),
+            }
+            if sample.size
+            else {"p50": 0.0, "p90": 0.0, "p95": 0.0, "p99": 0.0, "p999": 0.0}
+        )
+        return {
+            "count": int(self.count),
+            "min": float(self.minimum),
+            "max": float(self.maximum),
+            "mean": float(mean),
+            "std": float(np.sqrt(variance)),
+            "sum": float(self.total),
+            "sum_squared": float(self.total_squared),
+            "ess": (
+                float(self.total * self.total / self.total_squared)
+                if self.total_squared > 0.0
+                else 0.0
+            ),
+            "percentile_reservoir_size": int(len(self.reservoir)),
+            **percentiles,
+        }
+
+
+@dataclass
+class FanoutConditionalContextStats:
+    inv_only: StreamingWeightStats = field(default_factory=StreamingWeightStats)
+    importance_times_inv: StreamingWeightStats = field(default_factory=StreamingWeightStats)
+    relevant_inv_only: StreamingWeightStats = field(default_factory=StreamingWeightStats)
+    relevant_importance_times_inv: StreamingWeightStats = field(default_factory=StreamingWeightStats)
+
+    def update(self, inv_value: float, combined_value: float, *, relevant: bool) -> None:
+        self.inv_only.update([inv_value])
+        self.importance_times_inv.update([combined_value])
+        if relevant:
+            self.relevant_inv_only.update([inv_value])
+            self.relevant_importance_times_inv.update([combined_value])
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "inv_only": self.inv_only.to_json_dict(),
+            "importance_times_inv": self.importance_times_inv.to_json_dict(),
+            "stratum_relevant_inv_only": self.relevant_inv_only.to_json_dict(),
+            "stratum_relevant_importance_times_inv": (
+                self.relevant_importance_times_inv.to_json_dict()
+            ),
+        }
+
+
+@dataclass
+class StratumPredicateContextStats:
+    context_count: int = 0
+    relevant_context_count: int = 0
+    root_predicate_operator_count: Counter[str] = field(default_factory=Counter)
+    stratum_relevant_operator_count: Counter[str] = field(default_factory=Counter)
+    boundary_literal_count: Counter[str] = field(default_factory=Counter)
+    fanouts: dict[str, FanoutConditionalContextStats] = field(
+        default_factory=lambda: defaultdict(FanoutConditionalContextStats)
+    )
+
+    def update(
+        self,
+        *,
+        token: PredicateToken,
+        stratum: RootDataStratum,
+        fanout_values: Mapping[str, tuple[float, float]],
+    ) -> None:
+        relevant = _token_relevant_to_stratum(token, stratum)
+        self.context_count += 1
+        self.root_predicate_operator_count[token.op.value] += 1
+        if relevant:
+            self.relevant_context_count += 1
+            self.stratum_relevant_operator_count[token.op.value] += 1
+        for literal in (token.value, token.upper):
+            if literal is not None:
+                self.boundary_literal_count[_bounded_literal_key(literal)] += 1
+        for fanout_name, (inv_value, combined_value) in fanout_values.items():
+            self.fanouts[fanout_name].update(
+                float(inv_value),
+                float(combined_value),
+                relevant=relevant,
+            )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "context_count": int(self.context_count),
+            "stratum_relevant_context_count": int(self.relevant_context_count),
+            "root_predicate_operator_count": dict(self.root_predicate_operator_count),
+            "stratum_relevant_operator_count": dict(self.stratum_relevant_operator_count),
+            "boundary_literal_count": dict(self.boundary_literal_count.most_common(256)),
+            "fanout_effective_sample_size": {
+                name: stats.to_json_dict() for name, stats in self.fanouts.items()
+            },
+        }
 
 
 @dataclass
@@ -30,7 +174,11 @@ class ImportanceSamplingRunningStats:
     row_membership_count: Counter[str] = field(default_factory=Counter)
     membership_patterns: Counter[str] = field(default_factory=Counter)
     multiple_membership_samples: int = 0
-    rho_values: list[float] = field(default_factory=list)
+    rho_stats: StreamingWeightStats = field(default_factory=StreamingWeightStats)
+    rho_stats_by_stratum: dict[str, StreamingWeightStats] = field(default_factory=dict)
+    context_stats_by_stratum: dict[str, StratumPredicateContextStats] = field(
+        default_factory=dict
+    )
     ordinary_sampler_seconds: float = 0.0
     conditional_sampler_seconds: float = 0.0
     proposal_selection_seconds: float = 0.0
@@ -61,22 +209,62 @@ class ImportanceSamplingRunningStats:
             self.membership_patterns[key] += 1
             for stratum_id in ids:
                 self.row_membership_count[stratum_id] += 1
-        self.rho_values.extend(float(value) for value in rho)
+        self.rho_stats.update(rho)
+        for stratum_index, stratum in enumerate(self.selected_strata):
+            values = rho[memberships[:, stratum_index]]
+            if values.size:
+                self.rho_stats_by_stratum.setdefault(
+                    stratum.stratum_id,
+                    StreamingWeightStats(seed=stratum_index + 1),
+                ).update(values)
         self.ordinary_sampler_seconds += float(timing.get("ordinary_sampler_seconds", 0.0))
         self.conditional_sampler_seconds += float(timing.get("conditional_sampler_seconds", 0.0))
         self.proposal_selection_seconds += float(timing.get("proposal_selection_seconds", 0.0))
         self.importance_weight_seconds += float(timing.get("importance_weight_seconds", 0.0))
 
+    def update_context_batch(
+        self,
+        *,
+        metadata: Any,
+        generation_stats: Any,
+        token_rows: list[list[PredicateToken]],
+        memberships: np.ndarray,
+        inv_only_weights: np.ndarray,
+        combined_weights: np.ndarray,
+    ) -> None:
+        source_indices = tuple(getattr(generation_stats, "source_row_indices", ()) or ())
+        if not source_indices:
+            if len(token_rows) % memberships.shape[0] != 0:
+                raise ValueError("importance context diagnostics cannot align contexts")
+            repeats = len(token_rows) // memberships.shape[0]
+            source_indices = tuple(np.repeat(np.arange(memberships.shape[0]), repeats))
+        if len(source_indices) != len(token_rows):
+            raise ValueError("source_row_indices must match generated predicate contexts")
+        fanout_indices = tuple(metadata.fanout_indices())
+        for context_index, source_row_index in enumerate(source_indices):
+            active = np.flatnonzero(memberships[int(source_row_index)])
+            if active.size == 0:
+                continue
+            fanout_values = {
+                metadata.columns[fanout_index].name: (
+                    float(inv_only_weights[context_index, fanout_index]),
+                    float(combined_weights[context_index, fanout_index]),
+                )
+                for fanout_index in fanout_indices
+            }
+            token_row = token_rows[context_index]
+            for stratum_index in active:
+                stratum = self.selected_strata[int(stratum_index)]
+                self.context_stats_by_stratum.setdefault(
+                    stratum.stratum_id,
+                    StratumPredicateContextStats(),
+                ).update(
+                    token=token_row[stratum.column_index],
+                    stratum=stratum,
+                    fanout_values=fanout_values,
+                )
+
     def to_json_dict(self) -> dict[str, Any]:
-        rho = np.asarray(self.rho_values, dtype=float)
-        rho_summary = _array_summary(rho)
-        rho_summary["sum"] = float(rho.sum()) if rho.size else 0.0
-        rho_summary["sum_squared"] = float(np.dot(rho, rho)) if rho.size else 0.0
-        rho_summary["ess"] = (
-            float(rho_summary["sum"] ** 2 / rho_summary["sum_squared"])
-            if rho_summary["sum_squared"] > 0
-            else 0.0
-        )
         total = self.uniform_component_samples + self.rare_component_samples
         return {
             "enabled": self.enabled,
@@ -91,7 +279,15 @@ class ImportanceSamplingRunningStats:
             "row_membership_count_per_stratum": dict(self.row_membership_count),
             "samples_belonging_to_multiple_selected_strata": self.multiple_membership_samples,
             "unique_stratum_membership_patterns": dict(self.membership_patterns),
-            "rho": rho_summary,
+            "rho": self.rho_stats.to_json_dict(),
+            "rho_by_stratum": {
+                stratum_id: stats.to_json_dict()
+                for stratum_id, stats in self.rho_stats_by_stratum.items()
+            },
+            "conditional_context_stats_by_stratum": {
+                stratum_id: stats.to_json_dict()
+                for stratum_id, stats in self.context_stats_by_stratum.items()
+            },
             "ordinary_sampler_seconds": self.ordinary_sampler_seconds,
             "conditional_sampler_seconds": self.conditional_sampler_seconds,
             "proposal_selection_seconds": self.proposal_selection_seconds,
@@ -185,7 +381,11 @@ class ImportanceSamplingSampleSource:
                 flush=True,
             )
         if not self.selected_strata:
-            raise ValueError("importance sampling discovery selected no positive-mass strata")
+            raise ValueError(
+                "importance sampling discovery selected no strata with both positive "
+                "mass and positive support deficit; disable importance_sampling or "
+                "lower minimum_expected_context_support"
+            )
         prepare_root_strata = getattr(base_source, "prepare_root_strata", None)
         if prepare_root_strata is not None:
             prewarm_started = time.perf_counter()
@@ -310,16 +510,41 @@ class ImportanceSamplingSampleSource:
             fixture_rows_reused=fixture_rows,
             importance_weights=rho,
             importance_metadata={
-                "component": component.tolist(),
+                "component": component,
                 "selected_stratum": selected_ids,
-                "memberships": memberships.astype(int).tolist(),
-                "rho": rho.tolist(),
+                "memberships": memberships,
+                "rho": rho,
             },
+        )
+
+    def update_importance_context_statistics(
+        self,
+        *,
+        generation_stats: Any,
+        token_rows: list[list[PredicateToken]],
+        inv_only_weights: np.ndarray,
+        combined_weights: np.ndarray,
+        batch_metadata: Mapping[str, Any] | None,
+    ) -> None:
+        if not batch_metadata:
+            return
+        memberships = np.asarray(batch_metadata.get("memberships"), dtype=bool)
+        if memberships.ndim != 2:
+            raise ValueError("importance context diagnostics require membership matrix")
+        self.stats.update_context_batch(
+            metadata=self.metadata,
+            generation_stats=generation_stats,
+            token_rows=token_rows,
+            memberships=memberships,
+            inv_only_weights=inv_only_weights,
+            combined_weights=combined_weights,
         )
 
     def importance_sampling_summary(self) -> dict[str, Any]:
         payload = self.stats.to_json_dict()
         payload["discovery_seconds"] = self.discovery_seconds
+        payload["root_mass_diagnostics"] = dict(getattr(self.provider, "mass_diagnostics", {}))
+        payload["sampler_counters"] = _sampler_counters(self.base_source)
         payload["configuration"] = {
             "enabled": True,
             "mixture_probability": self.mixture_probability,
@@ -341,6 +566,7 @@ def _provider_for_source(
             source.metadata,
             source.dataset.encoded_rows,
             source="synthetic_materialized_full_join",
+            root_column_semantics=discovery_config.get("root_column_semantics"),
         )
     dataset = getattr(source, "dataset", None)
     if dataset is not None and hasattr(dataset, "encoded_rows"):
@@ -348,6 +574,7 @@ def _provider_for_source(
             source.metadata,  # type: ignore[attr-defined]
             dataset.encoded_rows,
             source="materialized_full_join",
+            root_column_semantics=discovery_config.get("root_column_semantics"),
         )
     base = getattr(source, "base_source", None)
     if base is not None:
@@ -362,6 +589,7 @@ def _provider_for_source(
             ),
             max_domain_size=discovery_config.get("max_candidate_domain_size"),
             column_names=discovery_config.get("candidate_column_names"),
+            root_column_semantics=discovery_config.get("root_column_semantics"),
             diagnostics=bool(discovery_config.get("diagnostics", False))
             or bool(discovery_config.get("log_diagnostics", False)),
         )
@@ -374,6 +602,7 @@ def _provider_for_source(
                 source.metadata,  # type: ignore[attr-defined]
                 rows,
                 source="prepared_sample_rows_fixture",
+                root_column_semantics=discovery_config.get("root_column_semantics"),
             )
     raise NotImplementedError(
         "importance sampling requires exact root-stratum support from a live "
@@ -443,3 +672,99 @@ def _array_summary(values: np.ndarray) -> dict[str, float]:
         "p99": float(np.percentile(values, 99)),
         "p999": float(np.percentile(values, 99.9)),
     }
+
+
+def _empty_weight_summary() -> dict[str, float]:
+    return {
+        "count": 0,
+        "min": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "std": 0.0,
+        "sum": 0.0,
+        "sum_squared": 0.0,
+        "ess": 0.0,
+        "percentile_reservoir_size": 0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "p999": 0.0,
+    }
+
+
+def _token_relevant_to_stratum(token: PredicateToken, stratum: RootDataStratum) -> bool:
+    if token.op == PredicateOp.EQUAL:
+        return stratum.region_type == "equality" and token.value == stratum.value
+    if token.op in {PredicateOp.GREATER_EQUAL, PredicateOp.GREATER_THAN}:
+        return (
+            stratum.region_type == "lower_tail"
+            and token.value is not None
+            and _safe_ge(token.value, stratum.lower)
+        )
+    if token.op in {PredicateOp.LESS_EQUAL, PredicateOp.LESS_THAN}:
+        return (
+            stratum.region_type == "upper_tail"
+            and token.value is not None
+            and _safe_le(token.value, stratum.upper)
+        )
+    if token.op == PredicateOp.RANGE:
+        if stratum.region_type == "lower_tail":
+            return token.value is not None and _safe_ge(token.value, stratum.lower)
+        if stratum.region_type == "upper_tail":
+            return token.upper is not None and _safe_le(token.upper, stratum.upper)
+        if stratum.region_type == "equality":
+            return (
+                token.value is not None
+                and token.upper is not None
+                and _safe_le(token.value, stratum.value)
+                and _safe_ge(token.upper, stratum.value)
+            )
+    return False
+
+
+def _safe_ge(left: Any, right: Any) -> bool:
+    try:
+        return float(left) >= float(right)
+    except (TypeError, ValueError):
+        return left == right
+
+
+def _safe_le(left: Any, right: Any) -> bool:
+    try:
+        return float(left) <= float(right)
+    except (TypeError, ValueError):
+        return left == right
+
+
+def _bounded_literal_key(value: Any, *, max_len: int = 80) -> str:
+    text = str(value)
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
+def _sampler_counters(source: object) -> dict[str, Any]:
+    return {
+        "sampler_run_calls": _nested_attr(source, "sampler_run_calls"),
+        "conditional_sampler_batch_calls": _nested_attr(
+            source,
+            "conditional_sampler_batch_calls",
+        ),
+        "conditional_rows_drawn": _nested_attr(source, "conditional_rows_drawn"),
+        "sample_batches_generated": _nested_attr(source, "sample_batches_generated"),
+        "fresh_rows_drawn": _nested_attr(source, "fresh_rows_drawn"),
+        "fixture_rows_reused": _nested_attr(source, "fixture_rows_reused"),
+    }
+
+
+def _nested_attr(source: object, name: str) -> Any:
+    current = source
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        value = getattr(current, name, None)
+        if value is not None:
+            return value
+        current = getattr(current, "base_source", None)
+    return None

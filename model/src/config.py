@@ -277,6 +277,25 @@ def validate_config(config: dict[str, Any]) -> None:
             )
         if int(discovery.get("max_selected_strata", 64)) <= 0:
             raise ValueError("importance_sampling.discovery.max_selected_strata must be positive")
+        root_column_semantics = discovery.get("root_column_semantics", {})
+        if root_column_semantics is not None:
+            if not isinstance(root_column_semantics, dict):
+                raise ValueError(
+                    "importance_sampling.discovery.root_column_semantics must be a mapping"
+                )
+            for column_name, semantic_type in root_column_semantics.items():
+                nested_items = (
+                    semantic_type.items()
+                    if isinstance(semantic_type, dict)
+                    else ((column_name, semantic_type),)
+                )
+                for nested_column_name, nested_semantic_type in nested_items:
+                    if str(nested_semantic_type) not in {"ordered", "categorical"}:
+                        raise ValueError(
+                            "importance_sampling.discovery.root_column_semantics values "
+                            f"must be ordered or categorical, got {nested_semantic_type!r} "
+                            f"for {nested_column_name!r}"
+                        )
         allocation = str(importance.get("allocation", {}).get("strategy", "support_deficit"))
         if allocation != "support_deficit":
             raise ValueError(

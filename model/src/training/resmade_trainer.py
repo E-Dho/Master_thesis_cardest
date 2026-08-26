@@ -353,6 +353,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 vocabularies,
                 config,
                 device,
+                sample_source=sample_source,
             )
             loss = step_result.loss
             last_loss = loss
@@ -743,6 +744,8 @@ def _train_one_batch(
     vocabularies: PredicateVocabularies,
     config: dict[str, Any],
     device: str,
+    *,
+    sample_source: object | None = None,
 ) -> TrainingStepResult:
     import torch
 
@@ -809,6 +812,19 @@ def _train_one_batch(
             "rho_sum_squared": float(np.dot(rho, rho)),
             "rho_ess": effective_sample_size(rho),
         }
+        update_importance_context_statistics = getattr(
+            sample_source,
+            "update_importance_context_statistics",
+            None,
+        )
+        if update_importance_context_statistics is not None:
+            update_importance_context_statistics(
+                generation_stats=generation_stats,
+                token_rows=token_rows,
+                inv_only_weights=inv_only_weights,
+                combined_weights=weights,
+                batch_metadata=batch.importance_metadata,
+            )
     token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)
     targets = torch.tensor(target_rows, dtype=torch.long, device=device)
     head_weights = torch.tensor(weights, dtype=torch.float32, device=device)

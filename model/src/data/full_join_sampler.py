@@ -196,6 +196,8 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
             raise ValueError("sampler_batch_size must be positive")
         self.seed = int(seed)
         self.sampler_run_calls = 0
+        self.conditional_sampler_batch_calls = 0
+        self.conditional_rows_drawn = 0
         self._buffer: np.ndarray | None = None
         self._buffer_cursor = 0
         self._sampler: Any | None = None
@@ -381,7 +383,8 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
             frame = self._sampler._rearrange_columns(frame)
             frame.replace(-1, np.nan, inplace=True)
         encoded_sample = encode_sample_dataframe(frame, self.metadata, strict=True)
-        self.sampler_run_calls += 1
+        self.conditional_sampler_batch_calls += 1
+        self.conditional_rows_drawn += int(num_rows)
         self.sample_batches_generated += 1
         self.fresh_rows_drawn += int(num_rows)
         return encoded_sample.encoded_rows
@@ -425,7 +428,8 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
             frame = self._sampler._rearrange_columns(frame)
             frame.replace(-1, np.nan, inplace=True)
         encoded_sample = encode_sample_dataframe(frame, self.metadata, strict=True)
-        self.sampler_run_calls += 1
+        self.conditional_sampler_batch_calls += 1
+        self.conditional_rows_drawn += len(strata)
         self.sample_batches_generated += 1
         self.fresh_rows_drawn += len(strata)
         return encoded_sample.encoded_rows
@@ -476,13 +480,24 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 "root stratum sampling requires a unique root join key so root JCT "
                 "weights can be restricted by root DATA values exactly"
             )
+        from model.src.data.complete_domain_preparation import canonicalize_base_value
+
         root_values = table_actor.df[[root_key, data_column]]
-        merged = root_jct[[root_key]].merge(root_values, how="left", on=root_key)
-        raw_values = merged[data_column].to_numpy(dtype=object)
-        try:
-            values = raw_values.astype(float)
-        except (TypeError, ValueError):
-            values = raw_values
+        merged = root_jct[[root_key]].merge(root_values, how="left", on=root_key, indicator=True)
+        values = np.array(
+            [
+                (
+                    canonicalize_base_value(raw_value)
+                    if matched == "both"
+                    else OUTER_MISSING
+                )
+                for raw_value, matched in zip(
+                    merged[data_column].to_numpy(dtype=object),
+                    merged["_merge"].to_numpy(dtype=object),
+                )
+            ],
+            dtype=object,
+        )
         self._root_jct_value_cache[data_column] = values
         return values
 
@@ -543,9 +558,20 @@ def _root_jct_mask_for_stratum(sampler: Any, root_jct: Any, stratum: Any) -> np.
             "root stratum sampling requires a unique root join key so root JCT "
             "weights can be restricted by root DATA values exactly"
         )
+    from model.src.data.complete_domain_preparation import canonicalize_base_value
+
     values = table_actor.df[[root_key, data_column]]
-    merged = root_jct[[root_key]].merge(values, how="left", on=root_key)
-    column_values = merged[data_column].to_numpy(dtype=object)
+    merged = root_jct[[root_key]].merge(values, how="left", on=root_key, indicator=True)
+    column_values = np.array(
+        [
+            canonicalize_base_value(raw_value) if matched == "both" else OUTER_MISSING
+            for raw_value, matched in zip(
+                merged[data_column].to_numpy(dtype=object),
+                merged["_merge"].to_numpy(dtype=object),
+            )
+        ],
+        dtype=object,
+    )
     return np.array([stratum.contains_value(value) for value in column_values], dtype=bool)
 
 
