@@ -36,6 +36,7 @@ class RootDataStratum:
     expected_range_support: float | None = None
     support_score: float = 0.0
     support_deficit: float = 0.0
+    support_bottleneck: str | None = None
     alpha: float = 0.0
     source: str = "unknown"
     semantic_type: str = "categorical"
@@ -691,28 +692,28 @@ def _expected_native_range_interval_counts(
 
 
 def _with_score(stratum: RootDataStratum, threshold: float) -> RootDataStratum:
+    support_candidates = [
+        ("target_rows", stratum.expected_target_rows),
+        ("equality", stratum.expected_equality_count),
+        ("lower", stratum.expected_lower_count),
+        ("upper", stratum.expected_upper_count),
+        ("native_range", stratum.expected_range_support),
+    ]
     applicable_values = [
-        float(value)
-        for value in (
-            stratum.expected_target_rows,
-            stratum.expected_equality_count,
-            stratum.expected_lower_count,
-            stratum.expected_upper_count,
-            stratum.expected_range_support,
-        )
+        (name, float(value))
+        for name, value in support_candidates
         if value is not None and isfinite(float(value))
     ]
     if not applicable_values:
         raise ValueError(f"stratum {stratum.stratum_id!r} has no applicable support metrics")
-    support = min(
-        applicable_values
-    )
+    support_bottleneck, support = min(applicable_values, key=lambda item: item[1])
     deficit = max(0.0, float(threshold) - float(support))
     return RootDataStratum(
         **{
             **stratum.to_json_dict(),
             "support_score": float(support),
             "support_deficit": float(deficit),
+            "support_bottleneck": support_bottleneck,
         }
     )
 

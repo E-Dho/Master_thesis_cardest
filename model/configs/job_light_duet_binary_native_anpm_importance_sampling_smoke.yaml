@@ -85,6 +85,7 @@ importance_sampling:
     max_candidate_domain_size: 4096
     minimum_expected_context_support: 20
     max_selected_strata: 16
+    support_planning_steps: 20000
     root_column_semantics:
       title:
         production_year: ordered

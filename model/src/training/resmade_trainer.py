@@ -547,7 +547,11 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         if values
     }
     importance_summary = (
-        sample_source.importance_sampling_summary()
+        sample_source.importance_sampling_summary(
+            actual_optimizer_steps=global_step,
+            early_stopped=early_stopped,
+            early_stopping_stop_step=early_stopping_stop_step,
+        )
         if hasattr(sample_source, "importance_sampling_summary")
         else {"enabled": False}
     )
@@ -685,6 +689,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         },
         "early_stopping": {
             "enabled": early_stopping_enabled,
+            "maximum_configured_steps": int(training["steps_per_epoch"]) * int(training["epochs"]),
+            "actual_optimizer_steps": global_step,
             "monitor": early_stopping_monitor if early_stopping_enabled else None,
             "patience_steps": (
                 early_stopping_patience_steps if early_stopping_enabled else None
@@ -698,7 +704,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             "reason": early_stopping_reason,
         },
     }
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(summary, allow_nan=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     return TrainingResult(
         checkpoint_path=checkpoint_path,
         best_checkpoint_path=best_checkpoint_path,

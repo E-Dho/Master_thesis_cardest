@@ -277,6 +277,10 @@ def validate_config(config: dict[str, Any]) -> None:
             )
         if int(discovery.get("max_selected_strata", 64)) <= 0:
             raise ValueError("importance_sampling.discovery.max_selected_strata must be positive")
+        if "support_planning_steps" in discovery and int(discovery["support_planning_steps"]) <= 0:
+            raise ValueError(
+                "importance_sampling.discovery.support_planning_steps must be positive"
+            )
         root_column_semantics = discovery.get("root_column_semantics", {})
         if root_column_semantics is not None:
             if not isinstance(root_column_semantics, dict):

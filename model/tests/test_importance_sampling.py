@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -15,6 +17,7 @@ from model.src.data.full_join_sampler import (
 from model.src.data.importance_sampling import (
     ImportanceSamplingRunningStats,
     ImportanceSamplingSampleSource,
+    StreamingLogWeightStats,
     StreamingMomentStats,
     _assert_rho_defensive_bound,
     _sampler_counters,
@@ -375,6 +378,191 @@ class ImportanceSamplingTest(unittest.TestCase):
         )
         self.assertEqual(scored.support_score, 0.0)
         self.assertEqual(scored.support_deficit, 5.0)
+        self.assertEqual(scored.support_bottleneck, "equality")
+
+    def test_support_bottleneck_identifies_minimum_applicable_metric(self) -> None:
+        cases = {
+            "target_rows": RootDataStratum(
+                "target",
+                0,
+                "A.x",
+                "equality",
+                expected_target_rows=1.0,
+                expected_equality_count=3.0,
+            ),
+            "lower": RootDataStratum(
+                "lower",
+                0,
+                "A.x",
+                "lower_tail",
+                expected_target_rows=10.0,
+                expected_lower_count=2.0,
+                expected_range_support=4.0,
+            ),
+            "upper": RootDataStratum(
+                "upper",
+                0,
+                "A.x",
+                "upper_tail",
+                expected_target_rows=10.0,
+                expected_upper_count=2.0,
+                expected_range_support=4.0,
+            ),
+            "native_range": RootDataStratum(
+                "range",
+                0,
+                "A.x",
+                "lower_tail",
+                expected_target_rows=10.0,
+                expected_lower_count=6.0,
+                expected_range_support=2.0,
+            ),
+        }
+        for expected, stratum in cases.items():
+            self.assertEqual(
+                _with_score(stratum, threshold=5.0).support_bottleneck,
+                expected,
+            )
+
+    def test_support_planning_defaults_to_nominal_optimizer_steps(self) -> None:
+        config = self._config()
+        config["training"]["steps_per_epoch"] = 10
+        config["training"]["epochs"] = 2
+        config["training"]["early_stopping_patience_steps"] = 3
+        config["importance_sampling"]["discovery"]["minimum_expected_context_support"] = 1000
+        wrapped = ImportanceSamplingSampleSource(self._numeric_source(), config)
+        self.assertEqual(wrapped.maximum_configured_steps, 20)
+        self.assertEqual(wrapped.support_planning_steps, 20)
+        self.assertEqual(wrapped.planned_sample_count, 20_000)
+
+    def test_explicit_support_planning_overrides_short_smoke_length(self) -> None:
+        config = self._config()
+        config["training"]["steps_per_epoch"] = 100
+        config["importance_sampling"]["discovery"]["support_planning_steps"] = 20_000
+        config["importance_sampling"]["discovery"]["minimum_expected_context_support"] = 4_000_000
+        wrapped = ImportanceSamplingSampleSource(self._numeric_source(), config)
+        self.assertEqual(wrapped.maximum_configured_steps, 100)
+        self.assertEqual(wrapped.support_planning_steps, 20_000)
+        self.assertEqual(wrapped.planned_sample_count, 20_000_000)
+
+    def test_same_support_horizon_discovers_same_proposal_for_smoke_and_full_steps(self) -> None:
+        smoke = self._config()
+        full = copy.deepcopy(smoke)
+        for config, steps in ((smoke, 100), (full, 20_000)):
+            config["training"]["steps_per_epoch"] = steps
+            config["importance_sampling"]["discovery"]["support_planning_steps"] = 20_000
+            config["importance_sampling"]["discovery"]["minimum_expected_context_support"] = 4_000_000
+        smoke_wrapped = ImportanceSamplingSampleSource(self._numeric_source(), smoke)
+        full_wrapped = ImportanceSamplingSampleSource(self._numeric_source(), full)
+        smoke_summary = smoke_wrapped.importance_sampling_summary()
+        full_summary = full_wrapped.importance_sampling_summary()
+        keys = [
+            "stratum_id",
+            "probability",
+            "support_score",
+            "support_deficit",
+            "support_bottleneck",
+            "alpha",
+        ]
+        self.assertEqual(
+            [{key: item[key] for key in keys} for item in smoke_summary["selected_strata"]],
+            [{key: item[key] for key in keys} for item in full_summary["selected_strata"]],
+        )
+        for column in smoke_wrapped._membership_lookup.by_column:
+            smoke_masks = smoke_wrapped._membership_lookup.by_column[column]
+            full_masks = full_wrapped._membership_lookup.by_column[column]
+            self.assertEqual(len(smoke_masks), len(full_masks))
+            for left, right in zip(smoke_masks, full_masks):
+                self.assertTrue(np.array_equal(left, right))
+
+    def test_realized_support_fraction_and_scaled_support_are_reported_only(self) -> None:
+        config = self._config()
+        config["training"]["steps_per_epoch"] = 100
+        config["importance_sampling"]["discovery"]["support_planning_steps"] = 20_000
+        config["importance_sampling"]["discovery"]["minimum_expected_context_support"] = 4_000_000
+        wrapped = ImportanceSamplingSampleSource(self._numeric_source(), config)
+        alpha_before = tuple(stratum.alpha for stratum in wrapped.selected_strata)
+        summary = wrapped.importance_sampling_summary(
+            actual_optimizer_steps=100,
+            early_stopped=True,
+            early_stopping_stop_step=100,
+        )
+        self.assertAlmostEqual(summary["realized_support_fraction"], 0.005)
+        first = summary["selected_strata"][0]
+        self.assertAlmostEqual(
+            first["realized_expected_target_rows"],
+            first["planned_expected_target_rows"] * 0.005,
+        )
+        self.assertEqual(alpha_before, tuple(stratum.alpha for stratum in wrapped.selected_strata))
+        self.assertEqual(summary["early_stopping_stop_step"], 100)
+
+    def test_proposal_composition_alpha_sums_to_one(self) -> None:
+        wrapped = ImportanceSamplingSampleSource(self._numeric_source(), self._config())
+        composition = wrapped.importance_sampling_summary()["proposal_composition"]
+        self.assertAlmostEqual(composition["alpha_sum"], 1.0)
+        self.assertAlmostEqual(
+            sum(item["alpha_sum"] for item in composition["by_region_type"].values()),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            sum(item["alpha_sum"] for item in composition["by_support_bottleneck"].values()),
+            1.0,
+        )
+
+    def test_smallest_rho_patterns_are_bounded_and_explain_overlap(self) -> None:
+        wrapped = ImportanceSamplingSampleSource(self._numeric_source(), self._config())
+        for seed in range(10):
+            wrapped.batches(128, seed=seed)
+        patterns = wrapped.importance_sampling_summary()["smallest_rho_patterns"]
+        self.assertLessEqual(len(patterns), 32)
+        self.assertTrue(patterns)
+        self.assertTrue(all("alpha_over_probability_sum" in item for item in patterns))
+        self.assertEqual(patterns, sorted(patterns, key=lambda item: item["rho"]))
+
+    def test_context_amplification_uses_actual_smoke_fraction(self) -> None:
+        config = self._config()
+        config["importance_sampling"]["discovery"]["support_planning_steps"] = 20_000
+        config["importance_sampling"]["discovery"]["minimum_expected_context_support"] = 4_000_000
+        wrapped = ImportanceSamplingSampleSource(self._numeric_source(), config)
+        batch = wrapped.batches(64, seed=5)
+        stratum = wrapped.selected_strata[0]
+        if stratum.region_type == "equality":
+            token = PredicateToken(PredicateOp.EQUAL, value=stratum.value)
+            op_name = PredicateOp.EQUAL.value
+            planned = stratum.expected_equality_count
+        elif stratum.region_type == "lower_tail":
+            token = PredicateToken(PredicateOp.GREATER_EQUAL, value=stratum.lower)
+            op_name = PredicateOp.GREATER_EQUAL.value
+            planned = stratum.expected_lower_count
+        else:
+            token = PredicateToken(PredicateOp.LESS_EQUAL, value=stratum.upper)
+            op_name = PredicateOp.LESS_EQUAL.value
+            planned = stratum.expected_upper_count
+        tokens = [[token, PredicateToken.wildcard(), PredicateToken.inv_fanout()] for _ in range(64)]
+        inv_only = np.ones((64, len(self._numeric_source().metadata.columns)), dtype=float)
+        wrapped.update_importance_context_statistics(
+            generation_stats=SimpleNamespace(source_row_indices=tuple(range(64))),
+            token_rows=tokens,
+            inv_only_weights=inv_only,
+            rho=batch.importance_weights,
+            batch_metadata=batch.importance_metadata,
+        )
+        summary = wrapped.importance_sampling_summary(actual_optimizer_steps=100)
+        op_summary = summary["context_amplification_by_stratum"][stratum.stratum_id][
+            "by_operator"
+        ][op_name]
+        self.assertAlmostEqual(
+            op_summary["expected_uniform_count_at_actual_steps"],
+            planned * 0.005,
+        )
+
+    def test_log_weight_summary_is_strict_json_safe_for_extreme_weights(self) -> None:
+        stats = StreamingLogWeightStats()
+        stats.update_log_weights(np.array([-1000.0, 0.0, 1000.0]))
+        payload = stats.to_json_dict()
+        json.dumps(payload, allow_nan=False)
+        self.assertIsNone(payload["max"])
+        self.assertIsNone(payload["sum"])
 
     def test_rng_reproducibility_and_step_variation(self) -> None:
         source = self._numeric_source()

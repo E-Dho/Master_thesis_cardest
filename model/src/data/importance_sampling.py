@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Mapping
 
 import numpy as np
@@ -168,27 +169,30 @@ class StreamingLogWeightStats:
             raise ValueError("log weight statistics require finite positive weights")
         self.update_log_weights(np.log(array))
 
-    def to_json_dict(self) -> dict[str, float]:
+    def to_json_dict(self) -> dict[str, Any]:
         if self.count == 0:
             payload = _empty_moment_summary()
-            payload.update({"log_sum": float("-inf"), "log_sum_squared": float("-inf")})
+            payload.update({"log_sum": None, "log_sum_squared": None})
             return payload
         log_ess = 2.0 * self.log_sum_w - self.log_sum_w2
-        ess = float(np.exp(log_ess)) if log_ess < 700.0 else float("inf")
-        mean = float(np.exp(self.log_sum_w - np.log(float(self.count))))
+        log_mean = self.log_sum_w - np.log(float(self.count))
+        log_second_moment = self.log_sum_w2 - np.log(float(self.count))
+        mean = _safe_exp(log_mean)
+        second_moment = _safe_exp(log_second_moment)
+        std = None
+        if mean is not None and second_moment is not None:
+            std = float(np.sqrt(max(0.0, second_moment - mean * mean)))
         return {
             "count": int(self.count),
-            "min": float(np.exp(self.minimum_log)) if self.minimum_log < 700.0 else float("inf"),
-            "max": float(np.exp(self.maximum_log)) if self.maximum_log < 700.0 else float("inf"),
+            "min": _safe_exp(self.minimum_log),
+            "max": _safe_exp(self.maximum_log),
             "mean": mean,
-            "std": float("nan"),
-            "sum": float(np.exp(self.log_sum_w)) if self.log_sum_w < 700.0 else float("inf"),
-            "sum_squared": (
-                float(np.exp(self.log_sum_w2)) if self.log_sum_w2 < 700.0 else float("inf")
-            ),
+            "std": std,
+            "sum": _safe_exp(self.log_sum_w),
+            "sum_squared": _safe_exp(self.log_sum_w2),
             "log_sum": float(self.log_sum_w),
             "log_sum_squared": float(self.log_sum_w2),
-            "ess": ess,
+            "ess": _safe_exp(log_ess),
             "retains_sample_history": False,
             "log_domain": True,
         }
@@ -348,6 +352,8 @@ class ImportanceSamplingRunningStats:
     importance_weight_seconds: float = 0.0
     membership_computation_seconds: float = 0.0
     context_statistics_seconds: float = 0.0
+    smallest_rho_limit: int = 32
+    smallest_rho_patterns: list[dict[str, Any]] = field(default_factory=list)
 
     def update_batch(
         self,
@@ -375,6 +381,12 @@ class ImportanceSamplingRunningStats:
             for stratum_id in ids:
                 self.row_membership_count[stratum_id] += 1
         self.rho_stats.update(rho)
+        self._update_smallest_rho_patterns(
+            component=component,
+            selected=selected,
+            memberships=memberships,
+            rho=rho,
+        )
         for stratum_index, stratum in enumerate(self.selected_strata):
             values = rho[memberships[:, stratum_index]]
             if values.size:
@@ -475,6 +487,7 @@ class ImportanceSamplingRunningStats:
                 stratum_id: stats.to_json_dict()
                 for stratum_id, stats in self.context_stats_by_stratum.items()
             },
+            "smallest_rho_patterns": list(self.smallest_rho_patterns),
             "ordinary_sampler_seconds": self.ordinary_sampler_seconds,
             "conditional_sampler_seconds": self.conditional_sampler_seconds,
             "proposal_selection_seconds": self.proposal_selection_seconds,
@@ -487,6 +500,40 @@ class ImportanceSamplingRunningStats:
                 "fanout_reservoirs_enabled": False,
             },
         }
+
+    def _update_smallest_rho_patterns(
+        self,
+        *,
+        component: np.ndarray,
+        selected: list[str | None],
+        memberships: np.ndarray,
+        rho: np.ndarray,
+    ) -> None:
+        if self.smallest_rho_limit <= 0 or rho.size == 0:
+            return
+        alpha_over_probability = np.array(
+            [stratum.alpha / stratum.probability for stratum in self.selected_strata],
+            dtype=float,
+        )
+        candidate_count = min(self.smallest_rho_limit, int(rho.size))
+        for row_index in np.argsort(rho)[:candidate_count]:
+            matching_indices = np.flatnonzero(memberships[int(row_index)])
+            matching_ids = [
+                self.selected_strata[int(index)].stratum_id for index in matching_indices
+            ]
+            self.smallest_rho_patterns.append(
+                {
+                    "rho": float(rho[int(row_index)]),
+                    "component": str(component[int(row_index)]),
+                    "selected_proposal_stratum": selected[int(row_index)],
+                    "matching_stratum_ids": matching_ids,
+                    "alpha_over_probability_sum": float(
+                        np.sum(alpha_over_probability[matching_indices])
+                    ),
+                }
+            )
+        self.smallest_rho_patterns.sort(key=lambda item: item["rho"])
+        del self.smallest_rho_patterns[self.smallest_rho_limit :]
 
 
 class ImportanceSamplingSampleSource:
@@ -519,11 +566,14 @@ class ImportanceSamplingSampleSource:
         training = config.get("training", {})
         predicate = config.get("predicate_generation", {})
         discovery = self.importance_config.get("discovery", {})
-        n_total = (
-            int(training.get("steps_per_epoch", 1))
+        self.maximum_configured_steps = (
+            int(training.get("steps_per_epoch", 1)) * int(training.get("epochs", 1))
+        )
+        self.support_planning_steps = support_planning_steps_from_config(config)
+        self.planned_sample_count = (
+            self.support_planning_steps
             * int(training.get("batch_size", 1))
             * int(predicate.get("per_row_contexts", 1))
-            * int(training.get("epochs", 1))
         )
         diagnostics_config = dict(self.importance_config.get("diagnostics", {}))
         diagnostics_enabled = bool(diagnostics_config.get("enabled", False))
@@ -538,7 +588,9 @@ class ImportanceSamplingSampleSource:
             print(
                 "[importance_sampling] building exact root stratum provider",
                 {
-                    "n_total": n_total,
+                    "n_total": self.planned_sample_count,
+                    "support_planning_steps": self.support_planning_steps,
+                    "maximum_configured_steps": self.maximum_configured_steps,
                     "discovery": dict(discovery),
                 },
                 flush=True,
@@ -562,7 +614,7 @@ class ImportanceSamplingSampleSource:
             )
         discover_started = time.perf_counter()
         self.selected_strata = self.provider.discover(
-            n_total=n_total,
+            n_total=self.planned_sample_count,
             predicate_probabilities=predicate_probability_map(predicate),
             minimum_expected_context_support=float(
                 discovery.get("minimum_expected_context_support", 100.0)
@@ -794,8 +846,45 @@ class ImportanceSamplingSampleSource:
             rho=rho,
         )
 
-    def importance_sampling_summary(self) -> dict[str, Any]:
+    def importance_sampling_summary(
+        self,
+        *,
+        actual_optimizer_steps: int | None = None,
+        early_stopped: bool | None = None,
+        early_stopping_stop_step: int | None = None,
+    ) -> dict[str, Any]:
         payload = self.stats.to_json_dict()
+        realized_fraction = (
+            None
+            if actual_optimizer_steps is None
+            else float(actual_optimizer_steps) / float(self.support_planning_steps)
+        )
+        payload["maximum_configured_steps"] = int(self.maximum_configured_steps)
+        payload["support_planning_steps"] = int(self.support_planning_steps)
+        payload["planned_full_join_sample_count"] = int(self.planned_sample_count)
+        payload["actual_optimizer_steps"] = (
+            None if actual_optimizer_steps is None else int(actual_optimizer_steps)
+        )
+        payload["realized_support_fraction"] = realized_fraction
+        payload["early_stopped"] = None if early_stopped is None else bool(early_stopped)
+        payload["early_stopping_stop_step"] = (
+            None if early_stopping_stop_step is None else int(early_stopping_stop_step)
+        )
+        if early_stopped:
+            payload["early_stopping_support_diagnostic"] = (
+                "proposal discovery used the fixed support_planning_steps horizon; "
+                "realized support values below are post-run diagnostics only"
+            )
+        payload["selected_strata"] = [
+            _stratum_support_summary(stratum, realized_fraction)
+            for stratum in self.selected_strata
+        ]
+        payload["proposal_composition"] = _proposal_composition(self.selected_strata)
+        payload["context_amplification_by_stratum"] = _context_amplification_by_stratum(
+            self.selected_strata,
+            self.stats.context_stats_by_stratum,
+            realized_fraction,
+        )
         payload["discovery_seconds"] = self.discovery_seconds
         payload["root_mass_diagnostics"] = dict(getattr(self.provider, "mass_diagnostics", {}))
         payload["sampler_counters"] = _sampler_counters(self.base_source)
@@ -806,6 +895,9 @@ class ImportanceSamplingSampleSource:
             "allocation": dict(self.importance_config.get("allocation", {})),
             "diagnostics": dict(self.importance_config.get("diagnostics", {})),
             "seed": self.config.get("training", {}).get("seed", 0),
+            "maximum_configured_steps": int(self.maximum_configured_steps),
+            "support_planning_steps": int(self.support_planning_steps),
+            "planned_full_join_sample_count": int(self.planned_sample_count),
         }
         return payload
 
@@ -862,6 +954,19 @@ def _provider_for_source(
         "importance sampling requires exact root-stratum support from a live "
         "NeuroCard sampler, synthetic materialized rows, or a prepared fixture"
     )
+
+
+def support_planning_steps_from_config(config: Mapping[str, Any]) -> int:
+    training = config.get("training", {})
+    importance = config.get("importance_sampling", {})
+    discovery = importance.get("discovery", {})
+    if "support_planning_steps" in discovery:
+        steps = int(discovery["support_planning_steps"])
+    else:
+        steps = int(training.get("steps_per_epoch", 1)) * int(training.get("epochs", 1))
+    if steps <= 0:
+        raise ValueError("importance_sampling.discovery.support_planning_steps must be positive")
+    return steps
 
 
 def _sample_conditional_from_source(
@@ -926,6 +1031,108 @@ def _array_summary(values: np.ndarray) -> dict[str, float]:
         "p99": float(np.percentile(values, 99)),
         "p999": float(np.percentile(values, 99.9)),
     }
+
+
+def _safe_exp(log_value: float) -> float | None:
+    if not isfinite(float(log_value)):
+        return None
+    if log_value > 700.0:
+        return None
+    return float(np.exp(log_value))
+
+
+def _finite_json_number(value: float | None) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    return value if isfinite(value) else None
+
+
+def _scaled_support(value: float | None, fraction: float | None) -> float | None:
+    if value is None or fraction is None:
+        return None
+    return _finite_json_number(float(value) * float(fraction))
+
+
+def _stratum_support_summary(
+    stratum: RootDataStratum,
+    realized_fraction: float | None,
+) -> dict[str, Any]:
+    payload = stratum.to_json_dict()
+    support_fields = (
+        "expected_target_rows",
+        "expected_equality_count",
+        "expected_lower_count",
+        "expected_upper_count",
+        "expected_range_support",
+    )
+    for field_name in support_fields:
+        planned_value = payload.get(field_name)
+        payload[f"planned_{field_name}"] = _finite_json_number(planned_value)
+        payload[f"realized_{field_name}"] = _scaled_support(planned_value, realized_fraction)
+    return payload
+
+
+def _proposal_composition(strata: tuple[RootDataStratum, ...]) -> dict[str, Any]:
+    by_region: dict[str, dict[str, float | int]] = {}
+    by_bottleneck: dict[str, dict[str, float | int]] = {}
+    for stratum in strata:
+        for mapping, key in (
+            (by_region, stratum.region_type),
+            (by_bottleneck, stratum.support_bottleneck or "<unknown>"),
+        ):
+            entry = mapping.setdefault(key, {"selected_count": 0, "alpha_sum": 0.0})
+            entry["selected_count"] = int(entry["selected_count"]) + 1
+            entry["alpha_sum"] = float(entry["alpha_sum"]) + float(stratum.alpha)
+    probabilities = [float(stratum.probability) for stratum in strata]
+    return {
+        "selected_count": len(strata),
+        "alpha_sum": float(sum(stratum.alpha for stratum in strata)),
+        "min_probability": min(probabilities) if probabilities else None,
+        "max_probability": max(probabilities) if probabilities else None,
+        "by_region_type": by_region,
+        "by_support_bottleneck": by_bottleneck,
+    }
+
+
+def _context_amplification_by_stratum(
+    strata: tuple[RootDataStratum, ...],
+    context_stats: Mapping[str, StratumPredicateContextStats],
+    realized_fraction: float | None,
+) -> dict[str, Any]:
+    amplification: dict[str, Any] = {}
+    for stratum in strata:
+        stats = context_stats.get(stratum.stratum_id)
+        observed = dict(stats.stratum_relevant_operator_count) if stats is not None else {}
+        by_operator: dict[str, Any] = {}
+        for op_name, planned in (
+            (PredicateOp.EQUAL.value, stratum.expected_equality_count),
+            (PredicateOp.GREATER_EQUAL.value, stratum.expected_lower_count),
+            (PredicateOp.GREATER_THAN.value, stratum.expected_lower_count),
+            (PredicateOp.LESS_EQUAL.value, stratum.expected_upper_count),
+            (PredicateOp.LESS_THAN.value, stratum.expected_upper_count),
+            (PredicateOp.RANGE.value, stratum.expected_range_support),
+        ):
+            if planned is None:
+                continue
+            expected_uniform = _scaled_support(planned, realized_fraction)
+            observed_count = int(observed.get(op_name, 0))
+            by_operator[op_name] = {
+                "planned_expected_uniform_count": _finite_json_number(planned),
+                "expected_uniform_count_at_actual_steps": expected_uniform,
+                "observed_importance_sampling_context_count": observed_count,
+                "raw_context_amplification": (
+                    None
+                    if expected_uniform is None or expected_uniform <= 0.0
+                    else float(observed_count) / float(expected_uniform)
+                ),
+            }
+        amplification[stratum.stratum_id] = {
+            "support_bottleneck": stratum.support_bottleneck,
+            "region_type": stratum.region_type,
+            "by_operator": by_operator,
+        }
+    return amplification
 
 
 def _empty_weight_summary() -> dict[str, float]:
