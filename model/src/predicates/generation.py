@@ -219,7 +219,7 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         strata: tuple[Any, ...] | list[Any],
         rng: np.random.Generator,
-        allow_row_dependent_native_range_tail: bool = False,
+        debug_allow_row_dependent_native_range_tail: bool = False,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
         """Generate row-satisfied contexts with an exact stratum predicate forced.
 
@@ -243,7 +243,9 @@ class PredicateTrainingContextGenerator:
                 metadata,
                 stratum,
                 rng,
-                allow_row_dependent_native_range_tail=allow_row_dependent_native_range_tail,
+                debug_allow_row_dependent_native_range_tail=(
+                    debug_allow_row_dependent_native_range_tail
+                ),
             )
             contradictions += included_indicator_contradictions(context, row, metadata)
             if not context_satisfies_row(context, row, metadata):
@@ -272,7 +274,7 @@ class PredicateTrainingContextGenerator:
         stratum: Any,
         rng: np.random.Generator,
         *,
-        allow_row_dependent_native_range_tail: bool = False,
+        debug_allow_row_dependent_native_range_tail: bool = False,
     ) -> GeneratedTrainingContext:
         included_tables = set(self._sample_included_tables(encoded_row, metadata, rng))
         column = metadata.columns[int(stratum.column_index)]
@@ -305,7 +307,9 @@ class PredicateTrainingContextGenerator:
             stratum,
             encoded_row=encoded_row,
             metadata=metadata,
-            allow_row_dependent_native_range_tail=allow_row_dependent_native_range_tail,
+            debug_allow_row_dependent_native_range_tail=(
+                debug_allow_row_dependent_native_range_tail
+            ),
         )
         tokens = tuple(
             tokens_for_query_tables(
@@ -969,7 +973,7 @@ def forced_predicate_for_stratum(
     *,
     encoded_row: np.ndarray,
     metadata: ModelMetadata,
-    allow_row_dependent_native_range_tail: bool = False,
+    debug_allow_row_dependent_native_range_tail: bool = False,
 ) -> PredicateToken:
     column_index = int(stratum.column_index)
     column = metadata.columns[column_index]
@@ -978,19 +982,27 @@ def forced_predicate_for_stratum(
         if stratum.region_type == "equality":
             return PredicateToken.range(stratum.value, stratum.value)
         if stratum.region_type == "lower_tail":
-            if not allow_row_dependent_native_range_tail:
-                raise ValueError(
-                    "non-singleton native-range lower-tail rare strata require "
-                    "allow_row_dependent_native_range_tail=true"
-                )
-            return PredicateToken.range(stratum.lower, row_value)
+            if debug_allow_row_dependent_native_range_tail:
+                return PredicateToken.range(stratum.lower, row_value)
+            singleton = _native_range_singleton_support_value(stratum, column.domain)
+            if singleton is not None:
+                return PredicateToken.range(singleton, singleton)
+            raise ValueError(
+                "non-singleton native-range lower-tail rare strata cannot use "
+                "a row-dependent boundary unless "
+                "debug_allow_row_dependent_native_range_tail=true"
+            )
         if stratum.region_type == "upper_tail":
-            if not allow_row_dependent_native_range_tail:
-                raise ValueError(
-                    "non-singleton native-range upper-tail rare strata require "
-                    "allow_row_dependent_native_range_tail=true"
-                )
-            return PredicateToken.range(row_value, stratum.upper)
+            if debug_allow_row_dependent_native_range_tail:
+                return PredicateToken.range(row_value, stratum.upper)
+            singleton = _native_range_singleton_support_value(stratum, column.domain)
+            if singleton is not None:
+                return PredicateToken.range(singleton, singleton)
+            raise ValueError(
+                "non-singleton native-range upper-tail rare strata cannot use "
+                "a row-dependent boundary unless "
+                "debug_allow_row_dependent_native_range_tail=true"
+            )
     if stratum.region_type == "equality":
         return PredicateToken.equal(stratum.value)
     if stratum.region_type == "lower_tail":
@@ -1000,6 +1012,24 @@ def forced_predicate_for_stratum(
     if stratum.region_type == "range":
         return PredicateToken.range(stratum.lower, stratum.upper)
     raise ValueError(f"unsupported rare stratum region_type {stratum.region_type!r}")
+
+
+def _native_range_singleton_support_value(
+    stratum: Any,
+    domain: tuple[Any, ...],
+) -> Any | None:
+    matching_values = []
+    for value in domain:
+        try:
+            if stratum.contains_value(value):
+                matching_values.append(value)
+        except (TypeError, ValueError):
+            continue
+        if len(matching_values) > 1:
+            return None
+    if len(matching_values) == 1:
+        return matching_values[0]
+    return None
 
 
 def included_indicator_contradictions(

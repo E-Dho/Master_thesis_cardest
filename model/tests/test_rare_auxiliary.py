@@ -122,7 +122,7 @@ class RareAuxiliaryTest(unittest.TestCase):
             metadata=source.metadata,
             strata=rare.importance_metadata["selected_strata"],
             rng=np.random.default_rng(4),
-            allow_row_dependent_native_range_tail=True,
+            debug_allow_row_dependent_native_range_tail=True,
         )
         self.assertEqual(rows.shape[0], 8)
         self.assertEqual(stats.rejected_unsatisfied_contexts, 0)
@@ -137,7 +137,7 @@ class RareAuxiliaryTest(unittest.TestCase):
                 stratum,
                 encoded_row=row,
                 metadata=source.metadata,
-                allow_row_dependent_native_range_tail=True,
+                debug_allow_row_dependent_native_range_tail=True,
             )
             self.assertEqual(token.stable_key(), expected.stable_key())
             if stratum.support_bottleneck == "native_range":
@@ -282,31 +282,11 @@ class RareAuxiliaryTest(unittest.TestCase):
                 1,
             )
 
-    def test_native_range_tail_guard_requires_explicit_row_dependent_support(self) -> None:
+    def test_equality_native_range_emits_singleton_range(self) -> None:
         metadata = ModelMetadata(
             columns=(ColumnMetadata("year", ColumnKind.DATA, (2015, 2016, 2017)),),
             full_join_cardinality=3,
         )
-        row = np.array([2], dtype=int)
-        lower_tail = RootDataStratum(
-            stratum_id="year:ge:2015",
-            column_index=0,
-            column_name="year",
-            region_type="lower_tail",
-            lower=2015,
-            support_bottleneck="native_range",
-        )
-        with self.assertRaisesRegex(ValueError, "row_dependent_native_range_tail"):
-            forced_predicate_for_stratum(lower_tail, encoded_row=row, metadata=metadata)
-        token = forced_predicate_for_stratum(
-            lower_tail,
-            encoded_row=row,
-            metadata=metadata,
-            allow_row_dependent_native_range_tail=True,
-        )
-        self.assertEqual(token.op, PredicateOp.RANGE)
-        self.assertEqual((token.value, token.upper), (2015, 2017))
-
         singleton = RootDataStratum(
             stratum_id="year:eq:2016",
             column_index=0,
@@ -322,6 +302,88 @@ class RareAuxiliaryTest(unittest.TestCase):
         )
         self.assertEqual(token.op, PredicateOp.RANGE)
         self.assertEqual((token.value, token.upper), (2016, 2016))
+
+    def test_singleton_lower_tail_native_range_emits_fixed_singleton_range(self) -> None:
+        metadata = ModelMetadata(
+            columns=(ColumnMetadata("year", ColumnKind.DATA, (2015, 2016, 2017)),),
+            full_join_cardinality=3,
+        )
+        lower_tail = RootDataStratum(
+            stratum_id="year:ge:2017",
+            column_index=0,
+            column_name="year",
+            region_type="lower_tail",
+            lower=2017,
+            support_bottleneck="native_range",
+        )
+        token = forced_predicate_for_stratum(
+            lower_tail,
+            encoded_row=np.array([2], dtype=int),
+            metadata=metadata,
+        )
+        self.assertEqual(token.op, PredicateOp.RANGE)
+        self.assertEqual((token.value, token.upper), (2017, 2017))
+
+    def test_singleton_upper_tail_native_range_emits_fixed_singleton_range(self) -> None:
+        metadata = ModelMetadata(
+            columns=(ColumnMetadata("year", ColumnKind.DATA, (2015, 2016, 2017)),),
+            full_join_cardinality=3,
+        )
+        upper_tail = RootDataStratum(
+            stratum_id="year:le:2015",
+            column_index=0,
+            column_name="year",
+            region_type="upper_tail",
+            upper=2015,
+            support_bottleneck="native_range",
+        )
+        token = forced_predicate_for_stratum(
+            upper_tail,
+            encoded_row=np.array([0], dtype=int),
+            metadata=metadata,
+        )
+        self.assertEqual(token.op, PredicateOp.RANGE)
+        self.assertEqual((token.value, token.upper), (2015, 2015))
+
+    def test_non_singleton_native_range_tail_guard_raises(self) -> None:
+        metadata = ModelMetadata(
+            columns=(ColumnMetadata("year", ColumnKind.DATA, (2015, 2016, 2017)),),
+            full_join_cardinality=3,
+        )
+        row = np.array([2], dtype=int)
+        lower_tail = RootDataStratum(
+            stratum_id="year:ge:2015",
+            column_index=0,
+            column_name="year",
+            region_type="lower_tail",
+            lower=2015,
+            support_bottleneck="native_range",
+        )
+        with self.assertRaisesRegex(ValueError, "row-dependent boundary"):
+            forced_predicate_for_stratum(lower_tail, encoded_row=row, metadata=metadata)
+
+    def test_debug_override_allows_legacy_row_dependent_native_range_tail(self) -> None:
+        metadata = ModelMetadata(
+            columns=(ColumnMetadata("year", ColumnKind.DATA, (2015, 2016, 2017)),),
+            full_join_cardinality=3,
+        )
+        row = np.array([2], dtype=int)
+        lower_tail = RootDataStratum(
+            stratum_id="year:ge:2015",
+            column_index=0,
+            column_name="year",
+            region_type="lower_tail",
+            lower=2015,
+            support_bottleneck="native_range",
+        )
+        token = forced_predicate_for_stratum(
+            lower_tail,
+            encoded_row=row,
+            metadata=metadata,
+            debug_allow_row_dependent_native_range_tail=True,
+        )
+        self.assertEqual(token.op, PredicateOp.RANGE)
+        self.assertEqual((token.value, token.upper), (2015, 2017))
 
 
 if __name__ == "__main__":

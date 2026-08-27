@@ -101,7 +101,6 @@ rare_auxiliary:
   enabled: true
   batch_size: 512
   beta: 0.25
-  allow_row_dependent_native_range_tail: true
 
 training:
   seed: 0

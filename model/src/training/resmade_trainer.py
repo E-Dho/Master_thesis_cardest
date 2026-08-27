@@ -1093,8 +1093,8 @@ def _train_one_batch(
                 metadata=metadata,
                 strata=selected_strata,
                 rng=rare_rng,
-                allow_row_dependent_native_range_tail=bool(
-                    rare_config.get("allow_row_dependent_native_range_tail", False)
+                debug_allow_row_dependent_native_range_tail=bool(
+                    rare_config.get("debug_allow_row_dependent_native_range_tail", False)
                 ),
             )
         )
