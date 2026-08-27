@@ -219,6 +219,7 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         strata: tuple[Any, ...] | list[Any],
         rng: np.random.Generator,
+        allow_row_dependent_native_range_tail: bool = False,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
         """Generate row-satisfied contexts with an exact stratum predicate forced.
 
@@ -237,7 +238,13 @@ class PredicateTrainingContextGenerator:
         rejected = 0
         contradictions = 0
         for row_index, (row, stratum) in enumerate(zip(encoded_rows, strata)):
-            context = self._generate_forced_stratum_context(row, metadata, stratum, rng)
+            context = self._generate_forced_stratum_context(
+                row,
+                metadata,
+                stratum,
+                rng,
+                allow_row_dependent_native_range_tail=allow_row_dependent_native_range_tail,
+            )
             contradictions += included_indicator_contradictions(context, row, metadata)
             if not context_satisfies_row(context, row, metadata):
                 rejected += 1
@@ -264,6 +271,8 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         stratum: Any,
         rng: np.random.Generator,
+        *,
+        allow_row_dependent_native_range_tail: bool = False,
     ) -> GeneratedTrainingContext:
         included_tables = set(self._sample_included_tables(encoded_row, metadata, rng))
         column = metadata.columns[int(stratum.column_index)]
@@ -296,6 +305,7 @@ class PredicateTrainingContextGenerator:
             stratum,
             encoded_row=encoded_row,
             metadata=metadata,
+            allow_row_dependent_native_range_tail=allow_row_dependent_native_range_tail,
         )
         tokens = tuple(
             tokens_for_query_tables(
@@ -959,6 +969,7 @@ def forced_predicate_for_stratum(
     *,
     encoded_row: np.ndarray,
     metadata: ModelMetadata,
+    allow_row_dependent_native_range_tail: bool = False,
 ) -> PredicateToken:
     column_index = int(stratum.column_index)
     column = metadata.columns[column_index]
@@ -967,8 +978,18 @@ def forced_predicate_for_stratum(
         if stratum.region_type == "equality":
             return PredicateToken.range(stratum.value, stratum.value)
         if stratum.region_type == "lower_tail":
+            if not allow_row_dependent_native_range_tail:
+                raise ValueError(
+                    "non-singleton native-range lower-tail rare strata require "
+                    "allow_row_dependent_native_range_tail=true"
+                )
             return PredicateToken.range(stratum.lower, row_value)
         if stratum.region_type == "upper_tail":
+            if not allow_row_dependent_native_range_tail:
+                raise ValueError(
+                    "non-singleton native-range upper-tail rare strata require "
+                    "allow_row_dependent_native_range_tail=true"
+                )
             return PredicateToken.range(row_value, stratum.upper)
     if stratum.region_type == "equality":
         return PredicateToken.equal(stratum.value)

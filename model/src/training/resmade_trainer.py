@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -92,6 +92,79 @@ class TrainingStepResult:
     predicate_embedding_gradient_coverage: dict[str, Any]
     predicate_context_diagnostics: dict[str, Any]
     rare_auxiliary: dict[str, Any] | None = None
+
+
+@dataclass
+class _RunningScalarStats:
+    count: int = 0
+    total: float = 0.0
+    minimum: float | None = None
+    maximum: float | None = None
+    last: float | None = None
+
+    def update(self, value: float) -> None:
+        value = float(value)
+        self.count += 1
+        self.total += value
+        self.minimum = value if self.minimum is None else min(self.minimum, value)
+        self.maximum = value if self.maximum is None else max(self.maximum, value)
+        self.last = value
+
+    def to_json_dict(self) -> dict[str, float | int | None]:
+        return {
+            "count": int(self.count),
+            "mean": float(self.total / self.count) if self.count else None,
+            "min": self.minimum,
+            "max": self.maximum,
+            "last": self.last,
+        }
+
+
+@dataclass
+class _RunningAuxiliaryColumnStats:
+    eligible_examples: int = 0
+    inv_weight_sum: float = 0.0
+    inv_weight_squared_sum: float = 0.0
+    column_loss: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+    scaled_column_loss: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+
+    def update(self, diagnostics: dict[str, Any]) -> None:
+        self.eligible_examples += int(diagnostics.get("auxiliary_eligible_examples", 0))
+        self.inv_weight_sum += float(diagnostics.get("auxiliary_inv_weight_sum", 0.0))
+        self.inv_weight_squared_sum += float(
+            diagnostics.get("auxiliary_inv_weight_squared_sum", 0.0)
+        )
+        self.column_loss.update(float(diagnostics.get("auxiliary_column_loss", 0.0)))
+        self.scaled_column_loss.update(
+            float(diagnostics.get("auxiliary_scaled_column_loss", 0.0))
+        )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        ess = (
+            (self.inv_weight_sum * self.inv_weight_sum) / self.inv_weight_squared_sum
+            if self.inv_weight_squared_sum > 0.0
+            else 0.0
+        )
+        return {
+            "auxiliary_eligible_examples": int(self.eligible_examples),
+            "auxiliary_inv_weight_sum": float(self.inv_weight_sum),
+            "auxiliary_inv_weight_squared_sum": float(self.inv_weight_squared_sum),
+            "auxiliary_inv_ess": float(ess),
+            "auxiliary_column_loss": self.column_loss.to_json_dict(),
+            "auxiliary_scaled_column_loss": self.scaled_column_loss.to_json_dict(),
+        }
+
+
+def main_predicate_rng_seed(generator_seed: int, global_step: int) -> int:
+    return int(generator_seed) + int(global_step)
+
+
+def rare_row_rng_seed(training_seed: int, global_step: int) -> int:
+    return int(training_seed) + 1_000_000 + int(global_step)
+
+
+def rare_predicate_rng_seed(generator_seed: int, global_step: int) -> int:
+    return int(generator_seed) + 2_000_000 + int(global_step)
 
 
 def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> PredicateResMADE:
@@ -298,6 +371,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     aggregate_rare_auxiliary_forced_ops: dict[str, int] = {}
     aggregate_rare_auxiliary_exact_support_events: dict[str, int] = {}
     aggregate_rare_auxiliary_downstream_eligible: dict[str, int] = {}
+    aggregate_rare_auxiliary_contexts_by_stratum: dict[str, int] = {}
+    total_rare_auxiliary_contexts = 0
+    aggregate_rare_auxiliary_column_stats: dict[str, _RunningAuxiliaryColumnStats] = {}
+    aggregate_rare_auxiliary_fanout_signatures: dict[str, int] = {}
     aggregate_token_coverage = {
         column.name: {
             "wildcard": 0,
@@ -373,6 +450,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 config,
                 device,
                 sample_source=sample_source,
+                global_step=global_step,
             )
             loss = step_result.loss
             last_loss = loss
@@ -420,14 +498,34 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     ),
                 )
                 for stratum_id, stats in last_rare_auxiliary_stats.get("per_stratum", {}).items():
+                    aggregate_rare_auxiliary_contexts_by_stratum[stratum_id] = (
+                        int(aggregate_rare_auxiliary_contexts_by_stratum.get(stratum_id, 0))
+                        + int(stats.get("rare_context_count", 0))
+                    )
                     aggregate_rare_auxiliary_exact_support_events[stratum_id] = (
                         int(aggregate_rare_auxiliary_exact_support_events.get(stratum_id, 0))
                         + int(stats.get("generated_exact_support_event_count", 0))
                     )
                     aggregate_rare_auxiliary_downstream_eligible[stratum_id] = (
                         int(aggregate_rare_auxiliary_downstream_eligible.get(stratum_id, 0))
-                        + int(stats.get("downstream_eligible_context_count", 0))
+                        + int(stats.get("downstream_eligible_head_context_count", 0))
                     )
+                total_rare_auxiliary_contexts += int(
+                    last_rare_auxiliary_stats.get("rare_context_count", 0)
+                )
+                for column_name, diagnostics in last_rare_auxiliary_stats.get(
+                    "auxiliary_column_diagnostics", {}
+                ).items():
+                    aggregate_rare_auxiliary_column_stats.setdefault(
+                        column_name,
+                        _RunningAuxiliaryColumnStats(),
+                    ).update(diagnostics)
+                _merge_flat_counts(
+                    aggregate_rare_auxiliary_fanout_signatures,
+                    last_rare_auxiliary_stats.get(
+                        "common_auxiliary_fanout_token_signatures", {}
+                    ),
+                )
             interval = int(training.get("checkpoint_interval_steps", 0) or 0)
             if interval and global_step % interval == 0:
                 _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config)
@@ -720,6 +818,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             "batch_size": int(config.get("rare_auxiliary", {}).get("batch_size", 0) or 0),
             "beta": float(config.get("rare_auxiliary", {}).get("beta", 0.0) or 0.0),
             "total_rare_rows_sampled": int(total_rare_auxiliary_rows),
+            "total_rare_context_count": int(total_rare_auxiliary_contexts),
             "auxiliary_contexts_rejected": int(total_rare_auxiliary_rejected_contexts),
             "included_indicator_contradictions": int(
                 total_rare_auxiliary_indicator_contradictions
@@ -731,8 +830,19 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             "exact_support_event_counts_by_stratum": (
                 aggregate_rare_auxiliary_exact_support_events
             ),
-            "downstream_eligible_context_count_by_stratum": (
+            "rare_context_count_by_stratum": aggregate_rare_auxiliary_contexts_by_stratum,
+            "downstream_eligible_head_context_count_by_stratum": (
                 aggregate_rare_auxiliary_downstream_eligible
+            ),
+            "whole_run_auxiliary_column_diagnostics": {
+                column_name: stats.to_json_dict()
+                for column_name, stats in aggregate_rare_auxiliary_column_stats.items()
+            },
+            "whole_run_auxiliary_fanout_token_signatures": dict(
+                sorted(
+                    aggregate_rare_auxiliary_fanout_signatures.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
             ),
             "last_step": last_rare_auxiliary_stats,
         },
@@ -849,12 +959,13 @@ def _train_one_batch(
     device: str,
     *,
     sample_source: object | None = None,
+    global_step: int,
 ) -> TrainingStepResult:
     import torch
 
     predicate_config = config.get("predicate_generation", {})
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
-    rng = np.random.default_rng(generator_seed + int(getattr(model, "forward_calls", 0)))
+    rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
     context_generator = PredicateTrainingContextGenerator(predicate_config)
     contexts, target_rows, generation_stats = context_generator.generate_batch(
         encoded_rows=batch.encoded_values,
@@ -972,18 +1083,19 @@ def _train_one_batch(
             raise ValueError("rare_auxiliary.enabled requires a rare_support sample source")
         rare_batch = rare_batches(
             rare_batch_size,
-            seed=int(config["training"].get("seed", 0)) + 1_000_000 + int(getattr(model, "forward_calls", 0)),
+            seed=rare_row_rng_seed(int(config["training"].get("seed", 0)), global_step),
         )
         selected_strata = tuple(rare_batch.importance_metadata["selected_strata"])  # type: ignore[index]
-        rare_rng = np.random.default_rng(
-            generator_seed + 2_000_000 + int(getattr(model, "forward_calls", 0))
-        )
+        rare_rng = np.random.default_rng(rare_predicate_rng_seed(generator_seed, global_step))
         rare_contexts, rare_target_rows, rare_generation_stats = (
             context_generator.generate_forced_stratum_batch(
                 encoded_rows=rare_batch.encoded_values,
                 metadata=metadata,
                 strata=selected_strata,
                 rng=rare_rng,
+                allow_row_dependent_native_range_tail=bool(
+                    rare_config.get("allow_row_dependent_native_range_tail", False)
+                ),
             )
         )
         rare_token_rows = [list(context.tokens) for context in rare_contexts]
@@ -1130,18 +1242,20 @@ def rare_auxiliary_diagnostics(
         entry = per_stratum.setdefault(
             stratum.stratum_id,
             {
+                "rare_context_count": 0,
                 "raw_rare_row_count": 0,
                 "generated_exact_support_event_count": 0,
-                "downstream_eligible_context_count": 0,
+                "downstream_eligible_head_context_count": 0,
                 "forced_operator_count": {},
             },
         )
+        entry["rare_context_count"] = int(entry["rare_context_count"]) + 1
         entry["raw_rare_row_count"] = int(entry["raw_rare_row_count"]) + 1
         entry["generated_exact_support_event_count"] = int(
             entry["generated_exact_support_event_count"]
         ) + 1
-        entry["downstream_eligible_context_count"] = int(
-            entry["downstream_eligible_context_count"]
+        entry["downstream_eligible_head_context_count"] = int(
+            entry["downstream_eligible_head_context_count"]
         ) + int(np.sum(row_eligible))
         op_counts = entry["forced_operator_count"]
         op_counts[token.op.value] = int(op_counts.get(token.op.value, 0)) + 1
@@ -1153,6 +1267,7 @@ def rare_auxiliary_diagnostics(
         weights = inv_only_weights[:, column_index] * eligible.astype(float)
         eligible_count = int(np.sum(eligible))
         weight_sum = float(np.sum(weights))
+        weight_squared_sum = float(np.dot(weights, weights))
         if eligible_count:
             ess = effective_sample_size(weights[eligible])
             column_diagnostics[column.name] = {
@@ -1164,6 +1279,7 @@ def rare_auxiliary_diagnostics(
                 ),
                 "auxiliary_eligible_examples": eligible_count,
                 "auxiliary_inv_weight_sum": weight_sum,
+                "auxiliary_inv_weight_squared_sum": weight_squared_sum,
                 "auxiliary_inv_ess": float(ess),
             }
             if column.kind.value == "fanout":
@@ -1174,6 +1290,7 @@ def rare_auxiliary_diagnostics(
                 "auxiliary_scaled_column_loss": 0.0,
                 "auxiliary_eligible_examples": 0,
                 "auxiliary_inv_weight_sum": 0.0,
+                "auxiliary_inv_weight_squared_sum": 0.0,
                 "auxiliary_inv_ess": 0.0,
             }
     selected_counts: dict[str, int] = {}
@@ -1193,6 +1310,7 @@ def rare_auxiliary_diagnostics(
         "beta": float(beta),
         "rare_batch_size": int(rare_batch.encoded_values.shape[0]),
         "rare_rows_sampled": int(rare_batch.encoded_values.shape[0]),
+        "rare_context_count": int(len(contexts)),
         "auxiliary_loss_unscaled": float(rare_breakdown.total_loss.detach().cpu()),
         "auxiliary_loss_scaled": float(beta * rare_breakdown.total_loss.detach().cpu()),
         "auxiliary_column_diagnostics": column_diagnostics,

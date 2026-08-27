@@ -80,7 +80,6 @@ importance_sampling:
 
 rare_support:
   enabled: true
-  mixture_probability: 0.2
   discovery:
     enabled: true
     root_data_only: true
@@ -97,13 +96,12 @@ rare_support:
     strategy: support_deficit
   diagnostics:
     enabled: true
-    global_rho_reservoir_size: 100000
-    per_stratum_rho_reservoir_size: 1000
 
 rare_auxiliary:
   enabled: true
   batch_size: 512
   beta: 0.25
+  allow_row_dependent_native_range_tail: true
 
 training:
   seed: 0
