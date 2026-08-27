@@ -212,6 +212,106 @@ class PredicateTrainingContextGenerator:
             ),
         )
 
+    def generate_forced_stratum_batch(
+        self,
+        *,
+        encoded_rows: np.ndarray,
+        metadata: ModelMetadata,
+        strata: tuple[Any, ...] | list[Any],
+        rng: np.random.Generator,
+    ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
+        """Generate row-satisfied contexts with an exact stratum predicate forced.
+
+        The table subset and all non-stratum ordinary predicates follow the
+        normal row-specific generator.  The stratum's DATA column is then forced
+        to the support-deficient event that caused the rare row to be sampled.
+        """
+
+        encoded_rows = np.asarray(encoded_rows, dtype=int)
+        strata = tuple(strata)
+        if encoded_rows.shape[0] != len(strata):
+            raise ValueError("forced stratum generation requires one stratum per row")
+        contexts: list[GeneratedTrainingContext] = []
+        repeated_rows: list[np.ndarray] = []
+        source_row_indices: list[int] = []
+        rejected = 0
+        contradictions = 0
+        for row_index, (row, stratum) in enumerate(zip(encoded_rows, strata)):
+            context = self._generate_forced_stratum_context(row, metadata, stratum, rng)
+            contradictions += included_indicator_contradictions(context, row, metadata)
+            if not context_satisfies_row(context, row, metadata):
+                rejected += 1
+                continue
+            contexts.append(context)
+            repeated_rows.append(row)
+            source_row_indices.append(row_index)
+        if not contexts:
+            raise ValueError("forced stratum predicate generation rejected every context")
+        return (
+            contexts,
+            np.stack(repeated_rows, axis=0),
+            PredicateGenerationStats(
+                generated_contexts=len(contexts),
+                rejected_unsatisfied_contexts=rejected,
+                included_indicator_contradictions=contradictions,
+                source_row_indices=tuple(source_row_indices),
+            ),
+        )
+
+    def _generate_forced_stratum_context(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        stratum: Any,
+        rng: np.random.Generator,
+    ) -> GeneratedTrainingContext:
+        included_tables = set(self._sample_included_tables(encoded_row, metadata, rng))
+        column = metadata.columns[int(stratum.column_index)]
+        if column.table is not None:
+            present = present_tables_for_row(encoded_row, metadata)
+            if column.table not in present:
+                return GeneratedTrainingContext(
+                    tokens=tuple([PredicateToken.wildcard()] * len(metadata.columns)),
+                    included_tables=frozenset(),
+                    inverse_fanout_columns=frozenset(),
+                    ordinary_predicates={},
+                )
+            included_tables.add(column.table)
+            if self.table_subset_sampling == "neurocard_table_dropout_rooted":
+                graph = infer_join_graph(metadata)
+                included_tables = _root_connected_component(
+                    included_tables,
+                    graph.root_table,
+                    graph.edges,
+                )
+                included_tables.add(column.table)
+        inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
+        ordinary = self._ordinary_predicates(
+            encoded_row,
+            metadata,
+            rng,
+            frozenset(included_tables),
+        )
+        ordinary[column.name] = forced_predicate_for_stratum(
+            stratum,
+            encoded_row=encoded_row,
+            metadata=metadata,
+        )
+        tokens = tuple(
+            tokens_for_query_tables(
+                metadata,
+                set(included_tables),
+                set(inverse_fanouts),
+                dict(ordinary),
+            )
+        )
+        return GeneratedTrainingContext(
+            tokens=tokens,
+            included_tables=frozenset(included_tables),
+            inverse_fanout_columns=frozenset(inverse_fanouts),
+            ordinary_predicates=ordinary,
+        )
+
     def _generate_duet_row_specific(
         self,
         *,
@@ -852,6 +952,33 @@ def context_satisfies_row(
             return False
     present = present_tables_for_row(encoded_row, metadata)
     return set(context.included_tables).issubset(present)
+
+
+def forced_predicate_for_stratum(
+    stratum: Any,
+    *,
+    encoded_row: np.ndarray,
+    metadata: ModelMetadata,
+) -> PredicateToken:
+    column_index = int(stratum.column_index)
+    column = metadata.columns[column_index]
+    row_value = column.domain[int(encoded_row[column_index])]
+    if getattr(stratum, "support_bottleneck", None) == "native_range":
+        if stratum.region_type == "equality":
+            return PredicateToken.range(stratum.value, stratum.value)
+        if stratum.region_type == "lower_tail":
+            return PredicateToken.range(stratum.lower, row_value)
+        if stratum.region_type == "upper_tail":
+            return PredicateToken.range(row_value, stratum.upper)
+    if stratum.region_type == "equality":
+        return PredicateToken.equal(stratum.value)
+    if stratum.region_type == "lower_tail":
+        return PredicateToken(PredicateOp.GREATER_EQUAL, value=stratum.lower)
+    if stratum.region_type == "upper_tail":
+        return PredicateToken(PredicateOp.LESS_EQUAL, value=stratum.upper)
+    if stratum.region_type == "range":
+        return PredicateToken.range(stratum.lower, stratum.upper)
+    raise ValueError(f"unsupported rare stratum region_type {stratum.region_type!r}")
 
 
 def included_indicator_contradictions(

@@ -9,7 +9,10 @@ from model.src.data.full_join_sampler import (
     NeuroCardFullJoinSampleSource,
     SyntheticFullJoinSampleSource,
 )
-from model.src.data.importance_sampling import ImportanceSamplingSampleSource
+from model.src.data.importance_sampling import (
+    ImportanceSamplingSampleSource,
+    RareSupportSampleSource,
+)
 from model.src.model.factorization import (
     FactorizationConfig,
     apply_factorization_to_metadata,
@@ -55,6 +58,9 @@ def sample_source_from_config(
     importance = config.get("importance_sampling", {})
     if bool(importance.get("enabled", False)):
         return ImportanceSamplingSampleSource(wrapped, config)
+    rare_support = config.get("rare_support", {})
+    if bool(rare_support.get("enabled", False)):
+        return RareSupportSampleSource(wrapped, config)
     return wrapped
 
 

@@ -314,6 +314,35 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError(
                 "importance_sampling.diagnostics.per_stratum_rho_reservoir_size must be nonnegative"
             )
+    rare_support = config.get("rare_support", {})
+    rare_auxiliary = config.get("rare_auxiliary", {})
+    if bool(rare_auxiliary.get("enabled", False)):
+        if bool(importance.get("enabled", False)):
+            raise ValueError(
+                "rare_auxiliary.enabled=true must not be combined with "
+                "importance_sampling.enabled=true"
+            )
+        if not bool(rare_support.get("enabled", False)):
+            raise ValueError("rare_auxiliary.enabled=true requires rare_support.enabled=true")
+        if int(rare_auxiliary.get("batch_size", 0) or 0) <= 0:
+            raise ValueError("rare_auxiliary.batch_size must be positive")
+        if float(rare_auxiliary.get("beta", 0.0) or 0.0) < 0.0:
+            raise ValueError("rare_auxiliary.beta must be nonnegative")
+    if bool(rare_support.get("enabled", False)):
+        discovery = rare_support.get("discovery", {})
+        if not bool(discovery.get("root_data_only", True)):
+            raise ValueError("rare_support.discovery.root_data_only=false is not supported yet")
+        if float(discovery.get("minimum_expected_context_support", 100.0)) <= 0.0:
+            raise ValueError(
+                "rare_support.discovery.minimum_expected_context_support must be positive"
+            )
+        if int(discovery.get("max_selected_strata", 64)) <= 0:
+            raise ValueError("rare_support.discovery.max_selected_strata must be positive")
+        if "support_planning_steps" in discovery and int(discovery["support_planning_steps"]) <= 0:
+            raise ValueError("rare_support.discovery.support_planning_steps must be positive")
+        allocation = str(rare_support.get("allocation", {}).get("strategy", "support_deficit"))
+        if allocation != "support_deficit":
+            raise ValueError("rare_support.allocation.strategy must be support_deficit")
 
 
 def resolve_device(config: dict[str, Any]) -> str:

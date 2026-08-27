@@ -237,6 +237,7 @@ class StratumPredicateContextStats:
     relevant_context_count: int = 0
     root_predicate_operator_count: Counter[str] = field(default_factory=Counter)
     stratum_relevant_operator_count: Counter[str] = field(default_factory=Counter)
+    exact_support_event_operator_count: Counter[str] = field(default_factory=Counter)
     equality_literal_counts: Counter[str] = field(default_factory=Counter)
     lower_threshold_counts: Counter[str] = field(default_factory=Counter)
     upper_threshold_counts: Counter[str] = field(default_factory=Counter)
@@ -259,6 +260,8 @@ class StratumPredicateContextStats:
         for context_index, token in enumerate(tokens):
             self.root_predicate_operator_count[token.op.value] += 1
             self._update_boundary_counters(token)
+            if _token_exact_support_event_for_stratum(token, stratum):
+                self.exact_support_event_operator_count[token.op.value] += 1
             relevant = _token_relevant_to_stratum(token, stratum)
             relevant_mask[context_index] = relevant
             if relevant:
@@ -309,6 +312,9 @@ class StratumPredicateContextStats:
             "stratum_relevant_context_count": int(self.relevant_context_count),
             "root_predicate_operator_count": dict(self.root_predicate_operator_count),
             "stratum_relevant_operator_count": dict(self.stratum_relevant_operator_count),
+            "exact_support_event_operator_count": dict(
+                self.exact_support_event_operator_count
+            ),
             **{
                 name: dict(counter.most_common(512))
                 for name, counter in boundary_counters.items()
@@ -902,6 +908,214 @@ class ImportanceSamplingSampleSource:
         return payload
 
 
+class RareSupportSampleSource:
+    """Uniform sampler plus an explicit rare-support auxiliary sampler.
+
+    ``batches`` remains the ordinary uniform full-outer-join source.  Rare rows
+    are drawn only through ``rare_batches`` and deliberately carry no rho
+    correction weights; the trainer uses them for a biased auxiliary objective.
+    """
+
+    def __init__(
+        self,
+        base_source: object,
+        config: Mapping[str, Any],
+    ) -> None:
+        self.base_source = base_source
+        self.config = dict(config)
+        self.rare_config = dict(config.get("rare_support", {}))
+        self.enabled = bool(self.rare_config.get("enabled", False))
+        if not self.enabled:
+            raise ValueError("RareSupportSampleSource requires rare_support.enabled=true")
+        training = config.get("training", {})
+        predicate = config.get("predicate_generation", {})
+        discovery = self.rare_config.get("discovery", {})
+        diagnostics_config = dict(self.rare_config.get("diagnostics", {}))
+        diagnostics_enabled = bool(diagnostics_config.get("enabled", False))
+        self.maximum_configured_steps = (
+            int(training.get("steps_per_epoch", 1)) * int(training.get("epochs", 1))
+        )
+        self.support_planning_steps = support_planning_steps_from_config(config)
+        self.planned_sample_count = (
+            self.support_planning_steps
+            * int(training.get("batch_size", 1))
+            * int(predicate.get("per_row_contexts", 1))
+        )
+        started = time.perf_counter()
+        if diagnostics_enabled:
+            print(
+                "[rare_support] building exact root stratum provider",
+                {
+                    "n_total": self.planned_sample_count,
+                    "support_planning_steps": self.support_planning_steps,
+                    "maximum_configured_steps": self.maximum_configured_steps,
+                    "discovery": dict(discovery),
+                },
+                flush=True,
+            )
+        self.provider = _provider_for_source(
+            base_source,
+            {**discovery, "diagnostics": diagnostics_enabled},
+        )
+        provider_seconds = time.perf_counter() - started
+        self.selected_strata = self.provider.discover(
+            n_total=self.planned_sample_count,
+            predicate_probabilities=predicate_probability_map(predicate),
+            minimum_expected_context_support=float(
+                discovery.get("minimum_expected_context_support", 100.0)
+            ),
+            max_selected_strata=int(discovery.get("max_selected_strata", 64)),
+        )
+        self.discovery_seconds = time.perf_counter() - started
+        if diagnostics_enabled:
+            print(
+                "[rare_support] discovery ready",
+                {
+                    "provider_seconds": provider_seconds,
+                    "total_seconds": self.discovery_seconds,
+                    "selected_strata": len(self.selected_strata),
+                },
+                flush=True,
+            )
+        if not self.selected_strata:
+            raise ValueError(
+                "rare support discovery selected no strata with both positive "
+                "mass and positive support deficit"
+            )
+        prepare_root_strata = getattr(base_source, "prepare_root_strata", None)
+        if prepare_root_strata is not None:
+            prewarm_started = time.perf_counter()
+            prepare_root_strata(self.selected_strata)
+            if diagnostics_enabled:
+                print(
+                    "[rare_support] conditional sampler cache ready",
+                    {
+                        "seconds": time.perf_counter() - prewarm_started,
+                        "selected_strata": len(self.selected_strata),
+                    },
+                    flush=True,
+                )
+        alpha_sum = sum(stratum.alpha for stratum in self.selected_strata)
+        if abs(alpha_sum - 1.0) > 1.0e-8:
+            raise ValueError(f"rare support alpha values must sum to 1, got {alpha_sum}")
+        if any(stratum.probability <= 0.0 for stratum in self.selected_strata):
+            raise ValueError("all selected rare support strata must have P_s > 0")
+        self._membership_lookup = build_membership_lookup(self.metadata, self.selected_strata)  # type: ignore[arg-type]
+        self._alpha = np.array([stratum.alpha for stratum in self.selected_strata], dtype=float)
+        self.rare_rows_drawn = 0
+        self.selected_stratum_sample_count: Counter[str] = Counter()
+
+    @property
+    def join_cardinality(self) -> int:
+        return int(self.base_source.join_cardinality)  # type: ignore[attr-defined]
+
+    @property
+    def metadata(self) -> object:
+        return self.base_source.metadata  # type: ignore[attr-defined]
+
+    @property
+    def sampler_run_calls(self) -> int | None:
+        return getattr(self.base_source, "sampler_run_calls", None)
+
+    @property
+    def distinct_original_rows_seen_estimate(self) -> object:
+        return getattr(self.base_source, "distinct_original_rows_seen_estimate", None)
+
+    def discard_buffer(self) -> None:
+        discard = getattr(self.base_source, "discard_buffer", None)
+        if discard is not None:
+            discard()
+
+    def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
+        return self.base_source.batches(batch_size, seed=seed)  # type: ignore[attr-defined]
+
+    def rare_batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
+        if batch_size <= 0:
+            raise ValueError("rare auxiliary batch_size must be positive")
+        rng = np.random.default_rng(int(seed))
+        selected = rng.choice(
+            np.arange(len(self.selected_strata)),
+            size=int(batch_size),
+            replace=True,
+            p=self._alpha,
+        )
+        selected_strata = tuple(self.selected_strata[int(index)] for index in selected)
+        rows = _sample_conditionals_from_source(
+            self.base_source,
+            self.provider,
+            list(selected_strata),
+            rng,
+        )
+        memberships = membership_matrix(
+            self.metadata,
+            rows,
+            self.selected_strata,
+            lookup=self._membership_lookup,
+        )  # type: ignore[arg-type]
+        selected_ids = [stratum.stratum_id for stratum in selected_strata]
+        ImportanceSamplingSampleSource._assert_rare_rows_match_selected_strata(
+            self,
+            rare_positions=np.arange(len(selected_strata)),
+            selected_ids=selected_ids,
+            memberships=memberships,
+        )
+        self.rare_rows_drawn += int(batch_size)
+        self.selected_stratum_sample_count.update(selected_ids)
+        return FullJoinBatch(
+            encoded_values=rows,
+            column_metadata=self.metadata.columns,  # type: ignore[attr-defined]
+            fresh_rows_drawn=int(batch_size),
+            importance_weights=None,
+            importance_metadata={
+                "selected_stratum": selected_ids,
+                "selected_strata": selected_strata,
+                "selected_stratum_column_index": [
+                    int(stratum.column_index) for stratum in selected_strata
+                ],
+                "memberships": memberships,
+            },
+        )
+
+    def rare_support_summary(
+        self,
+        *,
+        actual_optimizer_steps: int | None = None,
+    ) -> dict[str, Any]:
+        realized_fraction = (
+            None
+            if actual_optimizer_steps is None
+            else float(actual_optimizer_steps) / float(self.support_planning_steps)
+        )
+        return {
+            "enabled": True,
+            "maximum_configured_steps": int(self.maximum_configured_steps),
+            "support_planning_steps": int(self.support_planning_steps),
+            "planned_full_join_sample_count": int(self.planned_sample_count),
+            "actual_optimizer_steps": (
+                None if actual_optimizer_steps is None else int(actual_optimizer_steps)
+            ),
+            "realized_support_fraction": realized_fraction,
+            "number_selected_strata": len(self.selected_strata),
+            "selected_strata": [
+                _stratum_support_summary(stratum, realized_fraction)
+                for stratum in self.selected_strata
+            ],
+            "proposal_composition": _proposal_composition(self.selected_strata),
+            "selected_stratum_sample_count": dict(self.selected_stratum_sample_count),
+            "rare_rows_drawn": int(self.rare_rows_drawn),
+            "discovery_seconds": self.discovery_seconds,
+            "root_mass_diagnostics": dict(getattr(self.provider, "mass_diagnostics", {})),
+            "sampler_counters": _sampler_counters(self.base_source),
+            "configuration": {
+                "enabled": True,
+                "discovery": dict(self.rare_config.get("discovery", {})),
+                "allocation": dict(self.rare_config.get("allocation", {})),
+                "diagnostics": dict(self.rare_config.get("diagnostics", {})),
+                "seed": self.config.get("training", {}).get("seed", 0),
+            },
+        }
+
+
 def _provider_for_source(
     source: object,
     discovery_config: Mapping[str, Any] | None = None,
@@ -958,8 +1172,12 @@ def _provider_for_source(
 
 def support_planning_steps_from_config(config: Mapping[str, Any]) -> int:
     training = config.get("training", {})
-    importance = config.get("importance_sampling", {})
-    discovery = importance.get("discovery", {})
+    support_config = (
+        config.get("rare_support", {})
+        if bool(config.get("rare_support", {}).get("enabled", False))
+        else config.get("importance_sampling", {})
+    )
+    discovery = support_config.get("discovery", {})
     if "support_planning_steps" in discovery:
         steps = int(discovery["support_planning_steps"])
     else:
@@ -1103,24 +1321,24 @@ def _context_amplification_by_stratum(
     amplification: dict[str, Any] = {}
     for stratum in strata:
         stats = context_stats.get(stratum.stratum_id)
-        observed = dict(stats.stratum_relevant_operator_count) if stats is not None else {}
+        exact_observed = (
+            dict(stats.exact_support_event_operator_count) if stats is not None else {}
+        )
         by_operator: dict[str, Any] = {}
         for op_name, planned in (
             (PredicateOp.EQUAL.value, stratum.expected_equality_count),
             (PredicateOp.GREATER_EQUAL.value, stratum.expected_lower_count),
-            (PredicateOp.GREATER_THAN.value, stratum.expected_lower_count),
             (PredicateOp.LESS_EQUAL.value, stratum.expected_upper_count),
-            (PredicateOp.LESS_THAN.value, stratum.expected_upper_count),
             (PredicateOp.RANGE.value, stratum.expected_range_support),
         ):
             if planned is None:
                 continue
             expected_uniform = _scaled_support(planned, realized_fraction)
-            observed_count = int(observed.get(op_name, 0))
+            observed_count = int(exact_observed.get(op_name, 0))
             by_operator[op_name] = {
                 "planned_expected_uniform_count": _finite_json_number(planned),
                 "expected_uniform_count_at_actual_steps": expected_uniform,
-                "observed_importance_sampling_context_count": observed_count,
+                "observed_exact_support_event_count": observed_count,
                 "raw_context_amplification": (
                     None
                     if expected_uniform is None or expected_uniform <= 0.0
@@ -1203,6 +1421,43 @@ def _token_relevant_to_stratum(token: PredicateToken, stratum: RootDataStratum) 
                 and _safe_ge(token.value, stratum.lower)
                 and _safe_le(token.upper, stratum.upper)
             )
+    return False
+
+
+def _token_exact_support_event_for_stratum(
+    token: PredicateToken,
+    stratum: RootDataStratum,
+) -> bool:
+    if token.op == PredicateOp.EQUAL:
+        return (
+            stratum.region_type == "equality"
+            and token.value is not None
+            and _literal_equal(token.value, stratum.value)
+        )
+    if token.op == PredicateOp.GREATER_EQUAL:
+        return (
+            stratum.region_type == "lower_tail"
+            and token.value is not None
+            and _literal_equal(token.value, stratum.lower)
+        )
+    if token.op == PredicateOp.LESS_EQUAL:
+        return (
+            stratum.region_type == "upper_tail"
+            and token.value is not None
+            and _literal_equal(token.value, stratum.upper)
+        )
+    if token.op == PredicateOp.RANGE:
+        if token.value is None or token.upper is None:
+            return False
+        if stratum.region_type == "equality":
+            return (
+                _literal_equal(token.value, stratum.value)
+                and _literal_equal(token.upper, stratum.value)
+            )
+        if stratum.region_type == "lower_tail":
+            return _safe_ge(token.value, stratum.lower)
+        if stratum.region_type == "upper_tail":
+            return _safe_le(token.upper, stratum.upper)
     return False
 
 

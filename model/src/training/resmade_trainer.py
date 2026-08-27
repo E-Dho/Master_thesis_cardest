@@ -15,13 +15,14 @@ from model.src.model.anpm import ANPMConfig
 from model.src.model.checkpoint import save_resmade_checkpoint
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.predicates.generation import (
+    GeneratedTrainingContext,
     PredicateTrainingContextGenerator,
     predicate_context_diagnostics,
     literal_token_occurrences,
     literal_token_stats,
     token_coverage,
 )
-from model.src.predicates.operators import PredicateOp
+from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.torch_encoding import encode_tokens_tensor
 from model.src.predicates.vocabulary import PredicateVocabularies, key_to_token
 from model.src.predicates.vocabulary import (
@@ -75,6 +76,9 @@ class TrainingResult:
 @dataclass(frozen=True)
 class TrainingStepResult:
     loss: float
+    uniform_loss: float
+    auxiliary_loss_unscaled: float
+    auxiliary_loss_scaled: float
     fanout_effective_sample_size: dict[str, float]
     fanout_inv_only_effective_sample_size: dict[str, float]
     importance_weight_stats: dict[str, Any]
@@ -87,6 +91,7 @@ class TrainingStepResult:
     literal_token_occurrences: dict[str, dict[str, dict[str, int]]]
     predicate_embedding_gradient_coverage: dict[str, Any]
     predicate_context_diagnostics: dict[str, Any]
+    rare_auxiliary: dict[str, Any] | None = None
 
 
 def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> PredicateResMADE:
@@ -257,7 +262,13 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     optimizer_class = torch.optim.AdamW if optimizer_name == "adamw" else torch.optim.Adam
     optimizer = optimizer_class(model.parameters(), lr=float(training["learning_rate"]))
     first_loss: float | None = None
+    first_uniform_loss: float | None = None
+    first_auxiliary_loss_unscaled: float | None = None
+    first_auxiliary_loss_scaled: float | None = None
     last_loss = float("nan")
+    last_uniform_loss = float("nan")
+    last_auxiliary_loss_unscaled = 0.0
+    last_auxiliary_loss_scaled = 0.0
     global_step = 0
     batch_size = int(training["batch_size"])
     output_directory = Path(logging.get("output_directory", "model/runs/resmade"))
@@ -279,6 +290,14 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     aggregate_literal_occurrences: dict[str, dict[str, dict[str, int]]] = {}
     last_gradient_coverage: dict[str, Any] = {}
     last_context_diagnostics: dict[str, Any] = {}
+    last_rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
+    total_rare_auxiliary_rows = 0
+    total_rare_auxiliary_rejected_contexts = 0
+    total_rare_auxiliary_indicator_contradictions = 0
+    aggregate_rare_auxiliary_selected_strata: dict[str, int] = {}
+    aggregate_rare_auxiliary_forced_ops: dict[str, int] = {}
+    aggregate_rare_auxiliary_exact_support_events: dict[str, int] = {}
+    aggregate_rare_auxiliary_downstream_eligible: dict[str, int] = {}
     aggregate_token_coverage = {
         column.name: {
             "wildcard": 0,
@@ -357,8 +376,14 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             )
             loss = step_result.loss
             last_loss = loss
+            last_uniform_loss = step_result.uniform_loss
+            last_auxiliary_loss_unscaled = step_result.auxiliary_loss_unscaled
+            last_auxiliary_loss_scaled = step_result.auxiliary_loss_scaled
             if first_loss is None:
                 first_loss = loss
+                first_uniform_loss = step_result.uniform_loss
+                first_auxiliary_loss_unscaled = step_result.auxiliary_loss_unscaled
+                first_auxiliary_loss_scaled = step_result.auxiliary_loss_scaled
             global_step += 1
             for fanout_name, fanout_ess in step_result.fanout_effective_sample_size.items():
                 fanout_ess_values[fanout_name].append(float(fanout_ess))
@@ -373,6 +398,36 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             _merge_literal_occurrences(aggregate_literal_occurrences, step_result.literal_token_occurrences)
             last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
             last_context_diagnostics = step_result.predicate_context_diagnostics
+            last_rare_auxiliary_stats = step_result.rare_auxiliary or {"enabled": False}
+            if last_rare_auxiliary_stats.get("enabled"):
+                total_rare_auxiliary_rows += int(
+                    last_rare_auxiliary_stats.get("rare_rows_sampled", 0)
+                )
+                total_rare_auxiliary_rejected_contexts += int(
+                    last_rare_auxiliary_stats.get("auxiliary_contexts_rejected", 0)
+                )
+                total_rare_auxiliary_indicator_contradictions += int(
+                    last_rare_auxiliary_stats.get("included_indicator_contradictions", 0)
+                )
+                _merge_flat_counts(
+                    aggregate_rare_auxiliary_selected_strata,
+                    last_rare_auxiliary_stats.get("selected_stratum_counts", {}),
+                )
+                _merge_flat_counts(
+                    aggregate_rare_auxiliary_forced_ops,
+                    last_rare_auxiliary_stats.get(
+                        "forced_auxiliary_predicate_operator_counts", {}
+                    ),
+                )
+                for stratum_id, stats in last_rare_auxiliary_stats.get("per_stratum", {}).items():
+                    aggregate_rare_auxiliary_exact_support_events[stratum_id] = (
+                        int(aggregate_rare_auxiliary_exact_support_events.get(stratum_id, 0))
+                        + int(stats.get("generated_exact_support_event_count", 0))
+                    )
+                    aggregate_rare_auxiliary_downstream_eligible[stratum_id] = (
+                        int(aggregate_rare_auxiliary_downstream_eligible.get(stratum_id, 0))
+                        + int(stats.get("downstream_eligible_context_count", 0))
+                    )
             interval = int(training.get("checkpoint_interval_steps", 0) or 0)
             if interval and global_step % interval == 0:
                 _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config)
@@ -389,6 +444,9 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     "fresh_sampler_rows": fresh_sampler_rows,
                     "fixture_rows_reused": fixture_rows_reused,
                     "loss": loss,
+                    "uniform_loss": step_result.uniform_loss,
+                    "auxiliary_loss_unscaled": step_result.auxiliary_loss_unscaled,
+                    "auxiliary_loss_scaled": step_result.auxiliary_loss_scaled,
                     "fanout_effective_sample_size": step_result.fanout_effective_sample_size,
                     "fanout_inv_only_effective_sample_size": (
                         step_result.fanout_inv_only_effective_sample_size
@@ -403,6 +461,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     ),
                     "predicate_context_diagnostics": last_context_diagnostics,
                     "predicate_embedding_gradient_coverage": last_gradient_coverage,
+                    "rare_auxiliary": last_rare_auxiliary_stats,
                 }
                 early_stopping_monitor_value: float | None = None
                 if validation_enabled and global_step % validation_interval == 0:
@@ -555,6 +614,11 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         if hasattr(sample_source, "importance_sampling_summary")
         else {"enabled": False}
     )
+    rare_support_summary = (
+        sample_source.rare_support_summary(actual_optimizer_steps=global_step)
+        if hasattr(sample_source, "rare_support_summary")
+        else {"enabled": False}
+    )
     output_embedding_parameter_count = int(
         sum(parameter.numel() for parameter in getattr(model, "output_embeddings").parameters())
     )
@@ -615,6 +679,14 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "anpm_parameter_count": anpm_parameter_count,
         "first_loss": float(first_loss if first_loss is not None else float("nan")),
         "last_loss": last_loss,
+        "first_uniform_loss": float(
+            first_uniform_loss if first_uniform_loss is not None else float("nan")
+        ),
+        "last_uniform_loss": last_uniform_loss,
+        "first_auxiliary_loss_unscaled": float(first_auxiliary_loss_unscaled or 0.0),
+        "last_auxiliary_loss_unscaled": last_auxiliary_loss_unscaled,
+        "first_auxiliary_loss_scaled": float(first_auxiliary_loss_scaled or 0.0),
+        "last_auxiliary_loss_scaled": last_auxiliary_loss_scaled,
         "optimizer_steps": global_step,
         "batch_size": batch_size,
         "total_sampled_tuples": global_step * batch_size,
@@ -642,6 +714,28 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "fanout_effective_sample_size": fanout_ess_summary,
         "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
         "importance_sampling": importance_summary,
+        "rare_support": rare_support_summary,
+        "rare_auxiliary": {
+            "enabled": bool(config.get("rare_auxiliary", {}).get("enabled", False)),
+            "batch_size": int(config.get("rare_auxiliary", {}).get("batch_size", 0) or 0),
+            "beta": float(config.get("rare_auxiliary", {}).get("beta", 0.0) or 0.0),
+            "total_rare_rows_sampled": int(total_rare_auxiliary_rows),
+            "auxiliary_contexts_rejected": int(total_rare_auxiliary_rejected_contexts),
+            "included_indicator_contradictions": int(
+                total_rare_auxiliary_indicator_contradictions
+            ),
+            "selected_stratum_counts": aggregate_rare_auxiliary_selected_strata,
+            "forced_auxiliary_predicate_operator_counts": (
+                aggregate_rare_auxiliary_forced_ops
+            ),
+            "exact_support_event_counts_by_stratum": (
+                aggregate_rare_auxiliary_exact_support_events
+            ),
+            "downstream_eligible_context_count_by_stratum": (
+                aggregate_rare_auxiliary_downstream_eligible
+            ),
+            "last_step": last_rare_auxiliary_stats,
+        },
         "output_width_original": output_width_original,
         "output_width_factorized": output_width_factorized,
         "predicate_encoding_mode": getattr(
@@ -862,18 +956,106 @@ def _train_one_batch(
             config.get("anpm", {}).get("mask_invalid_combinations", True)
         )
     )
-    breakdown.total_loss.backward()
+    total_loss = breakdown.total_loss
+    rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
+    rare_token_rows: list[list[PredicateToken]] = []
+    rare_token_ids = None
+    rare_config = dict(config.get("rare_auxiliary", {}))
+    rare_enabled = bool(rare_config.get("enabled", False))
+    rare_beta = float(rare_config.get("beta", 0.0) or 0.0)
+    if rare_enabled and rare_beta > 0.0:
+        rare_batch_size = int(rare_config.get("batch_size", 0) or 0)
+        if rare_batch_size <= 0:
+            raise ValueError("rare_auxiliary.batch_size must be positive when enabled")
+        rare_batches = getattr(sample_source, "rare_batches", None)
+        if rare_batches is None:
+            raise ValueError("rare_auxiliary.enabled requires a rare_support sample source")
+        rare_batch = rare_batches(
+            rare_batch_size,
+            seed=int(config["training"].get("seed", 0)) + 1_000_000 + int(getattr(model, "forward_calls", 0)),
+        )
+        selected_strata = tuple(rare_batch.importance_metadata["selected_strata"])  # type: ignore[index]
+        rare_rng = np.random.default_rng(
+            generator_seed + 2_000_000 + int(getattr(model, "forward_calls", 0))
+        )
+        rare_contexts, rare_target_rows, rare_generation_stats = (
+            context_generator.generate_forced_stratum_batch(
+                encoded_rows=rare_batch.encoded_values,
+                metadata=metadata,
+                strata=selected_strata,
+                rng=rare_rng,
+            )
+        )
+        rare_token_rows = [list(context.tokens) for context in rare_contexts]
+        rare_inv_only_weights = cumulative_inverse_fanout_weights(
+            rare_target_rows,
+            rare_token_rows,
+            metadata,
+            compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
+        )
+        rare_source_indices = np.asarray(
+            rare_generation_stats.source_row_indices,
+            dtype=int,
+        )
+        rare_selected_column_indices = np.asarray(
+            rare_batch.importance_metadata["selected_stratum_column_index"],  # type: ignore[index]
+            dtype=int,
+        )[rare_source_indices]
+        eligibility = auxiliary_eligibility_mask(
+            metadata,
+            rare_selected_column_indices,
+            row_count=rare_target_rows.shape[0],
+        )
+        rare_weights = rare_inv_only_weights * eligibility.astype(float)
+        rare_token_ids = encode_tokens_tensor(rare_token_rows, vocabularies, device=device)
+        rare_targets = torch.tensor(rare_target_rows, dtype=torch.long, device=device)
+        rare_head_weights = torch.tensor(rare_weights, dtype=torch.float32, device=device)
+        rare_logits = model(rare_token_ids)
+        rare_split_head_outputs = model.split_head_outputs(rare_logits)
+        rare_breakdown = torch_weighted_per_head_cross_entropy(
+            rare_logits,
+            rare_targets,
+            rare_head_weights,
+            metadata,
+            anpm_decoders=getattr(model, "anpm_decoders", None),
+            split_head_outputs=rare_split_head_outputs,
+            output_embeddings=output_embeddings,
+            head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
+            mask_invalid_factor_combinations=bool(
+                config.get("anpm", {}).get("mask_invalid_combinations", True)
+            )
+        )
+        total_loss = total_loss + rare_beta * rare_breakdown.total_loss
+        rare_auxiliary_stats = rare_auxiliary_diagnostics(
+            metadata=metadata,
+            beta=rare_beta,
+            rare_batch=rare_batch,
+            contexts=rare_contexts,
+            generation_stats=rare_generation_stats,
+            selected_strata=selected_strata,
+            selected_column_indices=rare_selected_column_indices,
+            eligibility=eligibility,
+            inv_only_weights=rare_inv_only_weights,
+            rare_breakdown=rare_breakdown,
+        )
+    total_loss.backward()
+    all_token_rows = token_rows + rare_token_rows
+    all_token_ids = (
+        torch.cat([token_ids, rare_token_ids], dim=0)
+        if rare_token_ids is not None
+        else token_ids
+    )
     gradient_coverage = _predicate_embedding_gradient_coverage(
         model,
-        token_rows,
-        token_ids,
+        all_token_rows,
+        all_token_ids,
         metadata,
     )
     clip_norm = config["training"].get("gradient_clip_norm")
     if clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_norm))
     optimizer.step()
-    if not torch.isfinite(breakdown.total_loss):
+    if not torch.isfinite(total_loss):
         raise ValueError("training loss became non-finite")
     fanout_effective_sample_sizes = {}
     fanout_inv_only_effective_sample_sizes = {}
@@ -886,7 +1068,14 @@ def _train_one_batch(
             effective_sample_size(inv_only_weights[:, fanout_index])
         )
     return TrainingStepResult(
-        loss=float(breakdown.total_loss.detach().cpu()),
+        loss=float(total_loss.detach().cpu()),
+        uniform_loss=float(breakdown.total_loss.detach().cpu()),
+        auxiliary_loss_unscaled=float(
+            rare_auxiliary_stats.get("auxiliary_loss_unscaled", 0.0)
+        ),
+        auxiliary_loss_scaled=float(
+            rare_auxiliary_stats.get("auxiliary_loss_scaled", 0.0)
+        ),
         fanout_effective_sample_size=fanout_effective_sample_sizes,
         fanout_inv_only_effective_sample_size=fanout_inv_only_effective_sample_sizes,
         importance_weight_stats=importance_stats,
@@ -899,7 +1088,132 @@ def _train_one_batch(
         literal_token_occurrences=literal_occurrences,
         predicate_context_diagnostics=context_diagnostics,
         predicate_embedding_gradient_coverage=gradient_coverage,
+        rare_auxiliary=rare_auxiliary_stats,
     )
+
+
+def auxiliary_eligibility_mask(
+    metadata: object,
+    selected_column_indices: np.ndarray,
+    *,
+    row_count: int,
+) -> np.ndarray:
+    """Return [rare_rows, original_columns] mask for strict AR suffix heads."""
+
+    selected = np.asarray(selected_column_indices, dtype=int).reshape(-1)
+    if selected.shape != (row_count,):
+        raise ValueError("selected_column_indices must have one entry per rare row")
+    column_indices = np.arange(len(metadata.columns), dtype=int)  # type: ignore[attr-defined]
+    return column_indices[None, :] > selected[:, None]
+
+
+def rare_auxiliary_diagnostics(
+    *,
+    metadata: object,
+    beta: float,
+    rare_batch: FullJoinBatch,
+    contexts: list[GeneratedTrainingContext],
+    generation_stats: object,
+    selected_strata: tuple[object, ...],
+    selected_column_indices: np.ndarray,
+    eligibility: np.ndarray,
+    inv_only_weights: np.ndarray,
+    rare_breakdown: object,
+) -> dict[str, Any]:
+    selected_source_indices = np.asarray(generation_stats.source_row_indices, dtype=int)
+    selected_for_context = tuple(selected_strata[int(index)] for index in selected_source_indices)
+    forced_operator_counts: dict[str, int] = {}
+    per_stratum: dict[str, dict[str, Any]] = {}
+    for context, stratum, row_eligible in zip(contexts, selected_for_context, eligibility):
+        token = context.tokens[int(stratum.column_index)]
+        forced_operator_counts[token.op.value] = int(forced_operator_counts.get(token.op.value, 0)) + 1
+        entry = per_stratum.setdefault(
+            stratum.stratum_id,
+            {
+                "raw_rare_row_count": 0,
+                "generated_exact_support_event_count": 0,
+                "downstream_eligible_context_count": 0,
+                "forced_operator_count": {},
+            },
+        )
+        entry["raw_rare_row_count"] = int(entry["raw_rare_row_count"]) + 1
+        entry["generated_exact_support_event_count"] = int(
+            entry["generated_exact_support_event_count"]
+        ) + 1
+        entry["downstream_eligible_context_count"] = int(
+            entry["downstream_eligible_context_count"]
+        ) + int(np.sum(row_eligible))
+        op_counts = entry["forced_operator_count"]
+        op_counts[token.op.value] = int(op_counts.get(token.op.value, 0)) + 1
+
+    column_diagnostics: dict[str, Any] = {}
+    auxiliary_inv_ess_by_fanout: dict[str, float] = {}
+    for column_index, column in enumerate(metadata.columns):  # type: ignore[attr-defined]
+        eligible = eligibility[:, column_index].astype(bool)
+        weights = inv_only_weights[:, column_index] * eligible.astype(float)
+        eligible_count = int(np.sum(eligible))
+        weight_sum = float(np.sum(weights))
+        if eligible_count:
+            ess = effective_sample_size(weights[eligible])
+            column_diagnostics[column.name] = {
+                "auxiliary_column_loss": float(
+                    rare_breakdown.original_column_losses.get(column.name, 0.0)
+                ),
+                "auxiliary_scaled_column_loss": float(
+                    beta * rare_breakdown.original_column_losses.get(column.name, 0.0)
+                ),
+                "auxiliary_eligible_examples": eligible_count,
+                "auxiliary_inv_weight_sum": weight_sum,
+                "auxiliary_inv_ess": float(ess),
+            }
+            if column.kind.value == "fanout":
+                auxiliary_inv_ess_by_fanout[column.name] = float(ess)
+        else:
+            column_diagnostics[column.name] = {
+                "auxiliary_column_loss": 0.0,
+                "auxiliary_scaled_column_loss": 0.0,
+                "auxiliary_eligible_examples": 0,
+                "auxiliary_inv_weight_sum": 0.0,
+                "auxiliary_inv_ess": 0.0,
+            }
+    selected_counts: dict[str, int] = {}
+    for stratum in selected_strata:
+        selected_counts[stratum.stratum_id] = int(selected_counts.get(stratum.stratum_id, 0)) + 1
+    fanout_signatures: dict[str, int] = {}
+    for context in contexts:
+        parts = [
+            f"{column.name}:{token.op.value}"
+            for column, token in zip(metadata.columns, context.tokens)  # type: ignore[attr-defined]
+            if column.kind.value == "fanout"
+        ]
+        key = "|".join(parts)
+        fanout_signatures[key] = int(fanout_signatures.get(key, 0)) + 1
+    return {
+        "enabled": True,
+        "beta": float(beta),
+        "rare_batch_size": int(rare_batch.encoded_values.shape[0]),
+        "rare_rows_sampled": int(rare_batch.encoded_values.shape[0]),
+        "auxiliary_loss_unscaled": float(rare_breakdown.total_loss.detach().cpu()),
+        "auxiliary_loss_scaled": float(beta * rare_breakdown.total_loss.detach().cpu()),
+        "auxiliary_column_diagnostics": column_diagnostics,
+        "selected_stratum_counts": selected_counts,
+        "forced_auxiliary_predicate_operator_counts": forced_operator_counts,
+        "auxiliary_contexts_rejected": int(generation_stats.rejected_unsatisfied_contexts),
+        "included_indicator_contradictions": int(
+            generation_stats.included_indicator_contradictions
+        ),
+        "per_stratum": per_stratum,
+        "auxiliary_inv_only_ess_by_fanout": auxiliary_inv_ess_by_fanout,
+        "common_auxiliary_fanout_token_signatures": dict(
+            sorted(fanout_signatures.items(), key=lambda item: (-item[1], item[0]))[:32]
+        ),
+        "selected_predicate_column_min": int(np.min(selected_column_indices))
+        if selected_column_indices.size
+        else None,
+        "selected_predicate_column_max": int(np.max(selected_column_indices))
+        if selected_column_indices.size
+        else None,
+    }
 
 
 def _run_validation(
@@ -1045,6 +1359,11 @@ def _merge_literal_occurrences(
             aggregate_op = aggregate_column.setdefault(op_name, {})
             for literal_key, count in by_literal.items():
                 aggregate_op[literal_key] = int(aggregate_op.get(literal_key, 0)) + int(count)
+
+
+def _merge_flat_counts(target: dict[str, int], update: dict[str, Any]) -> None:
+    for key, value in update.items():
+        target[str(key)] = int(target.get(str(key), 0)) + int(value)
 
 
 def _predicate_embedding_gradient_coverage(

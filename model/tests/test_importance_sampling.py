@@ -19,7 +19,9 @@ from model.src.data.importance_sampling import (
     ImportanceSamplingSampleSource,
     StreamingLogWeightStats,
     StreamingMomentStats,
+    StratumPredicateContextStats,
     _assert_rho_defensive_bound,
+    _context_amplification_by_stratum,
     _sampler_counters,
     _token_relevant_to_stratum,
 )
@@ -555,6 +557,125 @@ class ImportanceSamplingTest(unittest.TestCase):
             op_summary["expected_uniform_count_at_actual_steps"],
             planned * 0.005,
         )
+        self.assertIn("observed_exact_support_event_count", op_summary)
+
+    def test_exact_lower_support_amplification_excludes_stricter_thresholds(self) -> None:
+        stratum = RootDataStratum(
+            "ge2",
+            0,
+            "A.x",
+            "lower_tail",
+            lower=2,
+            expected_lower_count=100.0,
+            expected_range_support=50.0,
+        )
+        stats = StratumPredicateContextStats()
+        tokens = [
+            PredicateToken(PredicateOp.GREATER_EQUAL, value=2),
+            PredicateToken(PredicateOp.GREATER_EQUAL, value=3),
+            PredicateToken(PredicateOp.GREATER_THAN, value=2),
+            PredicateToken(PredicateOp.RANGE, value=2, upper=3),
+            PredicateToken(PredicateOp.RANGE, value=3, upper=3),
+            PredicateToken(PredicateOp.RANGE, value=1, upper=3),
+        ]
+        stats.update_tokens(tokens=tokens, stratum=stratum, fanout_signatures=[""] * len(tokens))
+        payload = stats.to_json_dict()
+        self.assertEqual(payload["stratum_relevant_context_count"], 5)
+        self.assertEqual(payload["stratum_relevant_operator_count"][PredicateOp.GREATER_EQUAL.value], 2)
+        self.assertEqual(payload["stratum_relevant_operator_count"][PredicateOp.GREATER_THAN.value], 1)
+        self.assertEqual(payload["exact_support_event_operator_count"][PredicateOp.GREATER_EQUAL.value], 1)
+        self.assertNotIn(PredicateOp.GREATER_THAN.value, payload["exact_support_event_operator_count"])
+        self.assertEqual(payload["exact_support_event_operator_count"][PredicateOp.RANGE.value], 2)
+
+        amplification = _context_amplification_by_stratum(
+            (stratum,),
+            {stratum.stratum_id: stats},
+            realized_fraction=0.1,
+        )[stratum.stratum_id]["by_operator"]
+        lower = amplification[PredicateOp.GREATER_EQUAL.value]
+        self.assertEqual(lower["expected_uniform_count_at_actual_steps"], 10.0)
+        self.assertEqual(lower["observed_exact_support_event_count"], 1)
+        self.assertEqual(lower["raw_context_amplification"], 0.1)
+        native_range = amplification[PredicateOp.RANGE.value]
+        self.assertEqual(native_range["expected_uniform_count_at_actual_steps"], 5.0)
+        self.assertEqual(native_range["observed_exact_support_event_count"], 2)
+
+    def test_exact_upper_support_amplification_excludes_stricter_thresholds(self) -> None:
+        stratum = RootDataStratum(
+            "le2",
+            0,
+            "A.x",
+            "upper_tail",
+            upper=2,
+            expected_upper_count=80.0,
+            expected_range_support=40.0,
+        )
+        stats = StratumPredicateContextStats()
+        tokens = [
+            PredicateToken(PredicateOp.LESS_EQUAL, value=2),
+            PredicateToken(PredicateOp.LESS_EQUAL, value=1),
+            PredicateToken(PredicateOp.LESS_THAN, value=2),
+            PredicateToken(PredicateOp.RANGE, value=0, upper=2),
+            PredicateToken(PredicateOp.RANGE, value=0, upper=1),
+            PredicateToken(PredicateOp.RANGE, value=0, upper=3),
+        ]
+        stats.update_tokens(tokens=tokens, stratum=stratum, fanout_signatures=[""] * len(tokens))
+        payload = stats.to_json_dict()
+        self.assertEqual(payload["stratum_relevant_context_count"], 5)
+        self.assertEqual(payload["stratum_relevant_operator_count"][PredicateOp.LESS_EQUAL.value], 2)
+        self.assertEqual(payload["stratum_relevant_operator_count"][PredicateOp.LESS_THAN.value], 1)
+        self.assertEqual(payload["exact_support_event_operator_count"][PredicateOp.LESS_EQUAL.value], 1)
+        self.assertNotIn(PredicateOp.LESS_THAN.value, payload["exact_support_event_operator_count"])
+        self.assertEqual(payload["exact_support_event_operator_count"][PredicateOp.RANGE.value], 2)
+
+        amplification = _context_amplification_by_stratum(
+            (stratum,),
+            {stratum.stratum_id: stats},
+            realized_fraction=0.25,
+        )[stratum.stratum_id]["by_operator"]
+        upper = amplification[PredicateOp.LESS_EQUAL.value]
+        self.assertEqual(upper["expected_uniform_count_at_actual_steps"], 20.0)
+        self.assertEqual(upper["observed_exact_support_event_count"], 1)
+        self.assertEqual(upper["raw_context_amplification"], 0.05)
+        native_range = amplification[PredicateOp.RANGE.value]
+        self.assertEqual(native_range["expected_uniform_count_at_actual_steps"], 10.0)
+        self.assertEqual(native_range["observed_exact_support_event_count"], 2)
+
+    def test_exact_equality_support_amplification_counts_exact_literal_and_point_range(self) -> None:
+        stratum = RootDataStratum(
+            "eq2",
+            0,
+            "A.x",
+            "equality",
+            value=2,
+            expected_equality_count=60.0,
+            expected_range_support=30.0,
+        )
+        stats = StratumPredicateContextStats()
+        tokens = [
+            PredicateToken(PredicateOp.EQUAL, value=2),
+            PredicateToken(PredicateOp.EQUAL, value=3),
+            PredicateToken(PredicateOp.RANGE, value=2, upper=2),
+            PredicateToken(PredicateOp.RANGE, value=2, upper=3),
+            PredicateToken(PredicateOp.GREATER_EQUAL, value=2),
+        ]
+        stats.update_tokens(tokens=tokens, stratum=stratum, fanout_signatures=[""] * len(tokens))
+        payload = stats.to_json_dict()
+        self.assertEqual(payload["stratum_relevant_context_count"], 2)
+        self.assertEqual(payload["exact_support_event_operator_count"][PredicateOp.EQUAL.value], 1)
+        self.assertEqual(payload["exact_support_event_operator_count"][PredicateOp.RANGE.value], 1)
+
+        amplification = _context_amplification_by_stratum(
+            (stratum,),
+            {stratum.stratum_id: stats},
+            realized_fraction=0.5,
+        )[stratum.stratum_id]["by_operator"]
+        equality = amplification[PredicateOp.EQUAL.value]
+        self.assertEqual(equality["expected_uniform_count_at_actual_steps"], 30.0)
+        self.assertEqual(equality["observed_exact_support_event_count"], 1)
+        native_range = amplification[PredicateOp.RANGE.value]
+        self.assertEqual(native_range["expected_uniform_count_at_actual_steps"], 15.0)
+        self.assertEqual(native_range["observed_exact_support_event_count"], 1)
 
     def test_log_weight_summary_is_strict_json_safe_for_extreme_weights(self) -> None:
         stats = StreamingLogWeightStats()
