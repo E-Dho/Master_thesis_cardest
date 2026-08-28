@@ -1,0 +1,82 @@
+dataset:
+  type: synthetic_full_join
+  name: synthetic_importance_smoke
+
+schema:
+  join_type: acyclic
+  column_order: data_indicators_fanouts
+
+model:
+  type: predicate_resmade
+  hidden_sizes: [64, 64]
+  residual_connections: true
+  direct_io_connections: true
+  activation: relu
+  input_encoding: embed
+  output_encoding: one_hot
+  embedding_size: 16
+  residual_dropout: 0.0
+  fixed_ordering: true
+
+factorization:
+  enabled: false
+  strategy: none
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  compute_weights_in_log_space: true
+  weight_normalization: batch_sum
+  weight_clipping: null
+
+predicate_generation:
+  enabled: true
+  strategy: duet_batch_bounds
+  table_subset_sampling: neurocard_table_dropout_rooted
+  enable_native_range_tokens: true
+  normalize_predicate_probabilities: false
+  wildcard_probability: 0.2
+  equality_probability: 0.2
+  lower_bound_probability: 0.2
+  upper_bound_probability: 0.2
+  native_range_probability: 0.2
+  per_row_contexts: 1
+  seed: 0
+
+predicate_encoding:
+  mode: categorical_legacy
+
+importance_sampling:
+  enabled: true
+  mixture_probability: 0.2
+  discovery:
+    enabled: true
+    root_data_only: true
+    minimum_expected_context_support: 20
+    max_selected_strata: 4
+  allocation:
+    strategy: support_deficit
+  diagnostics:
+    enabled: true
+
+training:
+  seed: 0
+  device: cpu
+  batch_size: 64
+  learning_rate: 0.0003
+  optimizer: adam
+  epochs: 1
+  steps_per_epoch: 5
+  gradient_clip_norm: 5.0
+  checkpoint_interval_steps: 5
+  validation_interval_steps: 0
+  head_loss_reduction: mean
+  mixed_precision: false
+
+inference:
+  progressive_sampling: false
+  use_log_space_product: true
+
+logging:
+  output_directory: model/runs/resmade_importance_sampling_smoke
+  tensorboard: false

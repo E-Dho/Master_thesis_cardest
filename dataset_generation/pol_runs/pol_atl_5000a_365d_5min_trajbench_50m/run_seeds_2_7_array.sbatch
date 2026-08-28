@@ -49,7 +49,7 @@ simulation_test=trajectory_benchmark
 started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 META
 
-micromamba run -p "$THESIS_WORK/envs/pol-java" java \
+"$THESIS_WORK/envs/pol-java/bin/java" \
   -Xmx56g \
   -Djava.awt.headless=true \
   -Dlog4j2.configurationFactory=pol.log.CustomConfigurationFactory \

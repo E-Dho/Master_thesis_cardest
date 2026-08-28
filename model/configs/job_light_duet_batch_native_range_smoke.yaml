@@ -1,0 +1,93 @@
+dataset:
+  type: neurocard_full_join
+  name: job_light_duet_batch_native_range_smoke
+  prepared_directory: data/neurocard_prepared/job_light
+  sampling_mode: fixture
+  sample_batch_size: 512
+  num_workers: 0
+
+schema:
+  join_type: acyclic
+  column_order: data_indicators_fanouts
+
+model:
+  type: predicate_resmade
+  hidden_sizes: [128, 128]
+  residual_connections: true
+  direct_io_connections: false
+  activation: relu
+  input_encoding: embed
+  output_encoding: one_hot
+  embedding_size: 16
+  residual_dropout: 0.0
+  fixed_ordering: true
+
+factorization:
+  enabled: true
+  strategy: bitwise_lossless
+  word_size_bits: 11
+  minimum_domain_size: 2048
+  factor_order: most_significant_first
+  blacklist_columns: []
+  blacklist_kinds: [indicator, fanout]
+
+anpm:
+  enabled: true
+  previous_factor_embedding_size: 32
+  hidden_size: 32
+  teacher_force_during_training: true
+  mask_invalid_combinations: true
+  decode_chunk_size: 4096
+  final_activation: relu
+  materialize_original_distribution_for_debug: false
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  compute_weights_in_log_space: true
+  weight_normalization: batch_sum
+  weight_clipping: null
+
+predicate_generation:
+  enabled: true
+  strategy: duet_batch_bounds
+  enable_native_range_tokens: true
+  native_range_max_domain_size: 512
+  wildcard_probability: 0.15
+  equality_probability: 0.35
+  lower_bound_probability: 0.2
+  upper_bound_probability: 0.2
+  native_range_probability: 0.1
+  table_subset_sampling: connected
+  per_row_contexts: 1
+  seed: 0
+
+predicate_encoding:
+  mode: two_slot
+  operator_embedding_size: 8
+  value_embedding_size: 16
+  merge_hidden_size: 32
+  max_predicates_per_column: 2
+
+training:
+  seed: 0
+  device: auto
+  batch_size: 512
+  learning_rate: 0.0001
+  optimizer: adam
+  epochs: 1
+  steps_per_epoch: 20
+  gradient_clip_norm: 5.0
+  checkpoint_interval_steps: 0
+  validation_interval_steps: 10
+  head_loss_reduction: sum
+  mixed_precision: false
+
+inference:
+  progressive_sampling: false
+  factorized_decoder: anpm
+  use_log_space_product: true
+
+logging:
+  output_directory: model/runs/job_light_duet_batch_native_range_smoke
+  tensorboard: false

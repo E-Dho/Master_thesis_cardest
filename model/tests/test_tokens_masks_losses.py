@@ -45,6 +45,15 @@ class TokenMaskLossTest(unittest.TestCase):
             np.array_equal(predicate_mask(indicator, PredicateToken.equal(1)), [0.0, 1.0])
         )
 
+    def test_range_masks_treat_incomparable_sentinels_as_false(self) -> None:
+        data_column = ColumnMetadata("x", ColumnKind.DATA, ("__SQL_NULL__", 1990, 2000))
+        self.assertTrue(
+            np.array_equal(
+                predicate_mask(data_column, PredicateToken(PredicateOp.GREATER_EQUAL, 1995)),
+                np.array([0.0, 0.0, 1.0]),
+            )
+        )
+
     def test_inv_fanout_reciprocal_and_wildcard_factor(self) -> None:
         fanout = ColumnMetadata("F", ColumnKind.FANOUT, (1, 2, 10))
         distribution = np.array([0.2, 0.3, 0.5])
@@ -106,4 +115,3 @@ class TokenMaskLossTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

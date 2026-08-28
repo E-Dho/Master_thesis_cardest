@@ -89,6 +89,56 @@ def cumulative_inverse_fanout_weights(
     return weights
 
 
+def stable_combine_importance_and_inverse_weights(
+    inv_weights: np.ndarray,
+    rho: np.ndarray,
+) -> np.ndarray:
+    """Return weights proportional to rho(x) times cumulative INV weights.
+
+    Target tuple-sampling correction ``rho=p/q`` and query-measure INV
+    reweighting serve different purposes, so the final WCE head weight is their
+    product.  The normalized WCE is invariant to a common positive scale per
+    head, so this combines in log space and subtracts the per-head maximum log
+    weight before exponentiating.
+    """
+
+    inv = np.asarray(inv_weights, dtype=float)
+    rho = np.asarray(rho, dtype=float)
+    if np.any(inv <= 0.0) or not np.all(np.isfinite(inv)):
+        raise ValueError("inverse fanout weights must be finite and positive")
+    if np.any(rho <= 0.0) or not np.all(np.isfinite(rho)):
+        raise ValueError("importance weights rho must be finite and positive")
+    log_weights = np.log(inv) + np.log(rho)[:, None]
+    log_weights = log_weights - np.max(log_weights, axis=0, keepdims=True)
+    return np.exp(log_weights)
+
+
+def importance_weights_for_generated_contexts(
+    importance_weights: object,
+    generated_row_count: int,
+    generation_stats: object,
+) -> np.ndarray:
+    """Return per-context rho values aligned with accepted generated contexts."""
+
+    rho = np.asarray(importance_weights, dtype=float)
+    if rho.ndim != 1:
+        raise ValueError("importance_weights must be a one-dimensional [batch] array")
+    source_row_indices = tuple(getattr(generation_stats, "source_row_indices", ()) or ())
+    if source_row_indices:
+        indices = np.asarray(source_row_indices, dtype=int)
+        if indices.shape != (generated_row_count,):
+            raise ValueError("predicate source_row_indices must match generated context count")
+        if indices.size and (np.min(indices) < 0 or np.max(indices) >= rho.shape[0]):
+            raise ValueError("predicate source_row_indices reference rows outside importance_weights")
+        return rho[indices]
+    if rho.shape == (generated_row_count,):
+        return rho
+    if generated_row_count % rho.shape[0] == 0:
+        repeats = generated_row_count // rho.shape[0]
+        return np.repeat(rho, repeats)
+    raise ValueError("importance_weights cannot be aligned to generated predicate contexts")
+
+
 def weighted_cross_entropy(
     probabilities: np.ndarray,
     target_indices: np.ndarray,
@@ -133,4 +183,3 @@ def per_head_weighted_cross_entropy(
             )
         )
     return np.array(losses, dtype=float)
-

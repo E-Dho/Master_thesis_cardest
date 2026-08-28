@@ -1,0 +1,100 @@
+dataset:
+  type: neurocard_full_join
+  name: job_light_duet_binary_native_anpm_20k_patience_3000
+  csv_directory: datasets/job
+  prepared_directory: data/neurocard_prepared/job_light
+  sampling_mode: live
+  sampler_batch_size: 16384
+  sample_batch_size: 2048
+  sampler_seed: 0
+  neurocard_path: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard
+  num_workers: 0
+
+schema:
+  join_type: acyclic
+  column_order: data_indicators_fanouts
+
+model:
+  type: predicate_resmade
+  hidden_sizes: [512, 512, 512, 512]
+  residual_connections: true
+  direct_io_connections: true
+  direct_io_source_kinds: [data, indicator, fanout]
+  direct_io_destination_kinds: [data, indicator, fanout]
+  activation: relu
+  input_encoding: duet_binary
+  output_encoding: embed
+  output_embedding_size: 64
+  output_embeddings_tied: false
+  embedding_size: 32
+  residual_dropout: 0.0
+  fixed_ordering: true
+
+factorization:
+  enabled: true
+  strategy: bitwise_lossless
+  word_size_bits: 11
+  minimum_domain_size: 2048
+  factor_order: most_significant_first
+  blacklist_columns: []
+  blacklist_kinds: [indicator, fanout]
+
+anpm:
+  enabled: true
+  previous_factor_embedding_size: 64
+  hidden_size: 64
+  teacher_force_during_training: true
+  mask_invalid_combinations: true
+  decode_chunk_size: 4096
+  final_activation: relu
+  materialize_original_distribution_for_debug: false
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  compute_weights_in_log_space: true
+  weight_normalization: batch_sum
+  weight_clipping: null
+
+predicate_generation:
+  enabled: true
+  strategy: duet_batch_bounds
+  table_subset_sampling: neurocard_table_dropout_rooted
+  enable_native_range_tokens: true
+  normalize_predicate_probabilities: false
+  wildcard_probability: 0.2
+  equality_probability: 0.2
+  lower_bound_probability: 0.2
+  upper_bound_probability: 0.2
+  native_range_probability: 0.2
+  per_row_contexts: 1
+  seed: 0
+
+predicate_encoding:
+  mode: two_slot_binary_duet
+  multi_predicate_merge: sum
+  max_predicates_per_column: 2
+
+training:
+  seed: 0
+  device: auto
+  batch_size: 2048
+  learning_rate: 0.0001
+  optimizer: adam
+  epochs: 1
+  steps_per_epoch: 20000
+  early_stopping_patience_steps: 3000
+  early_stopping_min_delta: 0.0
+  gradient_clip_norm: 5.0
+  checkpoint_interval_steps: 500
+  validation_interval_steps: 250
+  head_loss_reduction: sum
+  mixed_precision: false
+
+inference:
+  progressive_sampling: false
+  factorized_decoder: anpm
+  use_log_space_product: true
+
+logging:
+  output_directory: model/runs/job_light_duet_binary_native_anpm_20k_patience_3000
