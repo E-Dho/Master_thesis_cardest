@@ -11,9 +11,12 @@ import numpy as np
 
 from model.src.config import resolve_device
 from model.src.data.full_join_sampler import FullJoinBatch
+from model.src.data.schema import ColumnKind
+from model.src.data.trajectory_distinct import UnsupportedTrajectoryContext
 from model.src.model.anpm import ANPMConfig
 from model.src.model.checkpoint import save_resmade_checkpoint
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
+from model.src.model.resmade import TrajectoryDistinctConfig
 from model.src.predicates.generation import (
     GeneratedTrainingContext,
     PredicateTrainingContextGenerator,
@@ -35,6 +38,8 @@ from model.src.training.losses import (
     effective_sample_size,
     importance_weights_for_generated_contexts,
     stable_combine_importance_and_inverse_weights,
+    stable_combine_importance_and_terminal_inverse_weights,
+    terminal_inverse_fanout_weights,
 )
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
 
@@ -92,6 +97,7 @@ class TrainingStepResult:
     predicate_embedding_gradient_coverage: dict[str, Any]
     predicate_context_diagnostics: dict[str, Any]
     rare_auxiliary: dict[str, Any] | None = None
+    trajectory_distinct: dict[str, Any] | None = None
 
 
 @dataclass
@@ -152,6 +158,86 @@ class _RunningAuxiliaryColumnStats:
             "auxiliary_inv_ess": float(ess),
             "auxiliary_column_loss": self.column_loss.to_json_dict(),
             "auxiliary_scaled_column_loss": self.scaled_column_loss.to_json_dict(),
+        }
+
+
+@dataclass
+class _RunningTrajectoryDistinctStats:
+    targets_generated: int = 0
+    targets_skipped: int = 0
+    target_failures: int = 0
+    multiplicities: list[int] = field(default_factory=list)
+    targets: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+    predictions: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+    weighted_mse: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+    unweighted_mse: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+    weighted_ess: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+
+    def update(self, diagnostics: dict[str, Any]) -> None:
+        if not diagnostics.get("enabled", False):
+            return
+        self.targets_generated += int(diagnostics.get("trajectory_targets_generated", 0))
+        self.targets_skipped += int(diagnostics.get("trajectory_targets_skipped", 0))
+        self.target_failures += int(diagnostics.get("trajectory_target_failures", 0))
+        self.multiplicities.extend(int(value) for value in diagnostics.get("multiplicities", ()))
+        for source, key in [
+            (self.targets, "target_mean"),
+            (self.predictions, "prediction_mean"),
+            (self.weighted_mse, "weighted_mse"),
+            (self.unweighted_mse, "unweighted_mse"),
+            (self.weighted_ess, "weighted_ess"),
+        ]:
+            value = diagnostics.get(key)
+            if value is not None:
+                source.update(float(value))
+
+    def to_json_dict(self) -> dict[str, Any]:
+        multiplicities = np.asarray(self.multiplicities, dtype=float)
+        if multiplicities.size:
+            m_stats = {
+                "min": int(np.min(multiplicities)),
+                "mean": float(np.mean(multiplicities)),
+                "median": float(np.percentile(multiplicities, 50)),
+                "p90": float(np.percentile(multiplicities, 90)),
+                "p95": float(np.percentile(multiplicities, 95)),
+                "max": int(np.max(multiplicities)),
+                "fraction_m_equals_1": float(np.mean(multiplicities == 1)),
+                "fraction_m_gt_1": float(np.mean(multiplicities > 1)),
+                "fraction_m_ge_5": float(np.mean(multiplicities >= 5)),
+                "fraction_m_ge_10": float(np.mean(multiplicities >= 10)),
+            }
+        else:
+            m_stats = {
+                "min": None,
+                "mean": None,
+                "median": None,
+                "p90": None,
+                "p95": None,
+                "max": None,
+                "fraction_m_equals_1": None,
+                "fraction_m_gt_1": None,
+                "fraction_m_ge_5": None,
+                "fraction_m_ge_10": None,
+            }
+        warning = (
+            "almost every trajectory target has m_t(Q)=1; the auxiliary head "
+            "mostly learns traj_dedup_factor≈1"
+            if m_stats["fraction_m_equals_1"] is not None
+            and float(m_stats["fraction_m_equals_1"]) > 0.95
+            else None
+        )
+        return {
+            "enabled": self.targets_generated > 0 or self.targets_skipped > 0,
+            "trajectory_targets_generated": int(self.targets_generated),
+            "trajectory_targets_skipped": int(self.targets_skipped),
+            "trajectory_target_failures": int(self.target_failures),
+            "multiplicity": m_stats,
+            "target": self.targets.to_json_dict(),
+            "prediction": self.predictions.to_json_dict(),
+            "weighted_mse": self.weighted_mse.to_json_dict(),
+            "unweighted_mse": self.unweighted_mse.to_json_dict(),
+            "weighted_ess": self.weighted_ess.to_json_dict(),
+            "warning": warning,
         }
 
 
@@ -221,6 +307,9 @@ def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> Predi
             output_head_specs=output_head_specs,
             factorization_plan=plan,
             anpm_config=ANPMConfig.from_dict(config.get("anpm", {})),
+            trajectory_distinct_config=TrajectoryDistinctConfig.from_dict(
+                config.get("trajectory_distinct", {})
+            ),
         )
     )
 
@@ -364,6 +453,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     last_gradient_coverage: dict[str, Any] = {}
     last_context_diagnostics: dict[str, Any] = {}
     last_rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
+    last_trajectory_distinct_stats: dict[str, Any] = {"enabled": False}
+    aggregate_trajectory_distinct_stats = _RunningTrajectoryDistinctStats()
     total_rare_auxiliary_rows = 0
     total_rare_auxiliary_rejected_contexts = 0
     total_rare_auxiliary_indicator_contradictions = 0
@@ -477,6 +568,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
             last_context_diagnostics = step_result.predicate_context_diagnostics
             last_rare_auxiliary_stats = step_result.rare_auxiliary or {"enabled": False}
+            last_trajectory_distinct_stats = (
+                step_result.trajectory_distinct or {"enabled": False}
+            )
+            aggregate_trajectory_distinct_stats.update(last_trajectory_distinct_stats)
             if last_rare_auxiliary_stats.get("enabled"):
                 total_rare_auxiliary_rows += int(
                     last_rare_auxiliary_stats.get("rare_rows_sampled", 0)
@@ -560,6 +655,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     "predicate_context_diagnostics": last_context_diagnostics,
                     "predicate_embedding_gradient_coverage": last_gradient_coverage,
                     "rare_auxiliary": last_rare_auxiliary_stats,
+                    "trajectory_distinct": last_trajectory_distinct_stats,
                 }
                 early_stopping_monitor_value: float | None = None
                 if validation_enabled and global_step % validation_interval == 0:
@@ -846,6 +942,15 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             ),
             "last_step": last_rare_auxiliary_stats,
         },
+        "trajectory_distinct": {
+            **aggregate_trajectory_distinct_stats.to_json_dict(),
+            "configuration": dict(config.get("trajectory_distinct", {})),
+            "tuple_measure_correction": "applied",
+            "static_fanout_correction": "applied",
+            "query_generator_G_Q_given_s_correction": "not_applied_single_anchor_ablation",
+            "target_semantics_version": "single_anchor_query_only_v1",
+            "last_step": last_trajectory_distinct_stats,
+        },
         "output_width_original": output_width_original,
         "output_width_factorized": output_width_factorized,
         "predicate_encoding_mode": getattr(
@@ -1047,7 +1152,8 @@ def _train_one_batch(
     targets = torch.tensor(target_rows, dtype=torch.long, device=device)
     head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
     optimizer.zero_grad(set_to_none=True)
-    logits = model(token_ids)
+    model_outputs = model.forward_with_auxiliary(token_ids)
+    logits = model_outputs.ar_outputs
     split_head_outputs = model.split_head_outputs(logits)
     output_embeddings = (
         [embedding.weight for embedding in model.output_embeddings]
@@ -1068,6 +1174,29 @@ def _train_one_batch(
         )
     )
     total_loss = breakdown.total_loss
+    trajectory_distinct_stats: dict[str, Any] = {"enabled": False}
+    trajectory_config = TrajectoryDistinctConfig.from_dict(
+        config.get("trajectory_distinct", {})
+    )
+    if trajectory_config.enabled and trajectory_config.loss_weight > 0.0:
+        if model_outputs.traj_dedup_factor is None:
+            raise ValueError("trajectory_distinct.enabled requires model trajectory head")
+        (
+            traj_loss,
+            trajectory_distinct_stats,
+        ) = trajectory_dedup_loss_for_batch(
+            predictions=model_outputs.traj_dedup_factor,
+            batch=batch,
+            contexts=contexts,
+            target_rows=target_rows,
+            token_rows=token_rows,
+            generation_stats=generation_stats,
+            metadata=metadata,
+            config=config,
+            sample_source=sample_source,
+            device=device,
+        )
+        total_loss = total_loss + trajectory_config.loss_weight * traj_loss
     rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
     rare_token_rows: list[list[PredicateToken]] = []
     rare_token_ids = None
@@ -1201,7 +1330,191 @@ def _train_one_batch(
         predicate_context_diagnostics=context_diagnostics,
         predicate_embedding_gradient_coverage=gradient_coverage,
         rare_auxiliary=rare_auxiliary_stats,
+        trajectory_distinct=trajectory_distinct_stats,
     )
+
+
+def trajectory_dedup_loss_for_batch(
+    *,
+    predictions: object,
+    batch: FullJoinBatch,
+    contexts: list[GeneratedTrainingContext],
+    target_rows: np.ndarray,
+    token_rows: list[list[PredicateToken]],
+    generation_stats: object,
+    metadata: object,
+    config: dict[str, Any],
+    sample_source: object | None,
+    device: str,
+) -> tuple[object, dict[str, Any]]:
+    """Compute weighted MSE for the query-only trajectory deduplication factor."""
+
+    import torch
+
+    provider = getattr(sample_source, "trajectory_multiplicity_provider", None)
+    if provider is None:
+        raise ValueError(
+            "trajectory_distinct.enabled requires sample_source.trajectory_multiplicity_provider"
+        )
+    if batch.trajectory_ids is None:
+        raise ValueError("trajectory_distinct.enabled requires FullJoinBatch.trajectory_ids")
+    source_indices = np.asarray(generation_stats.source_row_indices, dtype=int)
+    if source_indices.shape != (len(contexts),):
+        raise ValueError("trajectory source_row_indices must align with contexts")
+    anchor_ids = [batch.trajectory_ids[int(index)] for index in source_indices]
+    skipped = 0
+    failures = 0
+    eligible_indices: list[int] = []
+    multiplicities: list[int] = []
+    wildcard_group_counts: dict[str, int] = {}
+    operator_pattern_counts: dict[str, int] = {}
+    table_subset_pattern_counts: dict[str, int] = {}
+    fanout_inv_signature_counts: dict[str, int] = {}
+    trajectory_predicate_columns = set(
+        str(value)
+        for value in config.get("trajectory_distinct", {}).get("predicate_columns", ())
+    )
+    for context_index, (trajectory_id, context) in enumerate(zip(anchor_ids, contexts)):
+        try:
+            multiplicity = int(
+                provider.matching_multiplicities(
+                    anchor_trajectory_ids=[trajectory_id],
+                    contexts=[context],
+                )[0]
+            )
+        except UnsupportedTrajectoryContext:
+            skipped += 1
+            continue
+        except Exception:
+            failures += 1
+            raise
+        if multiplicity <= 0:
+            failures += 1
+            raise ValueError("trajectory multiplicity must be positive for accepted targets")
+        eligible_indices.append(context_index)
+        multiplicities.append(multiplicity)
+        wildcarded = sum(
+            1
+            for column, token in zip(metadata.columns, context.tokens)
+            if column.name in trajectory_predicate_columns
+            and token.op == PredicateOp.WILDCARD
+        )
+        wildcard_key = str(wildcarded)
+        wildcard_group_counts[wildcard_key] = int(wildcard_group_counts.get(wildcard_key, 0)) + 1
+        operator_pattern = ",".join(
+            f"{column.name}:{token.op.value}"
+            for column, token in zip(metadata.columns, context.tokens)
+            if column.name in trajectory_predicate_columns
+            and token.op != PredicateOp.WILDCARD
+        ) or "all_wildcard"
+        operator_pattern_counts[operator_pattern] = int(
+            operator_pattern_counts.get(operator_pattern, 0)
+        ) + 1
+        table_pattern = ",".join(sorted(context.included_tables)) or "none"
+        table_subset_pattern_counts[table_pattern] = int(
+            table_subset_pattern_counts.get(table_pattern, 0)
+        ) + 1
+        fanout_pattern = ",".join(
+            column.name
+            for column, token in zip(metadata.columns, context.tokens)
+            if column.kind == ColumnKind.FANOUT and token.op == PredicateOp.INV_FANOUT
+        ) or "none"
+        fanout_inv_signature_counts[fanout_pattern] = int(
+            fanout_inv_signature_counts.get(fanout_pattern, 0)
+        ) + 1
+    if not eligible_indices:
+        raise ValueError("trajectory_distinct produced zero eligible targets")
+    indices = np.asarray(eligible_indices, dtype=int)
+    targets = 1.0 / np.asarray(multiplicities, dtype=float)
+    terminal_inv = terminal_inverse_fanout_weights(
+        target_rows[indices],
+        [token_rows[index] for index in indices],
+        metadata,
+        compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
+    )
+    inv_only_for_diagnostics = terminal_inv.copy()
+    rho = None
+    weights = terminal_inv
+    importance_stats: dict[str, Any] = {"enabled": False}
+    if batch.importance_weights is not None:
+        all_rho = importance_weights_for_generated_contexts(
+            batch.importance_weights,
+            target_rows.shape[0],
+            generation_stats,
+        )
+        rho = all_rho[indices]
+        weights = stable_combine_importance_and_terminal_inverse_weights(
+            terminal_inv,
+            rho,
+        )
+        importance_stats = {
+            "enabled": True,
+            "rho_min": float(np.min(rho)),
+            "rho_max": float(np.max(rho)),
+            "rho_mean": float(np.mean(rho)),
+            "rho_ess": effective_sample_size(rho),
+        }
+    if np.any(weights <= 0.0) or not np.all(np.isfinite(weights)):
+        raise ValueError("trajectory weights must be finite and positive")
+    pred = predictions[torch.tensor(indices, dtype=torch.long, device=device), 0]
+    target_tensor = torch.tensor(targets, dtype=pred.dtype, device=device)
+    weight_tensor = torch.tensor(weights, dtype=pred.dtype, device=device)
+    squared = (pred - target_tensor) ** 2
+    loss = torch.sum(weight_tensor * squared) / (torch.sum(weight_tensor) + 1.0e-12)
+    detached_pred = pred.detach().cpu().numpy().astype(float)
+    unweighted_mse = float(np.mean((detached_pred - targets) ** 2))
+    weighted_mse = float(loss.detach().cpu())
+    stats = {
+        "enabled": True,
+        "trajectory_targets_generated": int(len(eligible_indices)),
+        "trajectory_targets_skipped": int(skipped),
+        "trajectory_target_failures": int(failures),
+        "multiplicities": [int(value) for value in multiplicities],
+        "m_min": int(np.min(multiplicities)),
+        "m_mean": float(np.mean(multiplicities)),
+        "m_median": float(np.percentile(multiplicities, 50)),
+        "m_p90": float(np.percentile(multiplicities, 90)),
+        "m_p95": float(np.percentile(multiplicities, 95)),
+        "m_max": int(np.max(multiplicities)),
+        "fraction_m_equals_1": float(np.mean(np.asarray(multiplicities) == 1)),
+        "fraction_m_gt_1": float(np.mean(np.asarray(multiplicities) > 1)),
+        "fraction_m_ge_5": float(np.mean(np.asarray(multiplicities) >= 5)),
+        "fraction_m_ge_10": float(np.mean(np.asarray(multiplicities) >= 10)),
+        "target_mean": float(np.mean(targets)),
+        "target_median": float(np.percentile(targets, 50)),
+        "prediction_mean": float(np.mean(detached_pred)),
+        "prediction_min": float(np.min(detached_pred)),
+        "prediction_max": float(np.max(detached_pred)),
+        "weighted_mse": weighted_mse,
+        "unweighted_mse": unweighted_mse,
+        "weighted_ess": effective_sample_size(weights),
+        "traj_dedup_importance_weight_min": float(np.min(weights)),
+        "traj_dedup_importance_weight_max": float(np.max(weights)),
+        "traj_dedup_importance_weight_mean": float(np.mean(weights)),
+        "traj_dedup_weight_ess": effective_sample_size(weights),
+        "traj_dedup_inv_only_ess": effective_sample_size(inv_only_for_diagnostics),
+        "tuple_measure_correction": "applied" if rho is not None else "not_applicable",
+        "static_fanout_correction": "applied",
+        "query_generator_G_Q_given_s_correction": "not_applied_single_anchor_ablation",
+        "importance": importance_stats,
+        "grouped_multiplicity_context_counts": {
+            "number_of_wildcarded_segment_predicates": wildcard_group_counts,
+            "predicate_operator_pattern": dict(
+                sorted(
+                    operator_pattern_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:128]
+            ),
+            "table_subset_pattern": table_subset_pattern_counts,
+            "fanout_inv_signature": fanout_inv_signature_counts,
+        },
+    }
+    if stats["fraction_m_equals_1"] > 0.95:
+        stats["warning"] = (
+            "almost every trajectory target has m_t(Q)=1; "
+            "the auxiliary head mostly learns traj_dedup_factor≈1"
+        )
+    return loss, stats
 
 
 def auxiliary_eligibility_mask(

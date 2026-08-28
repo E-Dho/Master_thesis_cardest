@@ -47,7 +47,16 @@ def sample_source_from_config(
             source = NeuroCardFullJoinSampleSource(
                 Path(dataset["prepared_directory"]),
                 sampling_mode=sampling_mode,
+                trajectory_ids_path=dataset.get("trajectory_ids_path"),
+                trajectory_index_path=dataset.get("trajectory_index_path"),
             )
+    elif dataset_type == "pol_trajectory_full_join":
+        source = NeuroCardFullJoinSampleSource(
+            Path(dataset["prepared_directory"]),
+            sampling_mode=str(dataset.get("sampling_mode", "fixture")),
+            trajectory_ids_path=dataset.get("trajectory_ids_path"),
+            trajectory_index_path=dataset.get("trajectory_index_path"),
+        )
     else:
         raise ValueError(f"unsupported dataset.type {dataset_type!r}")
     factorization = FactorizationConfig.from_dict(config.get("factorization", {}))
@@ -87,6 +96,8 @@ class FactorizedMetadataSampleSource:
             encoded_values=batch.encoded_values,
             column_metadata=self._metadata.columns,
             raw_values=batch.raw_values,
+            trajectory_ids=batch.trajectory_ids,
+            segment_ids=batch.segment_ids,
             fresh_rows_drawn=batch.fresh_rows_drawn,
             fixture_rows_reused=batch.fixture_rows_reused,
             importance_weights=batch.importance_weights,
@@ -100,6 +111,10 @@ class FactorizedMetadataSampleSource:
     @property
     def distinct_original_rows_seen_estimate(self) -> object:
         return getattr(self.base_source, "distinct_original_rows_seen_estimate", None)
+
+    @property
+    def trajectory_multiplicity_provider(self) -> object:
+        return getattr(self.base_source, "trajectory_multiplicity_provider")
 
     def discard_buffer(self) -> None:
         discard = getattr(self.base_source, "discard_buffer", None)

@@ -113,6 +113,74 @@ def stable_combine_importance_and_inverse_weights(
     return np.exp(log_weights)
 
 
+def terminal_inverse_fanout_weights(
+    encoded_rows: np.ndarray,
+    tokens: list[list[PredicateToken]],
+    metadata: ModelMetadata,
+    *,
+    compute_in_log_space: bool = True,
+) -> np.ndarray:
+    """Return product over every active INV_FANOUT token in each row.
+
+    Ordinary AR heads use only preceding inverse fanouts. The trajectory
+    correction head is logically after all existing columns, so every active
+    fanout correction contributes to its target measure.
+    """
+
+    encoded_rows = np.asarray(encoded_rows, dtype=int)
+    batch_size, num_columns = encoded_rows.shape
+    if num_columns != len(metadata.columns):
+        raise ValueError("encoded row width does not match metadata")
+    if len(tokens) != batch_size or any(len(row) != num_columns for row in tokens):
+        raise ValueError("tokens must have shape [batch_size, number_of_columns]")
+    if compute_in_log_space:
+        log_weights = np.zeros(batch_size, dtype=float)
+        for column_index, column in enumerate(metadata.columns):
+            if column.kind != ColumnKind.FANOUT:
+                continue
+            for row_index, token_row in enumerate(tokens):
+                if token_row[column_index].op != PredicateOp.INV_FANOUT:
+                    continue
+                encoded_value = encoded_rows[row_index, column_index]
+                fanout_value = float(column.domain[encoded_value])
+                if fanout_value <= 0:
+                    raise ValueError("fanout values used in inverse weights must be positive")
+                log_weights[row_index] -= np.log(fanout_value)
+        return np.exp(log_weights)
+    weights = np.ones(batch_size, dtype=float)
+    for column_index, column in enumerate(metadata.columns):
+        if column.kind != ColumnKind.FANOUT:
+            continue
+        for row_index, token_row in enumerate(tokens):
+            if token_row[column_index].op != PredicateOp.INV_FANOUT:
+                continue
+            encoded_value = encoded_rows[row_index, column_index]
+            fanout_value = float(column.domain[encoded_value])
+            if fanout_value <= 0:
+                raise ValueError("fanout values used in inverse weights must be positive")
+            weights[row_index] *= 1.0 / fanout_value
+    return weights
+
+
+def stable_combine_importance_and_terminal_inverse_weights(
+    inv_weights: np.ndarray,
+    rho: np.ndarray,
+) -> np.ndarray:
+    """Return weights proportional to rho(x) times terminal INV product."""
+
+    inv = np.asarray(inv_weights, dtype=float)
+    rho = np.asarray(rho, dtype=float)
+    if inv.ndim != 1:
+        raise ValueError("terminal inverse weights must be one-dimensional")
+    if np.any(inv <= 0.0) or not np.all(np.isfinite(inv)):
+        raise ValueError("terminal inverse fanout weights must be finite and positive")
+    if np.any(rho <= 0.0) or not np.all(np.isfinite(rho)):
+        raise ValueError("importance weights rho must be finite and positive")
+    log_weights = np.log(inv) + np.log(rho)
+    log_weights = log_weights - float(np.max(log_weights))
+    return np.exp(log_weights)
+
+
 def importance_weights_for_generated_contexts(
     importance_weights: object,
     generated_row_count: int,

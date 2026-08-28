@@ -1,0 +1,341 @@
+from __future__ import annotations
+
+import importlib.util
+import tempfile
+import unittest
+
+import numpy as np
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+if HAS_TORCH:
+    import torch
+
+from model.src.data.full_join_sampler import FullJoinBatch
+from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
+from model.src.data.trajectory_distinct import (
+    TrajectorySegmentIndex,
+    UnsupportedTrajectoryContext,
+)
+from model.src.predicates.generation import GeneratedTrainingContext
+from model.src.predicates.operators import PredicateOp, PredicateToken
+from model.src.predicates.vocabulary import PredicateVocabularies
+from model.src.training.losses import (
+    effective_sample_size,
+    stable_combine_importance_and_terminal_inverse_weights,
+    terminal_inverse_fanout_weights,
+)
+
+if HAS_TORCH:
+    from model.src.inference.estimator import OnePassEstimator
+    from model.src.inference.torch_estimator import TorchDistributionModel
+    from model.src.model.checkpoint import load_resmade_checkpoint, save_resmade_checkpoint
+    from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
+    from model.src.model.resmade import TrajectoryDistinctConfig
+    from model.src.training.resmade_trainer import trajectory_dedup_loss_for_batch
+
+
+def _trajectory_metadata() -> ModelMetadata:
+    columns = (
+        ColumnMetadata("segment.x", ColumnKind.DATA, (0, 1), table="segments"),
+        ColumnMetadata("segment.y", ColumnKind.DATA, (0, 1), table="segments"),
+        ColumnMetadata("trip.kind", ColumnKind.DATA, ("train", "test"), table="trips"),
+        ColumnMetadata("I_trips", ColumnKind.INDICATOR, (0, 1), table="trips"),
+        ColumnMetadata("I_segments", ColumnKind.INDICATOR, (0, 1), table="segments"),
+        ColumnMetadata(
+            "F_trips_to_segments",
+            ColumnKind.FANOUT,
+            (1, 2, 10),
+            table="segments",
+            fanout_source="trips->segments",
+        ),
+    )
+    return ModelMetadata(
+        columns=columns,
+        full_join_cardinality=6,
+        join_root="trips",
+        join_tables=("trips", "segments"),
+        join_edges=(("trips", "segments"),),
+    )
+
+
+def _trajectory_rows(metadata: ModelMetadata) -> tuple[np.ndarray, tuple[str, ...]]:
+    decoded = (
+        (1, 0, "train", 1, 1, 2),  # A matches Q
+        (0, 0, "train", 1, 1, 2),  # A does not match Q
+        (1, 0, "train", 1, 1, 10),  # B matches Q
+        (1, 1, "train", 1, 1, 10),  # B matches Q
+        (0, 1, "train", 1, 1, 10),  # B does not match Q
+        (0, 0, "test", 1, 1, 1),  # C does not match Q
+    )
+    trajectory_ids = ("A", "A", "B", "B", "B", "C")
+    encoded = np.zeros((len(decoded), len(metadata.columns)), dtype=np.int64)
+    for row_index, row in enumerate(decoded):
+        for column_index, value in enumerate(row):
+            encoded[row_index, column_index] = metadata.columns[column_index].encode_value(value)
+    return encoded, trajectory_ids
+
+
+def _query_context() -> GeneratedTrainingContext:
+    tokens = (
+        PredicateToken.equal(1),
+        PredicateToken.wildcard(),
+        PredicateToken.wildcard(),
+        PredicateToken.equal(1),
+        PredicateToken.equal(1),
+        PredicateToken.wildcard(),
+    )
+    return GeneratedTrainingContext(
+        tokens=tokens,
+        included_tables=frozenset({"trips", "segments"}),
+        inverse_fanout_columns=frozenset(),
+        ordinary_predicates={"segment.x": tokens[0]},
+    )
+
+
+class _TrajectorySource:
+    def __init__(
+        self,
+        metadata: ModelMetadata,
+        rows: np.ndarray,
+        trajectory_ids: tuple[str, ...],
+        provider: TrajectorySegmentIndex,
+    ) -> None:
+        self.metadata = metadata
+        self.rows = rows
+        self.trajectory_ids = trajectory_ids
+        self.trajectory_multiplicity_provider = provider
+
+
+class TrajectoryDistinctTest(unittest.TestCase):
+    def test_synthetic_identity_m_times_expected_inverse_m_equals_distinct(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            predicate_columns=("segment.x",),
+            trajectory_key="trip_id",
+        )
+        base_context = _query_context()
+        tokens = list(base_context.tokens)
+        tokens[-1] = PredicateToken.inv_fanout()
+        context = GeneratedTrainingContext(
+            tokens=tuple(tokens),
+            included_tables=base_context.included_tables,
+            inverse_fanout_columns=frozenset({"F_trips_to_segments"}),
+            ordinary_predicates=base_context.ordinary_predicates,
+        )
+        multiplicities = provider.matching_multiplicities(
+            anchor_trajectory_ids=("A", "B", "B"),
+            contexts=(context, context, context),
+        )
+        self.assertEqual(tuple(multiplicities), (1, 2, 2))
+        inverse_mean = float(np.mean(1.0 / multiplicities))
+        self.assertAlmostEqual(3.0 * inverse_mean, 2.0)
+
+    def test_provider_targets_and_unsupported_predicates(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            predicate_columns=("segment.x",),
+            trajectory_key="trip_id",
+        )
+        context = _query_context()
+        targets = provider.local_targets(
+            anchor_trajectory_ids=("A", "B"),
+            contexts=(context, context),
+        )
+        self.assertTrue(np.allclose(targets, [1.0, 0.5]))
+        unsupported = GeneratedTrainingContext(
+            tokens=(
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+                PredicateToken.equal("train"),
+                PredicateToken.equal(1),
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+            ),
+            included_tables=frozenset({"trips", "segments"}),
+            inverse_fanout_columns=frozenset(),
+            ordinary_predicates={"trip.kind": PredicateToken.equal("train")},
+        )
+        with self.assertRaises(UnsupportedTrajectoryContext):
+            provider.matching_multiplicities(
+                anchor_trajectory_ids=("A",),
+                contexts=(unsupported,),
+            )
+
+    @unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
+    def test_terminal_masks_can_use_final_fanout_without_earlier_leakage(self) -> None:
+        metadata = _trajectory_metadata()
+        vocab = PredicateVocabularies.from_metadata(metadata)
+        model = PredicateResMADE(
+            PredicateResMADEConfig(
+                predicate_input_bins=vocab.input_bins,
+                data_output_bins=metadata.data_output_bins,
+                column_kinds=tuple(column.kind.value for column in metadata.columns),
+                hidden_sizes=(24, 24),
+                direct_io_connections=True,
+                direct_io_source_kinds=("data", "indicator", "fanout"),
+                direct_io_destination_kinds=("data", "indicator", "fanout"),
+                embedding_size=4,
+                trajectory_distinct_config=TrajectoryDistinctConfig(enabled=True),
+            )
+        )
+        assert model.traj_dedup_direct_io_layer is not None
+        assert model.direct_io_layer is not None
+        starts = np.cumsum((0, *model.column_input_widths[:-1]))
+        final_fanout_index = len(metadata.columns) - 1
+        fanout_start = int(starts[final_fanout_index])
+        fanout_stop = fanout_start + model.column_input_widths[final_fanout_index]
+        self.assertGreater(
+            float(model.traj_dedup_direct_io_layer.mask[:, fanout_start:fanout_stop].sum()),
+            0.0,
+        )
+        first_out_start, first_out_stop = model.output_slices[0]
+        self.assertEqual(
+            float(model.direct_io_layer.mask[first_out_start:first_out_stop, fanout_start:fanout_stop].sum()),
+            0.0,
+        )
+        self.assertEqual(model.traj_dedup_head.mask.shape[0], 1)
+        self.assertEqual(len(model.config.predicate_input_bins), len(metadata.columns))
+
+    def test_terminal_inverse_weights_include_all_active_fanouts(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, _ = _trajectory_rows(metadata)
+        contexts = [
+            [
+                PredicateToken.wildcard(),
+                PredicateToken.wildcard(),
+                PredicateToken.wildcard(),
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+                PredicateToken.inv_fanout(),
+            ],
+            [
+                PredicateToken.wildcard(),
+                PredicateToken.wildcard(),
+                PredicateToken.wildcard(),
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+                PredicateToken.inv_fanout(),
+            ],
+        ]
+        selected_rows = rows[[0, 2]]
+        inv = terminal_inverse_fanout_weights(selected_rows, contexts, metadata)
+        self.assertTrue(np.allclose(inv, [0.5, 0.1]))
+        combined = stable_combine_importance_and_terminal_inverse_weights(
+            inv,
+            np.asarray([2.0, 5.0]),
+        )
+        reference = np.asarray([1.0, 0.5])
+        self.assertTrue(np.allclose(combined, reference))
+
+
+@unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
+class TrajectoryDistinctTorchTest(unittest.TestCase):
+
+    def test_weighted_mse_uses_independent_terminal_denominator(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            predicate_columns=("segment.x",),
+            trajectory_key="trip_id",
+        )
+        source = _TrajectorySource(metadata, rows, trajectory_ids, provider)
+        batch = FullJoinBatch(
+            encoded_values=rows[[0, 2]],
+            column_metadata=metadata.columns,
+            trajectory_ids=("A", "B"),
+            importance_weights=np.asarray([2.0, 5.0]),
+        )
+        base_context = _query_context()
+        tokens = list(base_context.tokens)
+        tokens[-1] = PredicateToken.inv_fanout()
+        context = GeneratedTrainingContext(
+            tokens=tuple(tokens),
+            included_tables=base_context.included_tables,
+            inverse_fanout_columns=frozenset({"F_trips_to_segments"}),
+            ordinary_predicates=base_context.ordinary_predicates,
+        )
+        predictions = torch.tensor([[0.25], [0.25]], dtype=torch.float32, requires_grad=True)
+        loss, stats = trajectory_dedup_loss_for_batch(
+            predictions=predictions,
+            batch=batch,
+            contexts=[context, context],
+            target_rows=batch.encoded_values,
+            token_rows=[list(context.tokens), list(context.tokens)],
+            generation_stats=type("Stats", (), {"source_row_indices": (0, 1)})(),
+            metadata=metadata,
+            config={"fanout": {"compute_weights_in_log_space": True}},
+            sample_source=source,
+            device="cpu",
+        )
+        expected = ((0.25 - 1.0) ** 2 + (0.25 - 0.5) ** 2 * 0.5) / 1.5
+        self.assertAlmostEqual(float(loss.detach()), expected, places=6)
+        self.assertAlmostEqual(stats["weighted_ess"], effective_sample_size(np.asarray([1.0, 0.5])))
+        loss.backward()
+        self.assertIsNotNone(predictions.grad)
+
+    def test_one_forward_distinct_inference_and_checkpoint_guard(self) -> None:
+        metadata = _trajectory_metadata()
+        vocab = PredicateVocabularies.from_metadata(metadata)
+        config = PredicateResMADEConfig(
+            predicate_input_bins=vocab.input_bins,
+            data_output_bins=metadata.data_output_bins,
+            column_kinds=tuple(column.kind.value for column in metadata.columns),
+            hidden_sizes=(16, 16),
+            direct_io_connections=True,
+            embedding_size=4,
+            trajectory_distinct_config=TrajectoryDistinctConfig(enabled=True),
+        )
+        model = PredicateResMADE(config)
+        wrapped = TorchDistributionModel(model, metadata, vocab, device="cpu")
+        estimator = OnePassEstimator(wrapped, metadata)
+        result = estimator.estimate_distinct_trajectories(list(_query_context().tokens))
+        self.assertEqual(result.model_forward_calls, 1)
+        self.assertGreater(result.matching_segment_estimate, 0.0)
+        self.assertGreater(result.traj_dedup_factor, 0.0)
+        self.assertLess(result.traj_dedup_factor, 1.0)
+        self.assertLessEqual(
+            result.distinct_trajectory_estimate,
+            result.matching_segment_estimate,
+        )
+
+        disabled = PredicateResMADE(
+            PredicateResMADEConfig(
+                predicate_input_bins=vocab.input_bins,
+                data_output_bins=metadata.data_output_bins,
+                hidden_sizes=(16, 16),
+                embedding_size=4,
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/checkpoint.pt"
+            save_resmade_checkpoint(
+                path,
+                disabled,
+                None,
+                epoch=0,
+                step=0,
+                metadata=metadata,
+                predicate_vocabularies=vocab,
+                config={"trajectory_distinct": {"enabled": False}},
+            )
+            loaded, _ = load_resmade_checkpoint(path)
+        wrapped_disabled = TorchDistributionModel(loaded, metadata, vocab, device="cpu")
+        with self.assertRaises(ValueError):
+            OnePassEstimator(wrapped_disabled, metadata).estimate_distinct_trajectories(
+                list(_query_context().tokens)
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

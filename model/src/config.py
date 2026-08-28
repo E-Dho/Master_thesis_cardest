@@ -81,6 +81,20 @@ def validate_config(config: dict[str, Any]) -> None:
     factorization_config.validate()
     anpm_config = ANPMConfig.from_dict(config.get("anpm", {}))
     anpm_config.validate()
+    trajectory_distinct = config.get("trajectory_distinct", {})
+    trajectory_distinct_enabled = bool(trajectory_distinct.get("enabled", False))
+    if str(trajectory_distinct.get("loss", "mse")) != "mse":
+        raise ValueError("trajectory_distinct.loss currently supports only mse")
+    if str(trajectory_distinct.get("output_activation", "sigmoid")) != "sigmoid":
+        raise ValueError(
+            "trajectory_distinct.output_activation currently supports only sigmoid"
+        )
+    if float(trajectory_distinct.get("loss_weight", 1.0) or 0.0) < 0.0:
+        raise ValueError("trajectory_distinct.loss_weight must be nonnegative")
+    if int(trajectory_distinct.get("anchor_samples_per_query", 1) or 0) != 1:
+        raise ValueError(
+            "trajectory_distinct.anchor_samples_per_query currently supports only 1"
+        )
     inference = config.get("inference", {})
     if inference.get("progressive_sampling", False):
         raise ValueError("this milestone requires inference.progressive_sampling=false")
@@ -99,6 +113,20 @@ def validate_config(config: dict[str, Any]) -> None:
         )
         if sampler_batch_size <= 0:
             raise ValueError("dataset.sampler_batch_size must be positive in live mode")
+    if trajectory_distinct_enabled:
+        if not str(trajectory_distinct.get("trajectory_key", "")).strip():
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires trajectory_distinct.trajectory_key"
+            )
+        if str(trajectory_distinct.get("predicate_scope", "")) != "segment_query":
+            raise ValueError(
+                "trajectory_distinct.predicate_scope must be segment_query"
+            )
+        predicate_columns = trajectory_distinct.get("predicate_columns", ())
+        if not predicate_columns:
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires predicate_columns"
+            )
     if model.get("type") == "predicate_resmade" and not model.get("fixed_ordering", True):
         raise ValueError("predicate_resmade requires model.fixed_ordering=true")
     output_encoding = str(model.get("output_encoding", "one_hot"))

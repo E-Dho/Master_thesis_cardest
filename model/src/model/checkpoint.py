@@ -7,6 +7,7 @@ from model.src.data.schema import FactorizationPlan, ModelMetadata
 from model.src.model.factorization import factorization_plan_hash
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.predicates.vocabulary import PredicateVocabularies
+from model.src.data.trajectory_distinct import TRAJECTORY_TARGET_SEMANTICS_VERSION
 
 
 def save_resmade_checkpoint(
@@ -41,6 +42,12 @@ def save_resmade_checkpoint(
         "factorization_hash": factorization_plan_hash(metadata.factorization_plan),
         "anpm": dict(config.get("anpm", {})),
         "preparation_manifest_id": preparation_manifest_id,
+        "trajectory_distinct": dict(config.get("trajectory_distinct", {})),
+        "trajectory_target_semantics_version": (
+            TRAJECTORY_TARGET_SEMANTICS_VERSION
+            if bool(config.get("trajectory_distinct", {}).get("enabled", False))
+            else None
+        ),
     }
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
@@ -87,4 +94,3 @@ def load_resmade_checkpoint(
     model = PredicateResMADE(resmade_config)
     model.load_state_dict(payload["model_state_dict"])
     return model, payload
-

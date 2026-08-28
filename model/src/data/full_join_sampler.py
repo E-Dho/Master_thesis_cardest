@@ -11,6 +11,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
+from model.src.data.trajectory_distinct import TrajectorySegmentIndex
 
 OUTER_MISSING = "__OUTER_MISSING__"
 
@@ -31,6 +32,8 @@ class FullJoinBatch:
     encoded_values: np.ndarray
     column_metadata: tuple[ColumnMetadata, ...]
     raw_values: tuple[tuple[object, ...], ...] | None = None
+    trajectory_ids: tuple[object, ...] | None = None
+    segment_ids: tuple[object, ...] | None = None
     fresh_rows_drawn: int = 0
     fixture_rows_reused: int = 0
     importance_weights: np.ndarray | None = None
@@ -112,7 +115,14 @@ class NeuroCardFullJoinSamplerAdapter:
 class NeuroCardFullJoinSampleSource:
     """Manifest-backed fixture source for deterministic smoke-test sampling."""
 
-    def __init__(self, prepared_directory: str | Path, *, sampling_mode: str = "fixture") -> None:
+    def __init__(
+        self,
+        prepared_directory: str | Path,
+        *,
+        sampling_mode: str = "fixture",
+        trajectory_ids_path: str | Path | None = None,
+        trajectory_index_path: str | Path | None = None,
+    ) -> None:
         self.prepared_directory = Path(prepared_directory)
         self.sampling_mode = sampling_mode
         manifest_path = self.prepared_directory / "manifest.json"
@@ -129,6 +139,22 @@ class NeuroCardFullJoinSampleSource:
         self.sample_batches_generated = 0
         self.fixture_rows_reused = 0
         self.fresh_rows_drawn = 0
+        self._sample_trajectory_ids: np.ndarray | None = None
+        if trajectory_ids_path is not None:
+            self._sample_trajectory_ids = np.load(Path(trajectory_ids_path), allow_pickle=True)
+        elif (self.prepared_directory / "sample_trajectory_ids.npy").exists():
+            self._sample_trajectory_ids = np.load(
+                self.prepared_directory / "sample_trajectory_ids.npy",
+                allow_pickle=True,
+            )
+        if trajectory_index_path is None:
+            candidate = self.prepared_directory / "trajectory_segment_index.npz"
+            trajectory_index_path = candidate if candidate.exists() else None
+        self._trajectory_multiplicity_provider = (
+            None
+            if trajectory_index_path is None
+            else TrajectorySegmentIndex.from_npz(trajectory_index_path)
+        )
 
     @property
     def join_cardinality(self) -> int:
@@ -152,11 +178,15 @@ class NeuroCardFullJoinSampleSource:
             rows = np.load(sample_path)
             rng = np.random.default_rng(seed)
             indices = rng.integers(0, len(rows), size=batch_size)
+            trajectory_ids = None
+            if self._sample_trajectory_ids is not None:
+                trajectory_ids = tuple(self._sample_trajectory_ids[indices].tolist())
             self.sample_batches_generated += 1
             self.fixture_rows_reused += int(batch_size)
             return FullJoinBatch(
                 rows[indices],
                 self.metadata.columns,
+                trajectory_ids=trajectory_ids,
                 fresh_rows_drawn=0,
                 fixture_rows_reused=batch_size,
             )
@@ -165,6 +195,12 @@ class NeuroCardFullJoinSampleSource:
             "FactorizedSampler/FactorizedSamplerIterDataset here after its Rust "
             "join-count/index artifacts exist in the prepared directory."
         )
+
+    @property
+    def trajectory_multiplicity_provider(self) -> object:
+        if self._trajectory_multiplicity_provider is None:
+            raise AttributeError("no trajectory_segment_index.npz is configured")
+        return self._trajectory_multiplicity_provider
 
 
 class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):

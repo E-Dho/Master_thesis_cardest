@@ -198,6 +198,73 @@ two-sided ranges now use native interval mass from one conditioned
 original-column state rather than subtracting two independent full-query
 cardinality estimates.
 
+## Distinct Trajectory Cardinality
+
+The POL trajectory branch adds an optional output-only terminal head named
+`traj_dedup_factor`. It estimates a query-local correction for converting the
+existing matching-segment estimate into a distinct-trajectory estimate:
+
+```text
+D_Q = sum_{s satisfies Q} 1 / m_traj(s)(Q)
+D_Q = M_Q * E[1 / m_traj(s)(Q) | s satisfies Q]
+```
+
+Here `M_Q` is the existing segment-level cardinality estimate after the normal
+full-join and static fanout corrections, and `m_t(Q)` is the number of segments
+inside trajectory `t` that satisfy the same generated query context. The model
+therefore returns:
+
+```text
+D_hat_Q = M_hat_Q * traj_dedup_factor
+```
+
+`traj_dedup_factor` is not an ordinary physical column. It has no predicate
+vocabulary, no Duet input token, no categorical/factorized output domain, no
+ANPM, and no cross entropy. It is a scalar sigmoid head placed after all data,
+indicator, and fanout columns in the autoregressive order:
+
+```text
+data -> indicator -> fanout -> traj_dedup_factor
+```
+
+The terminal degree allows it to condition on every existing query token,
+including the final fanout token, while earlier AR heads keep their original
+strict masks.
+
+### Query-Local Trajectory Multiplicity
+
+Training uses the current row-first Duet context exactly as generated for the
+ordinary AR loss:
+
+```text
+sample one FOJ tuple
+generate one row-satisfied query context Q
+identify the anchor trajectory id, e.g. POL trip_id
+compute local m_t(Q) for that trajectory only
+train target y = 1 / m_t(Q)
+```
+
+The reusable `TrajectorySegmentIndex` groups encoded segment rows by trajectory
+id and evaluates the same `GeneratedTrainingContext` semantics used by ordinary
+training. `INV_FANOUT` tokens are correction potentials, not segment-selection
+predicates. Unsupported non-wildcard predicates are skipped/fail closed instead
+of being ignored.
+
+The terminal trajectory loss uses the main-batch tuple importance correction
+when present and multiplies every active `INV_FANOUT` reciprocal because the
+head sits after all fanout columns:
+
+```text
+w_traj = rho * product_{r: T_r = INV_FANOUT} 1 / f_r
+```
+
+The current ablation is intentionally single-anchor and query-only. It does not
+create labels from global `COUNT(DISTINCT trajectory_id)`, does not enumerate
+all matching segments as training examples, and does not correct the additional
+row-first query-generator factor `G(Q | s)`. Exact distinct counts are used for
+evaluation only. Future ablations can compare multiple anchors per query,
+Q-first matching-segment sampling, or an explicit correction for `G(Q | s)`.
+
 ## Optimized ANPM Inference
 
 The first faithful DistJoin-style ANPM implementation matched the equations but

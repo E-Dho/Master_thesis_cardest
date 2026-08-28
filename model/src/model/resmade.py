@@ -14,6 +14,63 @@ from torch import nn
 
 
 @dataclass(frozen=True)
+class TrajectoryDistinctConfig:
+    """Optional output-only correction head for distinct trajectory counts."""
+
+    enabled: bool = False
+    head_name: str = "traj_dedup_factor"
+    loss: str = "mse"
+    loss_weight: float = 1.0
+    output_activation: str = "sigmoid"
+    anchor_samples_per_query: int = 1
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object] | None) -> "TrajectoryDistinctConfig":
+        raw = dict(data or {})
+        return cls(
+            enabled=bool(raw.get("enabled", False)),
+            head_name=str(raw.get("head_name", "traj_dedup_factor")),
+            loss=str(raw.get("loss", "mse")),
+            loss_weight=float(raw.get("loss_weight", 1.0)),
+            output_activation=str(raw.get("output_activation", "sigmoid")),
+            anchor_samples_per_query=int(raw.get("anchor_samples_per_query", 1)),
+        )
+
+    def validate(self) -> None:
+        if self.loss != "mse":
+            raise ValueError("trajectory_distinct.loss currently supports only mse")
+        if self.output_activation != "sigmoid":
+            raise ValueError(
+                "trajectory_distinct.output_activation currently supports only sigmoid"
+            )
+        if self.loss_weight < 0.0:
+            raise ValueError("trajectory_distinct.loss_weight must be nonnegative")
+        if self.anchor_samples_per_query != 1:
+            raise ValueError(
+                "trajectory_distinct.anchor_samples_per_query currently supports only 1"
+            )
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "head_name": self.head_name,
+            "loss": self.loss,
+            "loss_weight": self.loss_weight,
+            "output_activation": self.output_activation,
+            "anchor_samples_per_query": self.anchor_samples_per_query,
+        }
+
+
+@dataclass(frozen=True)
+class PredicateResMADEOutputs:
+    """One backbone pass worth of ordinary AR outputs and optional trajectory factor."""
+
+    ar_outputs: torch.Tensor
+    traj_dedup_factor: torch.Tensor | None
+    traj_dedup_logit: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
 class PredicateResMADEConfig:
     """Configuration for grouped predicate-input ResMADE."""
 
@@ -50,6 +107,7 @@ class PredicateResMADEConfig:
     output_head_specs: tuple[OutputHeadSpec, ...] | None = None
     factorization_plan: FactorizationPlan | None = None
     anpm_config: ANPMConfig | None = None
+    trajectory_distinct_config: TrajectoryDistinctConfig = TrajectoryDistinctConfig()
 
     def validate(self) -> None:
         if len(self.predicate_input_bins) != len(self.data_output_bins):
@@ -192,6 +250,7 @@ class PredicateResMADEConfig:
             if anpm is None or not anpm.enabled:
                 raise ValueError("factorization.enabled=true requires anpm.enabled=true")
             anpm.validate()
+        self.trajectory_distinct_config.validate()
 
     def resolved_output_head_specs(self) -> tuple[OutputHeadSpec, ...]:
         """Return configured output heads or legacy one-head-per-column specs."""
@@ -250,6 +309,7 @@ class PredicateResMADEConfig:
             "anpm_config": (
                 None if self.anpm_config is None else self.anpm_config.to_json_dict()
             ),
+            "trajectory_distinct_config": self.trajectory_distinct_config.to_json_dict(),
         }
 
     @classmethod
@@ -340,6 +400,9 @@ class PredicateResMADEConfig:
             anpm_config=(
                 None if raw_anpm is None else ANPMConfig.from_dict(raw_anpm)  # type: ignore[arg-type]
             ),
+            trajectory_distinct_config=TrajectoryDistinctConfig.from_dict(
+                data.get("trajectory_distinct_config")  # type: ignore[arg-type]
+            ),
         )
 
 
@@ -387,7 +450,16 @@ class PredicateResMADE(nn.Module):
         else:
             self.output_embeddings = nn.ModuleList()
         self.input_degrees = self._expanded_input_degrees()
-        hidden_degrees = self._hidden_degrees(config.hidden_sizes[0], self.num_columns)
+        self.effective_ar_variable_count = (
+            self.num_columns + 1
+            if config.trajectory_distinct_config.enabled
+            else self.num_columns
+        )
+        self.trajectory_output_degree = self.num_columns
+        hidden_degrees = self._hidden_degrees(
+            config.hidden_sizes[0],
+            self.effective_ar_variable_count,
+        )
         self.hidden_degrees = hidden_degrees
 
         if self._uses_embedding_input(config) and config.predicate_encoding_mode == "categorical_legacy":
@@ -536,7 +608,10 @@ class PredicateResMADE(nn.Module):
             previous_degrees = hidden_degrees
             previous_size = config.hidden_sizes[0]
             for hidden_size in config.hidden_sizes[1:]:
-                next_degrees = self._hidden_degrees(hidden_size, self.num_columns)
+                next_degrees = self._hidden_degrees(
+                    hidden_size,
+                    self.effective_ar_variable_count,
+                )
                 layer = MaskedLinear(previous_size, hidden_size)
                 layer.set_mask(mask_from_degrees(previous_degrees, next_degrees, strict=False))
                 blocks.extend([layer, self._make_activation(config.activation)])
@@ -556,12 +631,43 @@ class PredicateResMADE(nn.Module):
             self.direct_io_layer.set_mask(self._direct_io_mask(output_degrees))
         else:
             self.direct_io_layer = None
+        self.traj_dedup_head: MaskedLinear | None
+        self.traj_dedup_direct_io_layer: MaskedLinear | None
+        if config.trajectory_distinct_config.enabled:
+            self.traj_dedup_head = MaskedLinear(config.hidden_sizes[-1], 1)
+            terminal_degree = torch.tensor([self.trajectory_output_degree], dtype=torch.long)
+            self.traj_dedup_head.set_mask(
+                mask_from_degrees(self.final_hidden_degrees, terminal_degree, strict=True)
+            )
+            if config.direct_io_connections:
+                self.traj_dedup_direct_io_layer = MaskedLinear(
+                    self.input_width,
+                    1,
+                    bias=False,
+                )
+                self.traj_dedup_direct_io_layer.set_mask(
+                    self._terminal_direct_io_mask(terminal_degree)
+                )
+            else:
+                self.traj_dedup_direct_io_layer = None
+        else:
+            self.traj_dedup_head = None
+            self.traj_dedup_direct_io_layer = None
         self.anpm_decoders = self._build_anpm_decoders()
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Return logits with shape [batch, sum_j model_output_bins[j]]."""
 
         self.forward_calls += 1
+        return self._ordinary_outputs(token_ids).ar_outputs
+
+    def forward_with_auxiliary(self, token_ids: torch.Tensor) -> PredicateResMADEOutputs:
+        """Return ordinary AR outputs plus the optional query-only trajectory factor."""
+
+        self.forward_calls += 1
+        return self._ordinary_outputs(token_ids)
+
+    def _ordinary_outputs(self, token_ids: torch.Tensor) -> PredicateResMADEOutputs:
         encoded_inputs = self.encode_inputs(token_ids)
         hidden = self.input_layer(encoded_inputs)
         hidden = self.activation(hidden)
@@ -569,7 +675,18 @@ class PredicateResMADE(nn.Module):
         logits = self.output_layer(hidden)
         if self.direct_io_layer is not None:
             logits = logits + self.direct_io_layer(encoded_inputs)
-        return logits
+        traj_factor = None
+        traj_logit = None
+        if self.traj_dedup_head is not None:
+            traj_logit = self.traj_dedup_head(hidden)
+            if self.traj_dedup_direct_io_layer is not None:
+                traj_logit = traj_logit + self.traj_dedup_direct_io_layer(encoded_inputs)
+            traj_factor = torch.sigmoid(traj_logit)
+        return PredicateResMADEOutputs(
+            ar_outputs=logits,
+            traj_dedup_factor=traj_factor,
+            traj_dedup_logit=traj_logit,
+        )
 
     def encode_inputs(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Encode predicate-token IDs using per-column embeddings or one-hot blocks."""
@@ -793,6 +910,22 @@ class PredicateResMADE(nn.Module):
             )
         destination_mask = torch.tensor(output_allowed, dtype=mask.dtype).unsqueeze(1)
         return mask * source_mask * destination_mask
+
+    def _terminal_direct_io_mask(self, output_degrees: torch.Tensor) -> torch.Tensor:
+        mask = mask_from_degrees(self.input_degrees, output_degrees, strict=True)
+        allowed_source_kinds = set(self.config.direct_io_source_kinds)
+        input_allowed: list[float] = []
+        for column_index, width in enumerate(self.column_input_widths):
+            input_allowed.extend(
+                [
+                    1.0
+                    if self._column_kind_name(column_index) in allowed_source_kinds
+                    else 0.0
+                ]
+                * width
+            )
+        source_mask = torch.tensor(input_allowed, dtype=mask.dtype).unsqueeze(0)
+        return mask * source_mask
 
     def _column_kind_name(self, column_index: int) -> str:
         kinds = getattr(self, "column_kinds", None)

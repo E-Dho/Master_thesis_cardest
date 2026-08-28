@@ -18,6 +18,15 @@ class EstimateResult:
     latency_seconds: float
 
 
+@dataclass(frozen=True)
+class DistinctTrajectoryEstimate:
+    matching_segment_estimate: float
+    traj_dedup_factor: float
+    distinct_trajectory_estimate: float
+    model_forward_calls: int
+    latency_seconds: float
+
+
 class OnePassEstimator:
     """Sampling-free estimator using one predicate-conditioned model pass."""
 
@@ -53,3 +62,43 @@ class OnePassEstimator:
         if estimate < 0 or not np.isfinite(estimate):
             raise ValueError(f"invalid cardinality estimate {estimate!r}")
         return EstimateResult(estimate, factors, latency)
+
+    def estimate_distinct_trajectories(
+        self,
+        tokens: list[PredicateToken],
+        *,
+        use_log_space_product: bool = True,
+    ) -> DistinctTrajectoryEstimate:
+        """Return D_hat = M_hat * traj_dedup_factor for segment-query workloads."""
+
+        if not hasattr(self.model, "predict_column_factors_and_traj_dedup"):
+            raise ValueError("model does not expose traj_dedup_factor inference")
+        start_calls = int(getattr(getattr(self.model, "resmade", self.model), "forward_calls", 0))
+        start = perf_counter()
+        factors, traj_dedup_factor = self.model.predict_column_factors_and_traj_dedup(tokens)
+        if use_log_space_product:
+            if self.metadata.full_join_cardinality == 0 or np.any(factors == 0):
+                matching_segment_estimate = 0.0
+            else:
+                matching_segment_estimate = exp(
+                    log(self.metadata.full_join_cardinality)
+                    + float(np.sum(np.log(factors)))
+                )
+        else:
+            matching_segment_estimate = float(
+                self.metadata.full_join_cardinality * np.prod(factors)
+            )
+        distinct = float(matching_segment_estimate * traj_dedup_factor)
+        latency = perf_counter() - start
+        end_calls = int(getattr(getattr(self.model, "resmade", self.model), "forward_calls", 0))
+        if not (0.0 <= traj_dedup_factor <= 1.0):
+            raise ValueError(f"invalid traj_dedup_factor {traj_dedup_factor!r}")
+        if distinct < -1.0e-12 or distinct > matching_segment_estimate + 1.0e-9:
+            raise ValueError("distinct trajectory estimate violates 0 <= D_hat <= M_hat")
+        return DistinctTrajectoryEstimate(
+            matching_segment_estimate=matching_segment_estimate,
+            traj_dedup_factor=traj_dedup_factor,
+            distinct_trajectory_estimate=distinct,
+            model_forward_calls=end_calls - start_calls,
+            latency_seconds=latency,
+        )

@@ -467,3 +467,74 @@ model/src/model/output_adapter.py
 `ANPMFactorizedOutputAdapter` decodes factorized torch outputs back to
 original-column predicate factors. A future optimization can replace chunked
 enumeration with prefix dynamic programming behind the same adapter API.
+
+## Distinct Trajectory Query Correction
+
+Branch: `feature/distinct-trajectory-query-correction`
+
+Base `main` SHA: `1c64bc0ab95182fad53ca4c874c1f94e5d92cc2f`
+
+This branch adds the first POL distinct-trajectory ablation on top of the
+existing segment-level estimator. The inspected model metadata continues to use
+the original-column ordering:
+
+```text
+DATA columns -> INDICATOR columns -> FANOUT columns
+```
+
+Factorized output heads retain the original column degree through
+`OutputHeadSpec.source_column_index`, so the terminal correction can be added
+after all existing original columns without reordering any data/indicator/fanout
+columns.
+
+The new optional output-only scalar head is named `traj_dedup_factor`. It has
+logical degree `N` for `N` existing predicate columns. When enabled, hidden
+degrees are sampled over `0..N-1`, allowing the terminal head to condition on
+every existing predicate token, including the final fanout token. Existing AR
+heads keep their original strict `< source_column_index` masks, so no current or
+future predicate leakage is introduced.
+
+Training target semantics:
+
+```text
+sample one FOJ anchor tuple s
+generate the ordinary row-satisfied Duet context Q
+compute local m_traj(s)(Q) inside the anchor trajectory only
+target = 1 / m_traj(s)(Q)
+```
+
+The target provider boundary is `TrajectoryMultiplicityProvider`; the concrete
+CSR-style implementation is `TrajectorySegmentIndex`. It stores encoded segment
+rows grouped by trajectory id and evaluates the same `GeneratedTrainingContext`
+semantics used by ordinary training. For POL, the inspected query schema uses
+`trips.trip_id` as the entity key, so the development config sets:
+
+```text
+trajectory_key: trip_id
+```
+
+The loss is weighted MSE with:
+
+```text
+w_traj = rho * product_{r: T_r = INV_FANOUT} 1 / f_r
+```
+
+This differs from ordinary per-column WCE because `traj_dedup_factor` is after
+all fanout columns, so all active inverse fanouts contribute. The current rare
+auxiliary objective is unchanged; trajectory supervision is generated only from
+ordinary main-batch contexts.
+
+Inference adds `DistinctTrajectoryEstimate`:
+
+```text
+matching_segment_estimate = existing one-pass segment estimator
+distinct_trajectory_estimate = matching_segment_estimate * traj_dedup_factor
+```
+
+`TorchDistributionModel.predict_column_factors_and_traj_dedup()` obtains both
+ordinary factors and the correction factor from one backbone call.
+
+Known limitation: this is deliberately the single-anchor query-only ablation.
+Tuple/FOJ and static fanout corrections are applied, but the additional
+row-first query-generator factor `G(Q | s)` is not corrected. Exact global
+distinct counts are reserved for evaluation, not training labels.

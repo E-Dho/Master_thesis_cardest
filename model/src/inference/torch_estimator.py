@@ -117,3 +117,50 @@ class TorchDistributionModel:
                 values.append(factor[0].detach().cpu())
             self.last_decode_seconds = perf_counter() - decode_start
         return np.array([float(value) for value in values], dtype=float)
+
+    def predict_column_factors_and_traj_dedup(
+        self,
+        tokens: list[PredicateToken],
+    ) -> tuple[np.ndarray, float]:
+        """Return column factors and the query-only trajectory factor in one pass."""
+
+        import torch
+
+        token_ids = encode_tokens_tensor([tokens], self.predicate_vocabularies, device=self.device)
+        self.resmade.eval()
+        with torch.no_grad():
+            backbone_start = perf_counter()
+            outputs_with_aux = self.resmade.forward_with_auxiliary(token_ids)
+            logits = outputs_with_aux.ar_outputs
+            self.last_backbone_seconds = perf_counter() - backbone_start
+            if outputs_with_aux.traj_dedup_factor is None:
+                raise ValueError("checkpoint/model does not contain traj_dedup_factor head")
+            outputs = TorchBackboneOutputs(
+                logits=logits,
+                split_logits=self.resmade.split_head_outputs(logits),
+                output_embeddings=(
+                    [embedding.weight for embedding in self.resmade.output_embeddings]
+                    if getattr(self.resmade.config, "output_encoding", "one_hot") == "embed"
+                    else None
+                ),
+            )
+            values = []
+            decode_start = perf_counter()
+            for column_index, token in enumerate(tokens):
+                if self.metadata.factorization_plan.enabled:
+                    factor = self.output_adapter.column_factor(
+                        original_column_index=column_index,
+                        backbone_outputs=outputs,
+                        predicate_token=token,
+                    )
+                else:
+                    factor = self.output_adapter.column_factor(
+                        original_column_index=column_index,
+                        backbone_outputs=outputs,
+                        metadata=self.metadata,
+                        predicate_token=token,
+                    )
+                values.append(factor[0].detach().cpu())
+            self.last_decode_seconds = perf_counter() - decode_start
+            traj_factor = float(outputs_with_aux.traj_dedup_factor[0, 0].detach().cpu())
+        return np.array([float(value) for value in values], dtype=float), traj_factor

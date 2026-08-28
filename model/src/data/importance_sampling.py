@@ -694,6 +694,10 @@ class ImportanceSamplingSampleSource:
     def distinct_original_rows_seen_estimate(self) -> object:
         return getattr(self.base_source, "distinct_original_rows_seen_estimate", None)
 
+    @property
+    def trajectory_multiplicity_provider(self) -> object:
+        return getattr(self.base_source, "trajectory_multiplicity_provider")
+
     def discard_buffer(self) -> None:
         discard = getattr(self.base_source, "discard_buffer", None)
         if discard is not None:
@@ -1020,6 +1024,10 @@ class RareSupportSampleSource:
     @property
     def distinct_original_rows_seen_estimate(self) -> object:
         return getattr(self.base_source, "distinct_original_rows_seen_estimate", None)
+
+    @property
+    def trajectory_multiplicity_provider(self) -> object:
+        return getattr(self.base_source, "trajectory_multiplicity_provider")
 
     def discard_buffer(self) -> None:
         discard = getattr(self.base_source, "discard_buffer", None)

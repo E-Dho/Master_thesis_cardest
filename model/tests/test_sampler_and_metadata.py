@@ -55,6 +55,7 @@ class SamplerMetadataTest(unittest.TestCase):
             "model/configs/job_light_duet_binary_native_anpm.yaml",
             "model/configs/job_light_duet_binary_native_anpm_10k_early_stop.yaml",
             "model/configs/job_light_duet_binary_native_anpm_20k_patience_3000.yaml",
+            "model/configs/pol_50m_traj_dedup_single_anchor.yaml",
         ):
             validate_config(load_simple_yaml(path))
 

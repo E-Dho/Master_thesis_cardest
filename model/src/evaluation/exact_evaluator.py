@@ -8,6 +8,14 @@ from model.src.data.schema import ModelMetadata
 from model.src.inference.masks import factors_from_distributions
 from model.src.predicates.encoding import column_factor
 from model.src.predicates.operators import PredicateToken
+from model.src.predicates.generation import GeneratedTrainingContext, context_satisfies_row
+
+
+@dataclass(frozen=True)
+class ExactDistinctTrajectoryResult:
+    matching_segments_true: int
+    distinct_trajectories_true: int
+    a_true: float
 
 
 @dataclass(frozen=True)
@@ -65,3 +73,24 @@ class ExactOracle:
         distribution = self.marginal_distribution(column_index, row_weights)
         return column_factor(distribution, self.metadata.columns[column_index], token)
 
+    def exact_distinct_trajectory_count(
+        self,
+        context: GeneratedTrainingContext,
+        *,
+        trajectory_ids: tuple[object, ...] | list[object] | np.ndarray,
+    ) -> ExactDistinctTrajectoryResult:
+        """Evaluate M_true, D_true, and a_true over materialized segment rows."""
+
+        if len(trajectory_ids) != len(self.encoded_rows):
+            raise ValueError("trajectory_ids must align with encoded_rows")
+        matching_ids = []
+        for row, trajectory_id in zip(self.encoded_rows, trajectory_ids):
+            if context_satisfies_row(context, row, self.metadata):
+                matching_ids.append(trajectory_id)
+        matching = len(matching_ids)
+        distinct = len(set(matching_ids))
+        return ExactDistinctTrajectoryResult(
+            matching_segments_true=matching,
+            distinct_trajectories_true=distinct,
+            a_true=0.0 if matching == 0 else float(distinct / matching),
+        )
