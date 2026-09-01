@@ -118,14 +118,26 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError(
                 "trajectory_distinct.enabled=true requires trajectory_distinct.trajectory_key"
             )
+        if not str(trajectory_distinct.get("entity_table", "")).strip():
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires trajectory_distinct.entity_table"
+            )
+        if not str(trajectory_distinct.get("segment_table", "")).strip():
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires trajectory_distinct.segment_table"
+            )
+        if not str(trajectory_distinct.get("segment_key", "")).strip():
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires trajectory_distinct.segment_key"
+            )
         if str(trajectory_distinct.get("predicate_scope", "")) != "segment_query":
             raise ValueError(
                 "trajectory_distinct.predicate_scope must be segment_query"
             )
-        predicate_columns = trajectory_distinct.get("predicate_columns", ())
-        if not predicate_columns:
+        segment_varying_columns = trajectory_distinct.get("segment_varying_columns", ())
+        if not segment_varying_columns:
             raise ValueError(
-                "trajectory_distinct.enabled=true requires predicate_columns"
+                "trajectory_distinct.enabled=true requires segment_varying_columns"
             )
     if model.get("type") == "predicate_resmade" and not model.get("fixed_ordering", True):
         raise ValueError("predicate_resmade requires model.fixed_ordering=true")
@@ -284,10 +296,14 @@ def validate_config(config: dict[str, Any]) -> None:
                 "validation.enabled=true requires validation.fresh_sampler_batches > 0"
             )
         metric = str(validation.get("selection_metric", "validation_weighted_nll"))
-        if metric not in {"validation_nll", "validation_weighted_nll"}:
+        if metric not in {
+            "validation_nll",
+            "validation_weighted_nll",
+            "validation_traj_weighted_mse",
+        }:
             raise ValueError(
                 "validation.selection_metric must be validation_nll or "
-                "validation_weighted_nll in this milestone"
+                "validation_weighted_nll or validation_traj_weighted_mse"
             )
     importance = config.get("importance_sampling", {})
     if bool(importance.get("enabled", False)):

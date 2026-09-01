@@ -250,6 +250,34 @@ training. `INV_FANOUT` tokens are correction potentials, not segment-selection
 predicates. Unsupported non-wildcard predicates are skipped/fail closed instead
 of being ignored.
 
+The correction is applied only when the ordinary estimator is a matching-segment
+measure. In POL terms, `segments` must participate in the query table subset.
+For trip-only or agent/trip-level queries, the normal fanout correction may
+already collapse segment multiplicity, so multiplying by `traj_dedup_factor`
+would double-correct the estimate. Such contexts are skipped during training and
+`estimate_distinct_trajectories(...)` raises a not-applicable error unless the
+caller passes an eligible query/table context.
+
+Trajectory predicates are classified by config. Agent/trip columns that are
+constant within one trajectory are `trajectory_static_columns`; they are checked
+as part of the row-satisfied context but do not reduce local segment
+multiplicity. Columns that can vary among segments are
+`segment_varying_columns`; only these ordinary predicates are evaluated inside
+`m_t(Q)`. Indicator tokens and `INV_FANOUT` remain correction-only.
+
+POL temporal and spatial predicates use workload semantics rather than generic
+dictionary comparisons. Temporal overlap is:
+
+```text
+segments.t_s < query_upper AND segments.t_e >= query_lower
+```
+
+Spatial range predicates use exact line-segment versus axis-aligned rectangle
+intersection for the POL `ST_Intersects(segment_geom, ST_MakeEnvelope(...))`
+case. The semantic payload is carried on `GeneratedTrainingContext` as an
+optional `TrajectoryQuerySemantics`, while the normal model still consumes the
+ordinary Duet predicate tokens.
+
 The terminal trajectory loss uses the main-batch tuple importance correction
 when present and multiplies every active `INV_FANOUT` reciprocal because the
 head sits after all fanout columns:
@@ -264,6 +292,57 @@ all matching segments as training examples, and does not correct the additional
 row-first query-generator factor `G(Q | s)`. Exact distinct counts are used for
 evaluation only. Future ablations can compare multiple anchors per query,
 Q-first matching-segment sampling, or an explicit correction for `G(Q | s)`.
+
+### POL Trajectory Preparation
+
+The production POL path uses a compact memory-mapped segment index rather than
+storing every encoded FOJ/model column for every segment. The directory layout is:
+
+```text
+trajectory_segment_index/
+  manifest.json
+  trajectory_ids.npy
+  offsets.npy
+  segment_idx.npy
+  t_s.npy
+  t_e.npy
+  s_x.npy
+  s_y.npy
+  e_x.npy
+  e_y.npy
+```
+
+`trajectory_ids.npy` and `offsets.npy` form a CSR index from `trip_id` to its
+segments. The per-segment arrays store only POL segment-varying fields, with
+timestamps converted to numeric epoch seconds. The loader memory-maps these
+arrays and uses sorted numeric `trip_id` lookup instead of rebuilding a Python
+dictionary per batch. The manifest hash includes schema hash, trajectory/segment
+keys, static/varying column lists, SRID, temporal/spatial semantic versions, and
+index format version; stale indexes fail closed.
+
+Build the compact index from MobilityDB staging output:
+
+```bash
+python3 -m model.scripts.prepare_pol_trajectory_distinct \
+  --config model/configs/pol_50m_traj_dedup_single_anchor.yaml \
+  --segments-tsv dataset_generation/mobilitydb_loader/staging/segments.tsv
+```
+
+If `sample_rows.npy` is a fixture, aligned provenance must be produced by the
+same materialization step that creates the sample rows and passed as:
+
+```bash
+python3 -m model.scripts.prepare_pol_trajectory_distinct \
+  --config model/configs/pol_50m_traj_dedup_single_anchor.yaml \
+  --segments-tsv /path/to/segments.tsv \
+  --sample-provenance-tsv /path/to/sample_trip_segment_ids.tsv
+```
+
+The provenance TSV must align row-for-row with `sample_rows.npy` and provide
+`trip_id` plus `segment_idx`. Fixture sources validate
+`sample_trajectory_ids.npy` and `sample_segment_ids.npy` lengths at startup.
+Live POL/NeuroCard sampling with trajectory distinct remains fail-closed until
+the sampler emits provenance together with each sampled FOJ row.
 
 ## Optimized ANPM Inference
 

@@ -11,7 +11,10 @@ from typing import Any, Protocol
 import numpy as np
 
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
-from model.src.data.trajectory_distinct import TrajectorySegmentIndex
+from model.src.data.trajectory_distinct import (
+    CompactTrajectorySegmentIndex,
+    TrajectorySegmentIndex,
+)
 
 OUTER_MISSING = "__OUTER_MISSING__"
 
@@ -121,6 +124,7 @@ class NeuroCardFullJoinSampleSource:
         *,
         sampling_mode: str = "fixture",
         trajectory_ids_path: str | Path | None = None,
+        segment_ids_path: str | Path | None = None,
         trajectory_index_path: str | Path | None = None,
     ) -> None:
         self.prepared_directory = Path(prepared_directory)
@@ -140,6 +144,8 @@ class NeuroCardFullJoinSampleSource:
         self.fixture_rows_reused = 0
         self.fresh_rows_drawn = 0
         self._sample_trajectory_ids: np.ndarray | None = None
+        self._sample_segment_ids: np.ndarray | None = None
+        self._fixture_stratum_index_cache: dict[str, np.ndarray] = {}
         if trajectory_ids_path is not None:
             self._sample_trajectory_ids = np.load(Path(trajectory_ids_path), allow_pickle=True)
         elif (self.prepared_directory / "sample_trajectory_ids.npy").exists():
@@ -147,14 +153,40 @@ class NeuroCardFullJoinSampleSource:
                 self.prepared_directory / "sample_trajectory_ids.npy",
                 allow_pickle=True,
             )
+        if segment_ids_path is not None:
+            self._sample_segment_ids = np.load(Path(segment_ids_path), allow_pickle=True)
+        elif (self.prepared_directory / "sample_segment_ids.npy").exists():
+            self._sample_segment_ids = np.load(
+                self.prepared_directory / "sample_segment_ids.npy",
+                allow_pickle=True,
+            )
         if trajectory_index_path is None:
-            candidate = self.prepared_directory / "trajectory_segment_index.npz"
-            trajectory_index_path = candidate if candidate.exists() else None
-        self._trajectory_multiplicity_provider = (
-            None
-            if trajectory_index_path is None
-            else TrajectorySegmentIndex.from_npz(trajectory_index_path)
-        )
+            directory_candidate = self.prepared_directory / "trajectory_segment_index"
+            npz_candidate = self.prepared_directory / "trajectory_segment_index.npz"
+            if directory_candidate.exists():
+                trajectory_index_path = directory_candidate
+            elif npz_candidate.exists():
+                trajectory_index_path = npz_candidate
+        if trajectory_index_path is None:
+            self._trajectory_multiplicity_provider = None
+        else:
+            index_path = Path(trajectory_index_path)
+            self._trajectory_multiplicity_provider = (
+                CompactTrajectorySegmentIndex.from_directory(index_path)
+                if index_path.is_dir()
+                else TrajectorySegmentIndex.from_npz(index_path)
+            )
+        sample_path = self.prepared_directory / "sample_rows.npy"
+        if sample_path.exists():
+            sample_rows = np.load(sample_path, mmap_mode="r")
+            if self._sample_trajectory_ids is not None and len(self._sample_trajectory_ids) != len(sample_rows):
+                raise ValueError(
+                    "sample_trajectory_ids row count does not match sample_rows.npy"
+                )
+            if self._sample_segment_ids is not None and len(self._sample_segment_ids) != len(sample_rows):
+                raise ValueError(
+                    "sample_segment_ids row count does not match sample_rows.npy"
+                )
 
     @property
     def join_cardinality(self) -> int:
@@ -181,12 +213,16 @@ class NeuroCardFullJoinSampleSource:
             trajectory_ids = None
             if self._sample_trajectory_ids is not None:
                 trajectory_ids = tuple(self._sample_trajectory_ids[indices].tolist())
+            segment_ids = None
+            if self._sample_segment_ids is not None:
+                segment_ids = tuple(self._sample_segment_ids[indices].tolist())
             self.sample_batches_generated += 1
             self.fixture_rows_reused += int(batch_size)
             return FullJoinBatch(
                 rows[indices],
                 self.metadata.columns,
                 trajectory_ids=trajectory_ids,
+                segment_ids=segment_ids,
                 fresh_rows_drawn=0,
                 fixture_rows_reused=batch_size,
             )
@@ -196,10 +232,68 @@ class NeuroCardFullJoinSampleSource:
             "join-count/index artifacts exist in the prepared directory."
         )
 
+    def sample_root_strata_rows(
+        self,
+        strata: object,
+        *,
+        rng: np.random.Generator,
+    ) -> FullJoinBatch:
+        """Draw one fixture row per root stratum while preserving row provenance."""
+
+        if self.sampling_mode == "live":
+            raise NotImplementedError("live conditional sampling is implemented in the live subclass")
+        sample_path = self.prepared_directory / "sample_rows.npy"
+        if not sample_path.exists():
+            raise NotImplementedError("fixture conditional sampling requires sample_rows.npy")
+        rows = np.load(sample_path, mmap_mode="r")
+        strata_tuple = tuple(strata)  # type: ignore[arg-type]
+        selected_indices = np.empty(len(strata_tuple), dtype=int)
+        for output_index, stratum in enumerate(strata_tuple):
+            candidates = self._fixture_indices_for_stratum(rows, stratum)
+            if candidates.size == 0:
+                raise ValueError(f"fixture has no rows for stratum {stratum.stratum_id!r}")
+            selected_indices[output_index] = int(rng.choice(candidates))
+        trajectory_ids = None
+        if self._sample_trajectory_ids is not None:
+            trajectory_ids = tuple(self._sample_trajectory_ids[selected_indices].tolist())
+        segment_ids = None
+        if self._sample_segment_ids is not None:
+            segment_ids = tuple(self._sample_segment_ids[selected_indices].tolist())
+        self.sample_batches_generated += 1
+        self.fixture_rows_reused += int(len(strata_tuple))
+        return FullJoinBatch(
+            encoded_values=np.asarray(rows[selected_indices], dtype=np.int64),
+            column_metadata=self.metadata.columns,
+            trajectory_ids=trajectory_ids,
+            segment_ids=segment_ids,
+            fresh_rows_drawn=0,
+            fixture_rows_reused=int(len(strata_tuple)),
+        )
+
+    def _fixture_indices_for_stratum(
+        self,
+        rows: np.ndarray,
+        stratum: object,
+    ) -> np.ndarray:
+        cached = self._fixture_stratum_index_cache.get(stratum.stratum_id)
+        if cached is not None:
+            return cached
+        column_index = int(stratum.column_index)
+        column = self.metadata.columns[column_index]
+        encoded_values = np.asarray(rows[:, column_index], dtype=np.int64)
+        decoded_values = np.asarray(
+            [column.domain[int(value)] for value in encoded_values],
+            dtype=object,
+        )
+        mask = _vectorized_root_stratum_mask(decoded_values, stratum)
+        candidates = np.flatnonzero(mask)
+        self._fixture_stratum_index_cache[stratum.stratum_id] = candidates
+        return candidates
+
     @property
     def trajectory_multiplicity_provider(self) -> object:
         if self._trajectory_multiplicity_provider is None:
-            raise AttributeError("no trajectory_segment_index.npz is configured")
+            raise AttributeError("no trajectory segment index is configured")
         return self._trajectory_multiplicity_provider
 
 

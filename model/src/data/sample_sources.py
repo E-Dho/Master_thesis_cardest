@@ -32,6 +32,11 @@ def sample_source_from_config(
         source = SyntheticFullJoinSampleSource()
     elif dataset_type == "neurocard_full_join":
         sampling_mode = str(dataset.get("sampling_mode", "fixture"))
+        if bool(config.get("trajectory_distinct", {}).get("enabled", False)) and sampling_mode == "live":
+            raise ValueError(
+                "trajectory_distinct.enabled=true with sampling_mode=live is unsupported "
+                "because live sampler provenance is unavailable"
+            )
         if sampling_mode == "live":
             source = LiveNeuroCardFullJoinSampleSource(
                 Path(dataset["prepared_directory"]),
@@ -48,13 +53,20 @@ def sample_source_from_config(
                 Path(dataset["prepared_directory"]),
                 sampling_mode=sampling_mode,
                 trajectory_ids_path=dataset.get("trajectory_ids_path"),
+                segment_ids_path=dataset.get("segment_ids_path"),
                 trajectory_index_path=dataset.get("trajectory_index_path"),
             )
     elif dataset_type == "pol_trajectory_full_join":
+        if str(dataset.get("sampling_mode", "fixture")) == "live":
+            raise ValueError(
+                "pol_trajectory_full_join trajectory distinct currently supports fixture "
+                "mode only; live provenance must be emitted with sampled rows first"
+            )
         source = NeuroCardFullJoinSampleSource(
             Path(dataset["prepared_directory"]),
             sampling_mode=str(dataset.get("sampling_mode", "fixture")),
             trajectory_ids_path=dataset.get("trajectory_ids_path"),
+            segment_ids_path=dataset.get("segment_ids_path"),
             trajectory_index_path=dataset.get("trajectory_index_path"),
         )
     else:
@@ -66,7 +78,7 @@ def sample_source_from_config(
         wrapped = FactorizedMetadataSampleSource(source, factorization)
     importance = config.get("importance_sampling", {})
     if bool(importance.get("enabled", False)):
-        return ImportanceSamplingSampleSource(wrapped, config)
+        wrapped = ImportanceSamplingSampleSource(wrapped, config)
     rare_support = config.get("rare_support", {})
     if bool(rare_support.get("enabled", False)):
         return RareSupportSampleSource(wrapped, config)

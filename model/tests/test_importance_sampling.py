@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import tempfile
 import unittest
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from model.src.config import load_simple_yaml, validate_config
 from model.src.data.full_join_sampler import (
     FullJoinBatch,
     LiveNeuroCardFullJoinSampleSource,
+    NeuroCardFullJoinSampleSource,
     SyntheticDataset,
 )
 from model.src.data.importance_sampling import (
@@ -197,6 +199,59 @@ class ImportanceSamplingTest(unittest.TestCase):
         self.assertLessEqual(summary["rho"]["percentile_reservoir_size"], 5)
         for stratum_summary in summary["rho_by_stratum"].values():
             self.assertLessEqual(stratum_summary["percentile_reservoir_size"], 2)
+
+    def test_fixture_importance_conditional_rows_preserve_provenance(self) -> None:
+        metadata = ModelMetadata(
+            columns=(
+                ColumnMetadata("A.x", ColumnKind.DATA, tuple(range(10)), table="A"),
+                ColumnMetadata("I_A", ColumnKind.INDICATOR, (0, 1), table="A"),
+                ColumnMetadata("F_A", ColumnKind.FANOUT, (1,), table="A", fanout_source="A->A"),
+            ),
+            full_join_cardinality=10,
+            join_root="A",
+            join_tables=("A",),
+            join_edges=(),
+        )
+        rows = np.asarray([[value, 1, 0] for value in range(10)], dtype=np.int64)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = {
+                "dataset_name": "fixture",
+                "dataset_type": "neurocard_full_join",
+                "join_cardinality": 10,
+                "metadata": metadata.to_json_dict(),
+                "domains_complete": True,
+                "metadata_source": "complete_base_tables_and_join_metadata",
+                "sample_rows": len(rows),
+                "format_version": 2,
+            }
+            with open(f"{tmpdir}/manifest.json", "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            np.save(f"{tmpdir}/sample_rows.npy", rows)
+            np.save(f"{tmpdir}/sample_trajectory_ids.npy", np.asarray([100 + i for i in range(10)]))
+            np.save(
+                f"{tmpdir}/sample_segment_ids.npy",
+                np.asarray([(100 + i, i) for i in range(10)], dtype=object),
+            )
+            source = NeuroCardFullJoinSampleSource(tmpdir)
+            config = self._config()
+            config["training"]["batch_size"] = 64
+            config["importance_sampling"]["mixture_probability"] = 0.5
+            config["importance_sampling"]["discovery"]["minimum_expected_context_support"] = 1
+            wrapped = ImportanceSamplingSampleSource(source, config)
+            batch = wrapped.batches(64, seed=2)
+        self.assertIsNotNone(batch.trajectory_ids)
+        self.assertIsNotNone(batch.segment_ids)
+        self.assertIsNotNone(batch.importance_weights)
+        self.assertEqual(len(batch.trajectory_ids), len(batch.encoded_values))  # type: ignore[arg-type]
+        self.assertEqual(len(batch.segment_ids), len(batch.encoded_values))  # type: ignore[arg-type]
+        for encoded_row, trajectory_id, segment_id in zip(
+            batch.encoded_values,
+            batch.trajectory_ids,  # type: ignore[arg-type]
+            batch.segment_ids,  # type: ignore[arg-type]
+        ):
+            x_value = int(encoded_row[0])
+            self.assertEqual(trajectory_id, 100 + x_value)
+            self.assertEqual(tuple(segment_id), (100 + x_value, x_value))
 
     def test_context_diagnostics_align_repeated_contexts_to_source_rows(self) -> None:
         source = self._numeric_source()

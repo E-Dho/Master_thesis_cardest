@@ -78,17 +78,25 @@ class ExactOracle:
         context: GeneratedTrainingContext,
         *,
         trajectory_ids: tuple[object, ...] | list[object] | np.ndarray,
+        segment_ids: tuple[object, ...] | list[object] | np.ndarray | None = None,
     ) -> ExactDistinctTrajectoryResult:
-        """Evaluate M_true, D_true, and a_true over materialized segment rows."""
+        """Evaluate logical M_true, D_true, and a_true over materialized rows."""
 
         if len(trajectory_ids) != len(self.encoded_rows):
             raise ValueError("trajectory_ids must align with encoded_rows")
-        matching_ids = []
-        for row, trajectory_id in zip(self.encoded_rows, trajectory_ids):
+        if segment_ids is not None and len(segment_ids) != len(self.encoded_rows):
+            raise ValueError("segment_ids must align with encoded_rows")
+        matching_segments = set()
+        matching_trajectories = set()
+        for row_index, (row, trajectory_id) in enumerate(zip(self.encoded_rows, trajectory_ids)):
             if context_satisfies_row(context, row, self.metadata):
-                matching_ids.append(trajectory_id)
-        matching = len(matching_ids)
-        distinct = len(set(matching_ids))
+                segment_id = (
+                    segment_ids[row_index] if segment_ids is not None else row_index
+                )
+                matching_segments.add(segment_id)
+                matching_trajectories.add(trajectory_id)
+        matching = len(matching_segments)
+        distinct = len(matching_trajectories)
         return ExactDistinctTrajectoryResult(
             matching_segments_true=matching,
             distinct_trajectories_true=distinct,

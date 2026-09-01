@@ -28,6 +28,7 @@ class GeneratedTrainingContext:
     included_tables: frozenset[str]
     inverse_fanout_columns: frozenset[str]
     ordinary_predicates: Mapping[str, PredicateToken]
+    trajectory_query: Any | None = None
 
 
 @dataclass(frozen=True)

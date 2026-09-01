@@ -13,9 +13,18 @@ if HAS_TORCH:
 from model.src.data.full_join_sampler import FullJoinBatch
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.trajectory_distinct import (
+    CompactTrajectorySegmentIndex,
+    SegmentSpatialPredicate,
+    SegmentTemporalPredicate,
     TrajectorySegmentIndex,
+    TrajectoryQuerySemantics,
     UnsupportedTrajectoryContext,
+    segment_rectangle_intersects_mask,
+    temporal_overlap_mask,
+    trajectory_distinct_context_eligibility,
+    write_compact_trajectory_index,
 )
+from model.src.evaluation.exact_evaluator import ExactOracle
 from model.src.predicates.generation import GeneratedTrainingContext
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.vocabulary import PredicateVocabularies
@@ -73,6 +82,27 @@ def _trajectory_rows(metadata: ModelMetadata) -> tuple[np.ndarray, tuple[str, ..
         for column_index, value in enumerate(row):
             encoded[row_index, column_index] = metadata.columns[column_index].encode_value(value)
     return encoded, trajectory_ids
+
+
+def _pol_segment_metadata() -> ModelMetadata:
+    columns = (
+        ColumnMetadata("segments:segment_idx", ColumnKind.DATA, (0, 1, 2), table="segments"),
+        ColumnMetadata("segments:t_s", ColumnKind.DATA, (0.0, 10.0, 20.0), table="segments"),
+        ColumnMetadata("segments:t_e", ColumnKind.DATA, (10.0, 20.0, 30.0), table="segments"),
+        ColumnMetadata("segments:s_x", ColumnKind.DATA, (0.0, 1.0, 3.0), table="segments"),
+        ColumnMetadata("segments:s_y", ColumnKind.DATA, (0.0, 1.0, 3.0), table="segments"),
+        ColumnMetadata("segments:e_x", ColumnKind.DATA, (1.0, 2.0, 4.0), table="segments"),
+        ColumnMetadata("segments:e_y", ColumnKind.DATA, (1.0, 2.0, 4.0), table="segments"),
+        ColumnMetadata("I_trips", ColumnKind.INDICATOR, (0, 1), table="trips"),
+        ColumnMetadata("I_segments", ColumnKind.INDICATOR, (0, 1), table="segments"),
+    )
+    return ModelMetadata(
+        columns=columns,
+        full_join_cardinality=3,
+        join_root="trips",
+        join_tables=("trips", "segments"),
+        join_edges=(("trips", "segments"),),
+    )
 
 
 def _query_context() -> GeneratedTrainingContext:
@@ -235,6 +265,217 @@ class TrajectoryDistinctTest(unittest.TestCase):
         reference = np.asarray([1.0, 0.5])
         self.assertTrue(np.allclose(combined, reference))
 
+    def test_trip_only_query_is_not_segment_measure(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            trajectory_key="trip_id",
+            segment_varying_columns=("segment.x",),
+            segment_table="segments",
+        )
+        trip_only = GeneratedTrainingContext(
+            tokens=(
+                PredicateToken.wildcard(),
+                PredicateToken.wildcard(),
+                PredicateToken.equal("train"),
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+                PredicateToken.inv_fanout(),
+            ),
+            included_tables=frozenset({"trips"}),
+            inverse_fanout_columns=frozenset({"F_trips_to_segments"}),
+            ordinary_predicates={"trip.kind": PredicateToken.equal("train")},
+        )
+        eligibility = trajectory_distinct_context_eligibility(
+            trip_only,
+            metadata,
+            provider.runtime_config,
+        )
+        self.assertFalse(eligibility.eligible)
+        self.assertEqual(eligibility.reason, "non_segment_measure")
+        result = provider.evaluate_batch(
+            anchor_trajectory_ids=("B",),
+            contexts=(trip_only,),
+        )
+        self.assertFalse(bool(result.eligible_mask[0]))
+        self.assertEqual(result.skip_reasons[0], "non_segment_measure")
+
+    def test_static_predicate_does_not_reduce_local_segment_multiplicity(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            trajectory_key="trip_id",
+            trajectory_static_columns=("trip.kind",),
+            segment_varying_columns=("segment.x",),
+            segment_table="segments",
+        )
+        static_only = GeneratedTrainingContext(
+            tokens=(
+                PredicateToken.wildcard(),
+                PredicateToken.wildcard(),
+                PredicateToken.equal("train"),
+                PredicateToken.equal(1),
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+            ),
+            included_tables=frozenset({"trips", "segments"}),
+            inverse_fanout_columns=frozenset(),
+            ordinary_predicates={"trip.kind": PredicateToken.equal("train")},
+        )
+        m = provider.matching_multiplicities(
+            anchor_trajectory_ids=("B",),
+            contexts=(static_only,),
+        )
+        self.assertEqual(int(m[0]), 3)
+        varying = _query_context()
+        m2 = provider.matching_multiplicities(
+            anchor_trajectory_ids=("B",),
+            contexts=(varying,),
+        )
+        self.assertEqual(int(m2[0]), 2)
+
+    def test_temporal_overlap_boundaries_match_pol_sql(self) -> None:
+        starts = np.asarray([0, 10, 20, 5, 12], dtype=float)
+        ends = np.asarray([10, 20, 30, 25, 13], dtype=float)
+        mask = temporal_overlap_mask(starts, ends, lower=10, upper=20)
+        # start < upper and end >= lower: ending exactly at lower matches;
+        # starting exactly at upper does not.
+        self.assertTrue(np.array_equal(mask, [True, True, False, True, True]))
+
+    def test_spatial_segment_rectangle_intersections_include_boundary_touches(self) -> None:
+        sx = np.asarray([1, -1, -1, 0, 2, -1, 0], dtype=float)
+        sy = np.asarray([1, -1, 1, 0, 2, 0, 2], dtype=float)
+        ex = np.asarray([2, -2, 3, 0, 3, 0, 2], dtype=float)
+        ey = np.asarray([2, -2, 1, 3, 3, 0, 0], dtype=float)
+        mask = segment_rectangle_intersects_mask(sx, sy, ex, ey, 0, 0, 2, 2)
+        self.assertTrue(
+            np.array_equal(mask, [True, False, True, True, True, True, True])
+        )
+
+    def test_exact_oracle_counts_logical_segment_ids_not_duplicate_rows(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, _ = _trajectory_rows(metadata)
+        duplicated = np.concatenate([rows[[0]], rows[[0]], rows[[2]]], axis=0)
+        oracle = ExactOracle(metadata, duplicated)
+        context = _query_context()
+        result = oracle.exact_distinct_trajectory_count(
+            context,
+            trajectory_ids=("A", "A", "B"),
+            segment_ids=(("A", 0), ("A", 0), ("B", 0)),
+        )
+        self.assertEqual(result.matching_segments_true, 2)
+        self.assertEqual(result.distinct_trajectories_true, 2)
+        self.assertAlmostEqual(result.a_true, 1.0)
+
+    def test_compact_mmap_index_evaluates_pol_temporal_spatial_semantics(self) -> None:
+        metadata = _pol_segment_metadata()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = write_compact_trajectory_index(
+                tmpdir,
+                metadata=metadata,
+                trip_ids=(10, 10, 20),
+                segment_idx=(0, 1, 0),
+                t_s=(0.0, 10.0, 20.0),
+                t_e=(10.0, 20.0, 30.0),
+                s_x=(0.0, 3.0, 0.0),
+                s_y=(0.0, 3.0, 3.0),
+                e_x=(1.0, 4.0, 2.0),
+                e_y=(1.0, 4.0, 3.0),
+                trajectory_static_columns=(),
+                segment_varying_columns=(
+                    "segments:segment_idx",
+                    "segments:t_s",
+                    "segments:t_e",
+                    "segments:s_x",
+                    "segments:s_y",
+                    "segments:e_x",
+                    "segments:e_y",
+                ),
+                srid=26916,
+            )
+            provider = CompactTrajectorySegmentIndex.from_directory(tmpdir)
+            self.assertEqual(manifest["index_type"], "compact_pol_segment_mmap")
+            self.assertEqual(provider.segment_count, 3)
+            self.assertGreater(provider.storage_summary()["estimated_bytes_50m_segments"], 0)
+            self.assertTrue(isinstance(provider.segment_idx, np.memmap))
+            context = GeneratedTrainingContext(
+                tokens=(
+                    PredicateToken.wildcard(),
+                    PredicateToken.wildcard(),
+                    PredicateToken.wildcard(),
+                    PredicateToken.wildcard(),
+                    PredicateToken.wildcard(),
+                    PredicateToken.wildcard(),
+                    PredicateToken.wildcard(),
+                    PredicateToken.equal(1),
+                    PredicateToken.equal(1),
+                ),
+                included_tables=frozenset({"trips", "segments"}),
+                inverse_fanout_columns=frozenset(),
+                ordinary_predicates={},
+                trajectory_query=TrajectoryQuerySemantics(
+                    temporal_predicates=(
+                        SegmentTemporalPredicate(
+                            "segments:t_s",
+                            "segments:t_e",
+                            lower=10.0,
+                            upper=20.0,
+                        ),
+                    ),
+                    spatial_predicates=(
+                        SegmentSpatialPredicate(
+                            0.0,
+                            0.0,
+                            2.0,
+                            2.0,
+                            srid=26916,
+                        ),
+                    ),
+                ),
+            )
+            result = provider.evaluate_batch(
+                anchor_trajectory_ids=(10,),
+                contexts=(context,),
+            )
+            self.assertTrue(bool(result.eligible_mask[0]))
+            self.assertEqual(int(result.multiplicities[0]), 1)
+
+    def test_compact_index_rejects_non_segment_measure(self) -> None:
+        metadata = _pol_segment_metadata()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            write_compact_trajectory_index(
+                tmpdir,
+                metadata=metadata,
+                trip_ids=(10,),
+                segment_idx=(0,),
+                t_s=(0.0,),
+                t_e=(10.0,),
+                s_x=(0.0,),
+                s_y=(0.0,),
+                e_x=(1.0,),
+                e_y=(1.0,),
+                segment_varying_columns=("segments:segment_idx",),
+            )
+            provider = CompactTrajectorySegmentIndex.from_directory(tmpdir)
+            context = GeneratedTrainingContext(
+                tokens=tuple(PredicateToken.wildcard() for _ in metadata.columns),
+                included_tables=frozenset({"trips"}),
+                inverse_fanout_columns=frozenset(),
+                ordinary_predicates={},
+            )
+            result = provider.evaluate_batch(
+                anchor_trajectory_ids=(10,),
+                contexts=(context,),
+            )
+            self.assertFalse(bool(result.eligible_mask[0]))
+            self.assertEqual(result.skip_reasons[0], "non_segment_measure")
+
 
 @unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
 class TrajectoryDistinctTorchTest(unittest.TestCase):
@@ -299,7 +540,10 @@ class TrajectoryDistinctTorchTest(unittest.TestCase):
         model = PredicateResMADE(config)
         wrapped = TorchDistributionModel(model, metadata, vocab, device="cpu")
         estimator = OnePassEstimator(wrapped, metadata)
-        result = estimator.estimate_distinct_trajectories(list(_query_context().tokens))
+        result = estimator.estimate_distinct_trajectories(
+            list(_query_context().tokens),
+            context=_query_context(),
+        )
         self.assertEqual(result.model_forward_calls, 1)
         self.assertGreater(result.matching_segment_estimate, 0.0)
         self.assertGreater(result.traj_dedup_factor, 0.0)
@@ -333,7 +577,8 @@ class TrajectoryDistinctTorchTest(unittest.TestCase):
         wrapped_disabled = TorchDistributionModel(loaded, metadata, vocab, device="cpu")
         with self.assertRaises(ValueError):
             OnePassEstimator(wrapped_disabled, metadata).estimate_distinct_trajectories(
-                list(_query_context().tokens)
+                list(_query_context().tokens),
+                context=_query_context(),
             )
 
 

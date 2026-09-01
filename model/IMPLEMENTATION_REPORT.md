@@ -538,3 +538,104 @@ Known limitation: this is deliberately the single-anchor query-only ablation.
 Tuple/FOJ and static fanout corrections are applied, but the additional
 row-first query-generator factor `G(Q | s)` is not corrected. Exact global
 distinct counts are reserved for evaluation, not training labels.
+
+### Distinct Trajectory Correctness Follow-Up
+
+The review pass tightened the first implementation around when the terminal
+correction is mathematically valid. The helper
+`trajectory_distinct_context_eligibility(...)` now makes segment-measure
+eligibility explicit: the correction is trained/applied only when the configured
+POL segment table participates in the query context. Segment-excluded trip-only
+queries are skipped during training and fail closed during distinct inference,
+avoiding the double-correction case where ordinary `INV_FANOUT` has already
+collapsed segment multiplicity.
+
+`GeneratedTrainingContext` can now carry a `TrajectoryQuerySemantics` object.
+The ordinary ResMADE input is still the same Duet predicate-token row, but the
+trajectory target provider receives the richer semantic payload needed for POL
+interval and spatial predicates. Static trajectory predicates and
+segment-varying predicates are configured separately:
+
+```text
+trajectory_static_columns: agent/trip columns constant inside one trip
+segment_varying_columns: segment_idx, t_s, t_e, s_x, s_y, e_x, e_y
+```
+
+Only segment-varying predicates reduce local `m_traj(s)(Q)`. Indicators and
+`INV_FANOUT` remain correction-only query tokens.
+
+POL temporal overlap is implemented as:
+
+```text
+segment.t_s < query_upper AND segment.t_e >= query_lower
+```
+
+POL spatial range semantics are implemented as exact line-segment versus
+axis-aligned rectangle intersection, matching the supported
+`ST_Intersects(segment_geom, ST_MakeEnvelope(...))` workload shape without using
+midpoints or loose segment bounding boxes.
+
+The provider API is batched through `TrajectoryMultiplicityBatch`, so the
+trainer calls `evaluate_batch(...)` once for the optimizer batch. The legacy
+unit-test provider keeps encoded rows grouped by trajectory, but production POL
+preparation now writes a compact mmap directory:
+
+```text
+trajectory_segment_index/
+  manifest.json
+  trajectory_ids.npy
+  offsets.npy
+  segment_idx.npy
+  t_s.npy
+  t_e.npy
+  s_x.npy
+  s_y.npy
+  e_x.npy
+  e_y.npy
+```
+
+This stores only the fields that can affect segment-local multiplicity. For 50M
+segments the raw array footprint is approximately:
+
+```text
+segment_idx int32                       4 bytes / segment
+t_s, t_e float64                       16 bytes / segment
+s_x, s_y, e_x, e_y float64             32 bytes / segment
+trajectory_ids + offsets amortized   dataset dependent
+```
+
+Ignoring the small trajectory-level amortized term, the segment arrays are about
+52 bytes per segment, or roughly 2.6 GB for 50M segments. The arrays are loaded
+with `np.load(..., mmap_mode="r")`. The manifest compatibility hash includes
+schema hash, trajectory/segment keys, static/varying column lists, SRID,
+temporal/spatial semantic versions, index format version, and target semantic
+version.
+
+`model.scripts.prepare_pol_trajectory_distinct` builds this compact index from
+the MobilityDB staging `segments.tsv` and can validate/write aligned
+`sample_trajectory_ids.npy` plus `sample_segment_ids.npy` if the sample
+materialization step provides row-aligned `trip_id, segment_idx` provenance.
+The code does not infer provenance by matching encoded rows because duplicate
+FOJ tuples can exist.
+
+Sampler wrappers now preserve trajectory and segment provenance where their
+source rows carry it. Factorization preserves provenance unchanged.
+`importance_sampling` and `rare_support` are composable in the factory as:
+
+```text
+base source -> factorized metadata -> importance main batch -> rare auxiliary
+```
+
+Fixture conditional importance sampling now selects by fixture row index and
+therefore preserves aligned `trajectory_ids`, `segment_ids`, and `rho` through
+uniform/conditional interleaving. A live or fresh conditional sampler still
+cannot invent provenance if its underlying data boundary returns only encoded
+rows; those trajectory targets are skipped rather than guessed. Fixture mode is
+therefore the supported path for trajectory-distinct training. Live sampler mode
+with `trajectory_distinct.enabled=true` fails at startup until provenance is
+emitted together with sampled FOJ rows.
+
+Validation now reports trajectory-aware MSE/ESS/target diagnostics when the
+feature is enabled, and long-run aggregate trajectory multiplicity diagnostics
+use streaming counters plus a bounded reservoir instead of retaining every
+target.

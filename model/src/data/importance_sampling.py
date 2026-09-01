@@ -21,6 +21,15 @@ from model.src.data.strata import (
 from model.src.predicates.operators import PredicateOp, PredicateToken
 
 
+@dataclass(frozen=True)
+class SampledRows:
+    encoded_values: np.ndarray
+    trajectory_ids: tuple[object, ...] | None = None
+    segment_ids: tuple[object, ...] | None = None
+    fresh_rows_drawn: int = 0
+    fixture_rows_reused: int = 0
+
+
 @dataclass
 class StreamingWeightStats:
     """Streaming moments plus a bounded deterministic reservoir for percentiles."""
@@ -703,6 +712,17 @@ class ImportanceSamplingSampleSource:
         if discard is not None:
             discard()
 
+    def prepare_root_strata(self, strata: object) -> None:
+        prepare = getattr(self.base_source, "prepare_root_strata", None)
+        if prepare is not None:
+            prepare(strata)
+
+    def sample_root_strata_rows(self, strata: object, *, rng: object) -> object:
+        sample = getattr(self.base_source, "sample_root_strata_rows", None)
+        if sample is None:
+            raise AttributeError("base source does not support batched root strata sampling")
+        return sample(strata, rng=rng)
+
     def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
         rng = np.random.default_rng(int(seed))
         proposal_start = time.perf_counter()
@@ -715,6 +735,9 @@ class ImportanceSamplingSampleSource:
 
         pieces: list[np.ndarray] = []
         positions: list[np.ndarray] = []
+        trajectory_ids: list[object | None] = [None] * batch_size
+        segment_ids: list[object | None] = [None] * batch_size
+        provenance_available = True
         ordinary_seconds = 0.0
         conditional_seconds = 0.0
         fresh_rows = 0
@@ -725,6 +748,15 @@ class ImportanceSamplingSampleSource:
             ordinary_seconds += time.perf_counter() - start
             pieces.append(uniform_batch.encoded_values)
             positions.append(np.flatnonzero(~rare_mask))
+            uniform_positions = np.flatnonzero(~rare_mask)
+            if uniform_batch.trajectory_ids is None:
+                provenance_available = False
+            else:
+                for row_position, trajectory_id in zip(uniform_positions, uniform_batch.trajectory_ids):
+                    trajectory_ids[int(row_position)] = trajectory_id
+            if uniform_batch.segment_ids is not None:
+                for row_position, segment_id in zip(uniform_positions, uniform_batch.segment_ids):
+                    segment_ids[int(row_position)] = segment_id
             fresh_rows += int(uniform_batch.fresh_rows_drawn)
             fixture_rows += int(uniform_batch.fixture_rows_reused)
         if rare_count:
@@ -739,16 +771,27 @@ class ImportanceSamplingSampleSource:
             for row_position, stratum in zip(rare_positions, selected_strata):
                 selected_ids[int(row_position)] = stratum.stratum_id
             start = time.perf_counter()
-            rows = _sample_conditionals_from_source(
+            conditional_batch = _sample_conditionals_from_source(
                 self.base_source,
                 self.provider,
                 selected_strata,
                 rng,
             )
+            rows = conditional_batch.encoded_values
+            if conditional_batch.trajectory_ids is None:
+                if getattr(self.base_source, "trajectory_multiplicity_provider", None) is not None:
+                    provenance_available = False
+            else:
+                for row_position, trajectory_id in zip(rare_positions, conditional_batch.trajectory_ids):
+                    trajectory_ids[int(row_position)] = trajectory_id
+            if conditional_batch.segment_ids is not None:
+                for row_position, segment_id in zip(rare_positions, conditional_batch.segment_ids):
+                    segment_ids[int(row_position)] = segment_id
             conditional_seconds += time.perf_counter() - start
             pieces.append(rows)
             positions.append(rare_positions)
-            fresh_rows += int(rare_count)
+            fresh_rows += int(conditional_batch.fresh_rows_drawn)
+            fixture_rows += int(conditional_batch.fixture_rows_reused)
         encoded = np.empty((batch_size, len(self.metadata.columns)), dtype=np.int64)  # type: ignore[attr-defined]
         for rows, row_positions in zip(pieces, positions):
             encoded[row_positions] = rows
@@ -791,6 +834,16 @@ class ImportanceSamplingSampleSource:
         return FullJoinBatch(
             encoded_values=encoded,
             column_metadata=self.metadata.columns,  # type: ignore[attr-defined]
+            trajectory_ids=(
+                tuple(trajectory_ids)
+                if provenance_available and any(value is not None for value in trajectory_ids)
+                else None
+            ),
+            segment_ids=(
+                tuple(segment_ids)
+                if provenance_available and any(value is not None for value in segment_ids)
+                else None
+            ),
             fresh_rows_drawn=fresh_rows,
             fixture_rows_reused=fixture_rows,
             importance_weights=rho,
@@ -1029,6 +1082,17 @@ class RareSupportSampleSource:
     def trajectory_multiplicity_provider(self) -> object:
         return getattr(self.base_source, "trajectory_multiplicity_provider")
 
+    def importance_sampling_summary(self, *args: Any, **kwargs: Any) -> object:
+        summary = getattr(self.base_source, "importance_sampling_summary", None)
+        if summary is None:
+            return {"enabled": False}
+        return summary(*args, **kwargs)
+
+    def update_importance_context_statistics(self, *args: Any, **kwargs: Any) -> None:
+        update = getattr(self.base_source, "update_importance_context_statistics", None)
+        if update is not None:
+            update(*args, **kwargs)
+
     def discard_buffer(self) -> None:
         discard = getattr(self.base_source, "discard_buffer", None)
         if discard is not None:
@@ -1048,7 +1112,7 @@ class RareSupportSampleSource:
             p=self._alpha,
         )
         selected_strata = tuple(self.selected_strata[int(index)] for index in selected)
-        rows = _sample_conditionals_from_source(
+        sampled = _sample_conditionals_from_source(
             self.base_source,
             self.provider,
             list(selected_strata),
@@ -1056,7 +1120,7 @@ class RareSupportSampleSource:
         )
         memberships = membership_matrix(
             self.metadata,
-            rows,
+            sampled.encoded_values,
             self.selected_strata,
             lookup=self._membership_lookup,
         )  # type: ignore[arg-type]
@@ -1070,9 +1134,12 @@ class RareSupportSampleSource:
         self.rare_rows_drawn += int(batch_size)
         self.selected_stratum_sample_count.update(selected_ids)
         return FullJoinBatch(
-            encoded_values=rows,
+            encoded_values=sampled.encoded_values,
             column_metadata=self.metadata.columns,  # type: ignore[attr-defined]
-            fresh_rows_drawn=int(batch_size),
+            trajectory_ids=sampled.trajectory_ids,
+            segment_ids=sampled.segment_ids,
+            fresh_rows_drawn=int(sampled.fresh_rows_drawn),
+            fixture_rows_reused=int(sampled.fixture_rows_reused),
             importance_weights=None,
             importance_metadata={
                 "selected_stratum": selected_ids,
@@ -1201,16 +1268,19 @@ def _sample_conditional_from_source(
     stratum: RootDataStratum,
     count: int,
     rng: np.random.Generator,
-) -> np.ndarray:
+) -> SampledRows:
     live_method = getattr(source, "sample_root_stratum_rows", None)
     if live_method is not None:
-        return live_method(stratum, count, rng=rng)
+        return _coerce_sampled_rows(live_method(stratum, count, rng=rng))
     base = getattr(source, "base_source", None)
     if base is not None:
         live_method = getattr(base, "sample_root_stratum_rows", None)
         if live_method is not None:
-            return live_method(stratum, count, rng=rng)
-    return provider.sample_conditional(stratum, count, rng)
+            return _coerce_sampled_rows(live_method(stratum, count, rng=rng))
+    return SampledRows(
+        encoded_values=provider.sample_conditional(stratum, count, rng),
+        fresh_rows_drawn=int(count),
+    )
 
 
 def _sample_conditionals_from_source(
@@ -1218,19 +1288,59 @@ def _sample_conditionals_from_source(
     provider: ExactRootStratumProvider,
     strata: list[RootDataStratum],
     rng: np.random.Generator,
-) -> np.ndarray:
+) -> SampledRows:
     batch_method = getattr(source, "sample_root_strata_rows", None)
     if batch_method is not None:
-        return batch_method(strata, rng=rng)
+        return _coerce_sampled_rows(batch_method(strata, rng=rng))
     pieces: list[np.ndarray] = []
+    trajectory_ids: list[object] = []
+    segment_ids: list[object] = []
+    have_trajectory_ids = True
+    have_segment_ids = True
+    fresh_rows = 0
+    fixture_rows = 0
     for stratum_index, stratum in enumerate(strata):
-        rows = _sample_conditional_from_source(source, provider, stratum, 1, rng)
+        sampled = _sample_conditional_from_source(source, provider, stratum, 1, rng)
+        rows = sampled.encoded_values
         if rows.shape[0] != 1:
             raise ValueError("conditional single-row sampler returned unexpected row count")
         pieces.append(rows)
+        fresh_rows += int(sampled.fresh_rows_drawn)
+        fixture_rows += int(sampled.fixture_rows_reused)
+        if sampled.trajectory_ids is None:
+            have_trajectory_ids = False
+        else:
+            trajectory_ids.extend(sampled.trajectory_ids)
+        if sampled.segment_ids is None:
+            have_segment_ids = False
+        else:
+            segment_ids.extend(sampled.segment_ids)
     if not pieces:
-        return np.empty((0, len(provider.metadata.columns)), dtype=np.int64)
-    return np.concatenate(pieces, axis=0)
+        return SampledRows(
+            encoded_values=np.empty((0, len(provider.metadata.columns)), dtype=np.int64)
+        )
+    return SampledRows(
+        encoded_values=np.concatenate(pieces, axis=0),
+        trajectory_ids=tuple(trajectory_ids) if have_trajectory_ids else None,
+        segment_ids=tuple(segment_ids) if have_segment_ids else None,
+        fresh_rows_drawn=fresh_rows,
+        fixture_rows_reused=fixture_rows,
+    )
+
+
+def _coerce_sampled_rows(value: object) -> SampledRows:
+    if isinstance(value, SampledRows):
+        return value
+    if isinstance(value, FullJoinBatch):
+        return SampledRows(
+            encoded_values=value.encoded_values,
+            trajectory_ids=value.trajectory_ids,
+            segment_ids=value.segment_ids,
+            fresh_rows_drawn=value.fresh_rows_drawn,
+            fixture_rows_reused=value.fixture_rows_reused,
+        )
+    encoded = np.asarray(value, dtype=np.int64)
+    return SampledRows(encoded_values=encoded, fresh_rows_drawn=int(encoded.shape[0]))
 
 
 def _array_summary(values: np.ndarray) -> dict[str, float]:

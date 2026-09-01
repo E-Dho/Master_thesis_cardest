@@ -5,7 +5,8 @@ dataset:
   sampling_mode: fixture
   sample_batch_size: 2048
   trajectory_ids_path: data/pol_prepared/pol_50m/sample_trajectory_ids.npy
-  trajectory_index_path: data/pol_prepared/pol_50m/trajectory_segment_index.npz
+  segment_ids_path: data/pol_prepared/pol_50m/sample_segment_ids.npy
+  trajectory_index_path: data/pol_prepared/pol_50m/trajectory_segment_index
   num_workers: 0
 
 schema:
@@ -103,17 +104,30 @@ trajectory_distinct:
   loss_weight: 1.0
   output_activation: sigmoid
   anchor_samples_per_query: 1
+  entity_table: trips
+  segment_table: segments
   trajectory_key: trip_id
+  segment_key: trip_id,segment_idx
   predicate_scope: segment_query
-  predicate_columns:
+  srid: 26916
+  trajectory_static_columns:
+    - agents:age
+    - agents:educationLevel
+    - agents:interest
+    - agents:joviality
+    - agents:family_size
     - trips:num_of_segments
     - trips:start_time
     - trips:end_time
     - trips:trip_geom
+  segment_varying_columns:
     - segments:segment_idx
     - segments:t_s
     - segments:t_e
-    - segments:segment_geom
+    - segments:s_x
+    - segments:s_y
+    - segments:e_x
+    - segments:e_y
 
 training:
   seed: 0
