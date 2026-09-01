@@ -664,13 +664,17 @@ TrajectoryQuerySemantics:
                            semantics="overlap")
 ```
 
-For POL spatial contexts, one sampled rectangle produces coordinate predicate
-tokens for the current ResMADE conditioning approximation and a
-`SegmentSpatialPredicate` carrying the physical rectangle. Local trajectory
-multiplicity and the exact oracle use the physical line-segment/AABB
-intersection semantics. `semantic_owned_columns(...)` prevents those columns
-from being scalar-filtered a second time before applying the richer semantic
-predicate.
+For POL spatial contexts, one sampled rectangle can produce coordinate
+predicate tokens for the current ResMADE endpoint-conditioning approximation
+and a `SegmentSpatialPredicate` carrying the physical rectangle. Endpoint
+containment is not equivalent to physical
+`ST_Intersects(segment_geom, ST_MakeEnvelope(...))`, so this branch does not
+combine an endpoint-conditioned base estimate with physical spatial
+multiplicity. Spatial/spatio-temporal distinct estimates fail closed with
+`unsupported_base_segment_spatial_measure`, and spatial trajectory targets are
+skipped for training until the base segment estimator represents line/AABB
+intersection as the same event. The exact spatial multiplicity and oracle
+utilities remain implemented and tested for future physical spatial support.
 
 The exact oracle now evaluates `context_satisfies_row_with_trajectory_semantics`
 so exact `M_true`, `D_true`, and `a_true` share semantics with the local
@@ -694,7 +698,8 @@ a giant in-memory global sort. The helper
 `sample_trajectory_ids.npy`, and `[N,2] int64 sample_segment_ids.npy` from the
 same full-join TSV rows.
 
-Validation trajectory metrics now aggregate globally:
+Validation trajectory metrics now aggregate globally from unscaled terminal log
+weights:
 
 ```text
 validation_traj_weighted_mse = sum(w * squared_error) / sum(w)

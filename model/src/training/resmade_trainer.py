@@ -12,7 +12,10 @@ import numpy as np
 from model.src.config import resolve_device
 from model.src.data.full_join_sampler import FullJoinBatch
 from model.src.data.schema import ColumnKind
-from model.src.data.trajectory_distinct import UnsupportedTrajectoryContext
+from model.src.data.trajectory_distinct import (
+    TRAJECTORY_TARGET_SEMANTICS_VERSION,
+    trajectory_base_measure_support,
+)
 from model.src.model.anpm import ANPMConfig
 from model.src.model.checkpoint import save_resmade_checkpoint
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
@@ -38,8 +41,7 @@ from model.src.training.losses import (
     effective_sample_size,
     importance_weights_for_generated_contexts,
     stable_combine_importance_and_inverse_weights,
-    stable_combine_importance_and_terminal_inverse_weights,
-    terminal_inverse_fanout_weights,
+    terminal_log_weights,
 )
 from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
 
@@ -167,6 +169,7 @@ class _RunningTrajectoryDistinctStats:
     targets_generated: int = 0
     targets_skipped: int = 0
     skipped_non_segment_measure: int = 0
+    skipped_base_spatial_measure: int = 0
     skipped_unsupported_semantics: int = 0
     skipped_missing_provenance: int = 0
     target_failures: int = 0
@@ -189,6 +192,9 @@ class _RunningTrajectoryDistinctStats:
     unweighted_squared_error_sum: float = 0.0
     traj_loss_weight_sum: float = 0.0
     traj_loss_weight_sq_sum: float = 0.0
+    log_weight_sum: float = float("-inf")
+    log_weight_sq_sum: float = float("-inf")
+    log_weighted_squared_error_sum: float = float("-inf")
     target_sum: float = 0.0
     prediction_sum: float = 0.0
 
@@ -200,6 +206,9 @@ class _RunningTrajectoryDistinctStats:
         self.targets_skipped += int(diagnostics.get("trajectory_targets_skipped", 0))
         self.skipped_non_segment_measure += int(
             diagnostics.get("trajectory_targets_skipped_non_segment_measure", 0)
+        )
+        self.skipped_base_spatial_measure += int(
+            diagnostics.get("trajectory_targets_skipped_base_spatial_measure", 0)
         )
         self.skipped_unsupported_semantics += int(
             diagnostics.get("trajectory_targets_skipped_unsupported_semantics", 0)
@@ -224,6 +233,21 @@ class _RunningTrajectoryDistinctStats:
             self.traj_loss_weight_sq_sum += float(
                 diagnostics.get("traj_loss_weight_sq_sum", 0.0)
             )
+            for attr, key in [
+                ("log_weight_sum", "traj_log_weight_sum"),
+                ("log_weight_sq_sum", "traj_log_weight_sq_sum"),
+                (
+                    "log_weighted_squared_error_sum",
+                    "traj_log_weighted_squared_error_sum",
+                ),
+            ]:
+                value = diagnostics.get(key)
+                if value is not None and np.isfinite(float(value)):
+                    setattr(
+                        self,
+                        attr,
+                        float(np.logaddexp(getattr(self, attr), float(value))),
+                    )
             self.target_sum += float(diagnostics.get("target_sum", 0.0))
             self.prediction_sum += float(diagnostics.get("prediction_sum", 0.0))
             m_min = int(diagnostics.get("m_min", 0))
@@ -295,6 +319,9 @@ class _RunningTrajectoryDistinctStats:
             "trajectory_targets_skipped_non_segment_measure": int(
                 self.skipped_non_segment_measure
             ),
+            "trajectory_targets_skipped_base_spatial_measure": int(
+                self.skipped_base_spatial_measure
+            ),
             "trajectory_targets_skipped_unsupported_semantics": int(
                 self.skipped_unsupported_semantics
             ),
@@ -311,8 +338,9 @@ class _RunningTrajectoryDistinctStats:
             "weighted_mse": self.weighted_mse.to_json_dict(),
             "unweighted_mse": self.unweighted_mse.to_json_dict(),
             "global_weighted_mse": (
-                float(self.weighted_squared_error_sum / self.traj_loss_weight_sum)
-                if self.traj_loss_weight_sum > 0.0
+                float(np.exp(self.log_weighted_squared_error_sum - self.log_weight_sum))
+                if np.isfinite(self.log_weight_sum)
+                and np.isfinite(self.log_weighted_squared_error_sum)
                 else None
             ),
             "global_unweighted_mse": (
@@ -331,12 +359,25 @@ class _RunningTrajectoryDistinctStats:
                 else None
             ),
             "global_weighted_ess": (
-                float((self.traj_loss_weight_sum * self.traj_loss_weight_sum) / self.traj_loss_weight_sq_sum)
-                if self.traj_loss_weight_sq_sum > 0.0
+                float(np.exp(2.0 * self.log_weight_sum - self.log_weight_sq_sum))
+                if np.isfinite(self.log_weight_sum) and np.isfinite(self.log_weight_sq_sum)
                 else None
             ),
             "traj_loss_weight_sum": float(self.traj_loss_weight_sum),
             "traj_loss_weight_sq_sum": float(self.traj_loss_weight_sq_sum),
+            "traj_log_weight_sum": (
+                float(self.log_weight_sum) if np.isfinite(self.log_weight_sum) else None
+            ),
+            "traj_log_weight_sq_sum": (
+                float(self.log_weight_sq_sum)
+                if np.isfinite(self.log_weight_sq_sum)
+                else None
+            ),
+            "traj_log_weighted_squared_error_sum": (
+                float(self.log_weighted_squared_error_sum)
+                if np.isfinite(self.log_weighted_squared_error_sum)
+                else None
+            ),
             "weighted_ess": self.weighted_ess.to_json_dict(),
             "provider_seconds": self.provider_seconds.to_json_dict(),
             "warning": warning,
@@ -779,7 +820,20 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     validation_fixture_rows_reused += int(
                         validation_metrics["validation_fixture_rows_reused"]
                     )
-                    selected_value = float(validation_metrics[selection_metric])
+                    raw_selected_value = validation_metrics.get(selection_metric)
+                    if raw_selected_value is None:
+                        if (
+                            selection_metric == "validation_traj_weighted_mse"
+                            and bool(config.get("trajectory_distinct", {}).get("enabled", False))
+                        ):
+                            raise ValueError(
+                                "validation selection metric validation_traj_weighted_mse "
+                                "is unavailable because no eligible trajectory targets were generated"
+                            )
+                        raise ValueError(
+                            f"validation selection metric {selection_metric} is unavailable"
+                        )
+                    selected_value = float(raw_selected_value)
                     improved = (
                         best_metric is None
                         or (selected_value < best_metric if minimize_selection else selected_value > best_metric)
@@ -1051,7 +1105,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             "tuple_measure_correction": "applied",
             "static_fanout_correction": "applied",
             "query_generator_G_Q_given_s_correction": "not_applied_single_anchor_ablation",
-            "target_semantics_version": "single_anchor_query_only_v1",
+            "target_semantics_version": TRAJECTORY_TARGET_SEMANTICS_VERSION,
             "last_step": last_trajectory_distinct_stats,
         },
         "output_width_original": output_width_original,
@@ -1468,6 +1522,7 @@ def trajectory_dedup_loss_for_batch(
             "trajectory_targets_skipped": int(len(contexts)),
             "trajectory_targets_skipped_missing_provenance": int(len(contexts)),
             "trajectory_targets_skipped_non_segment_measure": 0,
+            "trajectory_targets_skipped_base_spatial_measure": 0,
             "trajectory_targets_skipped_unsupported_semantics": 0,
             "trajectory_target_failures": 0,
             "fraction_targets_eligible": 0.0,
@@ -1477,16 +1532,37 @@ def trajectory_dedup_loss_for_batch(
     if source_indices.shape != (len(contexts),):
         raise ValueError("trajectory source_row_indices must align with contexts")
     anchor_ids = [batch.trajectory_ids[int(index)] for index in source_indices]
-    result = provider.evaluate_batch(
-        anchor_trajectory_ids=anchor_ids,
-        contexts=contexts,
-    )
-    eligible_indices = np.flatnonzero(result.eligible_mask)
-    skipped = int(len(contexts) - len(eligible_indices))
+    base_supported_indices: list[int] = []
     skip_counts: dict[str, int] = {}
-    for reason in result.skip_reasons:
-        if reason is not None:
+    for context_index, context in enumerate(contexts):
+        support = trajectory_base_measure_support(context)
+        if support.eligible:
+            base_supported_indices.append(context_index)
+        else:
+            reason = support.reason or "unsupported_base_segment_measure"
             skip_counts[reason] = int(skip_counts.get(reason, 0)) + 1
+    candidate_indices = np.asarray(base_supported_indices, dtype=int)
+    result = None
+    provider_seconds = 0.0
+    lookup_seconds = 0.0
+    predicate_eval_seconds = 0.0
+    if candidate_indices.size:
+        result = provider.evaluate_batch(
+            anchor_trajectory_ids=[anchor_ids[int(index)] for index in candidate_indices],
+            contexts=[contexts[int(index)] for index in candidate_indices],
+        )
+        provider_seconds = float(result.provider_seconds)
+        lookup_seconds = float(result.lookup_seconds)
+        predicate_eval_seconds = float(result.predicate_eval_seconds)
+        for reason in result.skip_reasons:
+            if reason is not None:
+                skip_counts[reason] = int(skip_counts.get(reason, 0)) + 1
+        eligible_local_indices = np.flatnonzero(result.eligible_mask)
+        eligible_indices = candidate_indices[eligible_local_indices]
+    else:
+        eligible_local_indices = np.empty(0, dtype=int)
+        eligible_indices = np.empty(0, dtype=int)
+    skipped = int(len(contexts) - len(eligible_indices))
     if eligible_indices.size == 0:
         zero_loss = predictions.sum() * 0.0
         return zero_loss, {
@@ -1497,6 +1573,9 @@ def trajectory_dedup_loss_for_batch(
             "trajectory_targets_skipped_non_segment_measure": int(
                 skip_counts.get("non_segment_measure", 0)
             ),
+            "trajectory_targets_skipped_base_spatial_measure": int(
+                skip_counts.get("unsupported_base_segment_spatial_measure", 0)
+            ),
             "trajectory_targets_skipped_unsupported_semantics": int(
                 skip_counts.get("unsupported_semantics", 0)
             ),
@@ -1505,12 +1584,14 @@ def trajectory_dedup_loss_for_batch(
             ),
             "trajectory_target_failures": 0,
             "fraction_targets_eligible": 0.0,
-            "traj_provider_seconds": float(result.provider_seconds),
-            "traj_target_lookup_seconds": float(result.lookup_seconds),
-            "traj_target_predicate_eval_seconds": float(result.predicate_eval_seconds),
+            "traj_provider_seconds": provider_seconds,
+            "traj_target_lookup_seconds": lookup_seconds,
+            "traj_target_predicate_eval_seconds": predicate_eval_seconds,
             "warning": "no segment-measure trajectory targets in this batch",
         }
-    multiplicities = result.multiplicities[eligible_indices].astype(int)
+    assert result is not None
+    multiplicities = result.multiplicities[eligible_local_indices].astype(int)
+    segments_scanned = result.segments_scanned[eligible_local_indices]
     wildcard_group_counts: dict[str, int] = {}
     operator_pattern_counts: dict[str, int] = {}
     table_subset_pattern_counts: dict[str, int] = {}
@@ -1528,9 +1609,9 @@ def trajectory_dedup_loss_for_batch(
             tuple(trajectory_predicate_columns),
         )
     )
-    for context_index in eligible_indices:
+    for context_index, multiplicity in zip(eligible_indices, multiplicities):
         context = contexts[int(context_index)]
-        multiplicity = int(result.multiplicities[int(context_index)])
+        multiplicity = int(multiplicity)
         if multiplicity <= 0:
             raise ValueError("trajectory multiplicity must be positive for accepted targets")
         wildcarded = sum(
@@ -1578,15 +1659,14 @@ def trajectory_dedup_loss_for_batch(
         ) + 1
     indices = eligible_indices.astype(int)
     targets = 1.0 / multiplicities.astype(float)
-    terminal_inv = terminal_inverse_fanout_weights(
+    terminal_log_inv = terminal_log_weights(
         target_rows[indices],
         [token_rows[index] for index in indices],
         metadata,
-        compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
     )
+    terminal_inv = np.exp(terminal_log_inv)
     inv_only_for_diagnostics = terminal_inv.copy()
     rho = None
-    weights = terminal_inv
     importance_stats: dict[str, Any] = {"enabled": False}
     if batch.importance_weights is not None:
         all_rho = importance_weights_for_generated_contexts(
@@ -1595,10 +1675,6 @@ def trajectory_dedup_loss_for_batch(
             generation_stats,
         )
         rho = all_rho[indices]
-        weights = stable_combine_importance_and_terminal_inverse_weights(
-            terminal_inv,
-            rho,
-        )
         importance_stats = {
             "enabled": True,
             "rho_min": float(np.min(rho)),
@@ -1606,6 +1682,14 @@ def trajectory_dedup_loss_for_batch(
             "rho_mean": float(np.mean(rho)),
             "rho_ess": effective_sample_size(rho),
         }
+    log_weights = terminal_log_weights(
+        target_rows[indices],
+        [token_rows[index] for index in indices],
+        metadata,
+        rho=rho,
+    )
+    shift = float(np.max(log_weights))
+    weights = np.exp(log_weights - shift)
     if np.any(weights <= 0.0) or not np.all(np.isfinite(weights)):
         raise ValueError("trajectory weights must be finite and positive")
     pred = predictions[torch.tensor(indices, dtype=torch.long, device=device), 0]
@@ -1617,6 +1701,14 @@ def trajectory_dedup_loss_for_batch(
     squared_np = (detached_pred - targets) ** 2
     unweighted_squared_error_sum = float(np.sum(squared_np))
     weighted_squared_error_sum = float(np.dot(weights, squared_np))
+    positive_error = squared_np > 0.0
+    traj_log_weight_sum = float(np.logaddexp.reduce(log_weights))
+    traj_log_weight_sq_sum = float(np.logaddexp.reduce(2.0 * log_weights))
+    traj_log_weighted_squared_error_sum = (
+        float(np.logaddexp.reduce(log_weights[positive_error] + np.log(squared_np[positive_error])))
+        if np.any(positive_error)
+        else float("-inf")
+    )
     unweighted_mse = float(unweighted_squared_error_sum / max(len(targets), 1))
     weighted_mse = float(loss.detach().cpu())
     stats = {
@@ -1626,6 +1718,9 @@ def trajectory_dedup_loss_for_batch(
         "trajectory_targets_skipped": int(skipped),
         "trajectory_targets_skipped_non_segment_measure": int(
             skip_counts.get("non_segment_measure", 0)
+        ),
+        "trajectory_targets_skipped_base_spatial_measure": int(
+            skip_counts.get("unsupported_base_segment_spatial_measure", 0)
         ),
         "trajectory_targets_skipped_unsupported_semantics": int(
             skip_counts.get("unsupported_semantics", 0)
@@ -1670,21 +1765,24 @@ def trajectory_dedup_loss_for_batch(
         "traj_dedup_inv_only_ess": effective_sample_size(inv_only_for_diagnostics),
         "traj_loss_weight_sum": float(np.sum(weights)),
         "traj_loss_weight_sq_sum": float(np.dot(weights, weights)),
+        "traj_log_weight_sum": traj_log_weight_sum,
+        "traj_log_weight_sq_sum": traj_log_weight_sq_sum,
+        "traj_log_weighted_squared_error_sum": traj_log_weighted_squared_error_sum,
         "traj_weight_ess": effective_sample_size(weights),
         "traj_inv_only_ess": effective_sample_size(inv_only_for_diagnostics),
-        "traj_provider_seconds": float(result.provider_seconds),
-        "traj_target_lookup_seconds": float(result.lookup_seconds),
-        "traj_target_predicate_eval_seconds": float(result.predicate_eval_seconds),
+        "traj_provider_seconds": provider_seconds,
+        "traj_target_lookup_seconds": lookup_seconds,
+        "traj_target_predicate_eval_seconds": predicate_eval_seconds,
         "traj_targets_per_second": float(
             len(eligible_indices) / result.provider_seconds
             if result.provider_seconds > 0.0
             else 0.0
         ),
         "average_segments_scanned_per_target": float(
-            np.mean(result.segments_scanned[indices])
+            np.mean(segments_scanned)
         ),
         "p95_segments_scanned_per_target": float(
-            np.percentile(result.segments_scanned[indices], 95)
+            np.percentile(segments_scanned, 95)
         ),
         "tuple_measure_correction": "applied" if rho is not None else "not_applicable",
         "static_fanout_correction": "applied",
@@ -2003,6 +2101,18 @@ def _run_validation(
         ),
         "validation_traj_skipped_count": trajectory_summary.get(
             "trajectory_targets_skipped",
+            0,
+        ),
+        "validation_traj_skipped_non_segment_measure": trajectory_summary.get(
+            "trajectory_targets_skipped_non_segment_measure",
+            0,
+        ),
+        "validation_traj_skipped_base_spatial_measure": trajectory_summary.get(
+            "trajectory_targets_skipped_base_spatial_measure",
+            0,
+        ),
+        "validation_traj_skipped_unsupported_semantics": trajectory_summary.get(
+            "trajectory_targets_skipped_unsupported_semantics",
             0,
         ),
         "validation_traj_m_mean": trajectory_summary.get("multiplicity", {}).get("mean"),

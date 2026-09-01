@@ -72,6 +72,28 @@ class TrajectoryDistinctRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class SegmentMeasureCapability:
+    """Physical segment-query semantics represented by the base estimator.
+
+    The current one-pass AR factor product can represent scalar column tokens
+    and POL temporal overlap via ``t_s < upper`` and ``t_e >= lower``. It does
+    not represent physical line/rectangle ``ST_Intersects``; endpoint-coordinate
+    range tokens are only endpoint conditioning and are not equivalent.
+    """
+
+    supports_scalar: bool = True
+    supports_temporal_overlap: bool = True
+    supports_spatial_intersects: bool = False
+
+
+ONE_PASS_AR_SEGMENT_MEASURE_CAPABILITY = SegmentMeasureCapability(
+    supports_scalar=True,
+    supports_temporal_overlap=True,
+    supports_spatial_intersects=False,
+)
+
+
+@dataclass(frozen=True)
 class SegmentTemporalPredicate:
     start_column: str
     end_column: str
@@ -247,6 +269,28 @@ def trajectory_distinct_context_eligibility(
         return TrajectoryDistinctEligibility(False, "unsupported_predicate_scope")
     if config.segment_table not in context.included_tables:
         return TrajectoryDistinctEligibility(False, "non_segment_measure")
+    return TrajectoryDistinctEligibility(True, None)
+
+
+def trajectory_base_measure_support(
+    context: GeneratedTrainingContext,
+    capability: SegmentMeasureCapability = ONE_PASS_AR_SEGMENT_MEASURE_CAPABILITY,
+) -> TrajectoryDistinctEligibility:
+    """Return whether the base segment estimator models the same event as Q."""
+
+    query = getattr(context, "trajectory_query", None)
+    if query is None:
+        return (
+            TrajectoryDistinctEligibility(True, None)
+            if capability.supports_scalar
+            else TrajectoryDistinctEligibility(False, "unsupported_base_segment_scalar_measure")
+        )
+    if getattr(query, "spatial_predicates", ()) and not capability.supports_spatial_intersects:
+        return TrajectoryDistinctEligibility(False, "unsupported_base_segment_spatial_measure")
+    if getattr(query, "temporal_predicates", ()) and not capability.supports_temporal_overlap:
+        return TrajectoryDistinctEligibility(False, "unsupported_base_segment_temporal_measure")
+    if getattr(query, "scalar_predicates", ()) and not capability.supports_scalar:
+        return TrajectoryDistinctEligibility(False, "unsupported_base_segment_scalar_measure")
     return TrajectoryDistinctEligibility(True, None)
 
 

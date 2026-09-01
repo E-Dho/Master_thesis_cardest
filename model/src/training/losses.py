@@ -162,6 +162,48 @@ def terminal_inverse_fanout_weights(
     return weights
 
 
+def terminal_log_weights(
+    encoded_rows: np.ndarray,
+    tokens: list[list[PredicateToken]],
+    metadata: ModelMetadata,
+    *,
+    rho: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return unscaled log weights for the terminal trajectory head.
+
+    ``log w_b = log rho_b + sum_{T_r=INV_FANOUT} -log f_r^(b)``. The caller may
+    subtract a per-batch maximum from this vector for a stable loss, but global
+    diagnostics must retain these unshifted values.
+    """
+
+    encoded_rows = np.asarray(encoded_rows, dtype=int)
+    batch_size, num_columns = encoded_rows.shape
+    if num_columns != len(metadata.columns):
+        raise ValueError("encoded row width does not match metadata")
+    if len(tokens) != batch_size or any(len(row) != num_columns for row in tokens):
+        raise ValueError("tokens must have shape [batch_size, number_of_columns]")
+    log_weights = np.zeros(batch_size, dtype=float)
+    if rho is not None:
+        rho_array = np.asarray(rho, dtype=float)
+        if rho_array.shape != (batch_size,):
+            raise ValueError("rho must have shape [batch_size]")
+        if np.any(rho_array <= 0.0) or not np.all(np.isfinite(rho_array)):
+            raise ValueError("importance weights rho must be finite and positive")
+        log_weights += np.log(rho_array)
+    for column_index, column in enumerate(metadata.columns):
+        if column.kind != ColumnKind.FANOUT:
+            continue
+        for row_index, token_row in enumerate(tokens):
+            if token_row[column_index].op != PredicateOp.INV_FANOUT:
+                continue
+            encoded_value = encoded_rows[row_index, column_index]
+            fanout_value = float(column.domain[encoded_value])
+            if fanout_value <= 0:
+                raise ValueError("fanout values used in inverse weights must be positive")
+            log_weights[row_index] -= np.log(fanout_value)
+    return log_weights
+
+
 def stable_combine_importance_and_terminal_inverse_weights(
     inv_weights: np.ndarray,
     rho: np.ndarray,

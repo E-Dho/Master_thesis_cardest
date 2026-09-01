@@ -10,6 +10,7 @@ from model.src.data.schema import ModelMetadata
 from model.src.data.trajectory_distinct import (
     TrajectoryDistinctNotApplicable,
     TrajectoryDistinctRuntimeConfig,
+    trajectory_base_measure_support,
     trajectory_distinct_context_eligibility,
 )
 from model.src.predicates.generation import GeneratedTrainingContext
@@ -102,6 +103,11 @@ class OnePassEstimator:
         if not eligibility.eligible:
             raise TrajectoryDistinctNotApplicable(
                 eligibility.reason or "trajectory distinct is not applicable"
+            )
+        base_support = trajectory_base_measure_support(context)
+        if not base_support.eligible:
+            raise TrajectoryDistinctNotApplicable(
+                base_support.reason or "unsupported_base_segment_measure"
             )
         start_calls = int(getattr(getattr(self.model, "resmade", self.model), "forward_calls", 0))
         start = perf_counter()

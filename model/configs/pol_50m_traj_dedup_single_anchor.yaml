@@ -70,7 +70,7 @@ predicate_generation:
   seed: 0
   trajectory_query_semantics: pol_segments
   trajectory_temporal_probability: 0.35
-  trajectory_spatial_probability: 0.35
+  trajectory_spatial_probability: 0.0
   trajectory_srid: 26916
 
 predicate_encoding:
@@ -153,6 +153,14 @@ inference:
   progressive_sampling: false
   factorized_decoder: anpm
   use_log_space_product: true
+
+validation:
+  enabled: true
+  interval_steps: 250
+  fresh_sampler_batches: 4
+  batch_size: 2048
+  selection_metric: validation_traj_weighted_mse
+  minimize: true
 
 logging:
   output_directory: model/runs/pol_50m_traj_dedup_single_anchor

@@ -265,18 +265,21 @@ multiplicity. Columns that can vary among segments are
 `segment_varying_columns`; only these ordinary predicates are evaluated inside
 `m_t(Q)`. Indicator tokens and `INV_FANOUT` remain correction-only.
 
-POL temporal and spatial predicates use workload semantics rather than generic
-dictionary comparisons. Temporal overlap is:
+POL temporal predicates use workload semantics rather than generic dictionary
+comparisons. Temporal overlap is:
 
 ```text
 segments.t_s < query_upper AND segments.t_e >= query_lower
 ```
 
-Spatial range predicates use exact line-segment versus axis-aligned rectangle
-intersection for the POL `ST_Intersects(segment_geom, ST_MakeEnvelope(...))`
-case. The semantic payload is carried on `GeneratedTrainingContext` as an
-optional `TrajectoryQuerySemantics`, while the normal model still consumes the
-ordinary Duet predicate tokens.
+Physical POL spatial workload predicates use exact line-segment versus
+axis-aligned rectangle intersection for the
+`ST_Intersects(segment_geom, ST_MakeEnvelope(...))` case. The semantic payload is
+carried on `GeneratedTrainingContext` as an optional `TrajectoryQuerySemantics`,
+while the normal model still consumes ordinary Duet predicate tokens. The
+current one-pass base segment estimator can condition on scalar endpoint
+coordinates, but endpoint containment is not equivalent to physical
+line/rectangle intersection.
 
 The production predicate generator now creates one physical query decision and
 derives both representations from it:
@@ -290,12 +293,13 @@ sampled FOJ row
 
 For POL temporal predicates, the same `lower` and `upper` bounds produce
 `segments:t_e >= lower`, `segments:t_s < upper`, and the trajectory overlap
-predicate. For POL spatial predicates, one sampled rectangle is retained as the
-physical `ST_Intersects` rectangle; the model-side coordinate tokens are the
-current scalar approximation of that same rectangle. The trajectory target and
-exact distinct oracle use the physical line/rectangle semantics. Semantic-owned
-columns are skipped by generic scalar filtering so temporal/spatial predicates
-are not applied twice.
+predicate. For POL spatial predicates, exact multiplicity/oracle utilities
+retain the physical `ST_Intersects` rectangle for future extensions. Spatial
+`D_hat = M_hat * traj_dedup_factor` is intentionally disabled in this branch:
+training skips spatial trajectory targets with
+`unsupported_base_segment_spatial_measure`, and inference fails closed for
+spatial/spatio-temporal distinct trajectory queries until the base segment
+estimator represents the same physical event.
 
 The terminal trajectory loss uses the main-batch tuple importance correction
 when present and multiplies every active `INV_FANOUT` reciprocal because the
@@ -304,6 +308,10 @@ head sits after all fanout columns:
 ```text
 w_traj = rho * product_{r: T_r = INV_FANOUT} 1 / f_r
 ```
+
+For numerical stability, the batch loss may subtract a per-batch maximum log
+weight before normalizing. Run-level and validation diagnostics aggregate the
+unscaled log weights in log space before reporting global weighted MSE and ESS.
 
 The current ablation is intentionally single-anchor and query-only. It does not
 create labels from global `COUNT(DISTINCT trajectory_id)`, does not enumerate

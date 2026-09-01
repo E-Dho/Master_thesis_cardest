@@ -633,6 +633,16 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         rng: np.random.Generator,
     ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
+        """Sample the current model-side endpoint-box spatial approximation.
+
+        The four scalar tokens below condition both segment endpoints to lie in
+        the sampled rectangle. That is not equivalent to physical
+        ``ST_Intersects(segment_geom, R)`` for crossing segments whose endpoints
+        are outside the rectangle. Distinct-trajectory supervision gates these
+        physical spatial predicates until the base segment estimator supports
+        line/rectangle intersection as the same event.
+        """
+
         from model.src.data.trajectory_distinct import SegmentSpatialPredicate
 
         column_names = ("segments:s_x", "segments:s_y", "segments:e_x", "segments:e_y")
