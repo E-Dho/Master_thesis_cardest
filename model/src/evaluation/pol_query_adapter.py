@@ -36,9 +36,25 @@ class PolDistinctEvaluation:
     a_hat: float | None = None
     a_abs_error: float | None = None
     model_forward_calls: int | None = None
+    database_matching_segments_true: int | None = None
+    database_distinct_trajectories_true: int | None = None
+    database_a_true: float | None = None
+    database_truth_status: str = "missing_database_truth"
+    fixture_matching_segments: int | None = None
+    fixture_distinct_trajectories: int | None = None
+    fixture_a: float | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
+
+
+@dataclass(frozen=True)
+class DatabaseTrajectoryTruth:
+    available: bool
+    status: str
+    matching_segments_true: int | None = None
+    distinct_trajectories_true: int | None = None
+    a_true: float | None = None
 
 
 def pol_workload_record_to_context(
@@ -96,11 +112,12 @@ def pol_workload_record_to_context(
             min_y = float(predicate["min_y"])
             max_x = float(predicate["max_x"])
             max_y = float(predicate["max_y"])
-            for column_name in columns:
-                if column_name.endswith(":s_x") or column_name.endswith(":e_x"):
-                    ordinary[column_name] = PredicateToken.range(min_x, max_x)
-                else:
-                    ordinary[column_name] = PredicateToken.range(min_y, max_y)
+            if _metadata_has_columns(metadata, columns):
+                for column_name in columns:
+                    if column_name.endswith(":s_x") or column_name.endswith(":e_x"):
+                        ordinary[column_name] = PredicateToken.range(min_x, max_x)
+                    else:
+                        ordinary[column_name] = PredicateToken.range(min_y, max_y)
             spatial_predicates.append(
                 SegmentSpatialPredicate(
                     min_x,
@@ -136,6 +153,40 @@ def pol_workload_record_to_context(
     )
 
 
+def database_truth_for_trajectory_query(
+    record: Mapping[str, Any],
+    context: GeneratedTrainingContext,
+    *,
+    trajectory_key: str = "trip_id",
+    segment_table: str = "segments",
+) -> DatabaseTrajectoryTruth:
+    """Return population truth from executed POL workload fields when eligible."""
+
+    if segment_table not in context.included_tables:
+        return DatabaseTrajectoryTruth(False, "non_segment_measure")
+    raw_join = record.get("join_cardinality")
+    raw_entity = record.get("entity_cardinality")
+    if raw_join is None or raw_entity is None:
+        return DatabaseTrajectoryTruth(False, "missing_database_truth")
+    entity_key = record.get("entity_key")
+    if entity_key is not None and str(entity_key) != trajectory_key:
+        return DatabaseTrajectoryTruth(False, "entity_cardinality_not_trajectory_key")
+    entity_sql = record.get("entity_sql")
+    if entity_sql is not None and trajectory_key not in str(entity_sql):
+        return DatabaseTrajectoryTruth(False, "entity_cardinality_not_trajectory_key")
+    matching = int(raw_join)
+    distinct = int(raw_entity)
+    if matching < 0 or distinct < 0:
+        return DatabaseTrajectoryTruth(False, "negative_database_truth")
+    return DatabaseTrajectoryTruth(
+        True,
+        "database_truth_available",
+        matching_segments_true=matching,
+        distinct_trajectories_true=distinct,
+        a_true=0.0 if matching == 0 else float(distinct / matching),
+    )
+
+
 def evaluate_pol_distinct_record(
     record: Mapping[str, Any],
     *,
@@ -149,21 +200,34 @@ def evaluate_pol_distinct_record(
     """Evaluate one structured POL workload record when semantics are supported."""
 
     context = pol_workload_record_to_context(record, metadata)
+    support = trajectory_base_measure_support(context)
+    database_truth = database_truth_for_trajectory_query(
+        record,
+        context,
+        trajectory_key=(
+            trajectory_config.trajectory_key
+            if trajectory_config is not None
+            else "trip_id"
+        ),
+        segment_table=(
+            trajectory_config.segment_table
+            if trajectory_config is not None
+            else "segments"
+        ),
+    )
     exact = None
-    if oracle is not None and trajectory_ids is not None:
+    if support.eligible and oracle is not None and trajectory_ids is not None:
         exact = oracle.exact_distinct_trajectory_count(
             context,
             trajectory_ids=trajectory_ids,
             segment_ids=segment_ids,
         )
-    support = trajectory_base_measure_support(context)
+    common_truth = _truth_payload(database_truth, exact)
     if not support.eligible:
         return PolDistinctEvaluation(
             query_id=record.get("query_id"),
             distinct_estimate_status=support.reason or "unsupported_base_segment_measure",
-            matching_segments_true=(None if exact is None else exact.matching_segments_true),
-            distinct_trajectories_true=(None if exact is None else exact.distinct_trajectories_true),
-            a_true=(None if exact is None else exact.a_true),
+            **common_truth,
         )
     try:
         estimate = estimator.estimate_distinct_trajectories(
@@ -175,34 +239,63 @@ def evaluate_pol_distinct_record(
         return PolDistinctEvaluation(
             query_id=record.get("query_id"),
             distinct_estimate_status=str(exc),
-            matching_segments_true=(None if exact is None else exact.matching_segments_true),
-            distinct_trajectories_true=(None if exact is None else exact.distinct_trajectories_true),
-            a_true=(None if exact is None else exact.a_true),
+            **common_truth,
         )
+    matching_qerror = (
+        None
+        if not database_truth.available
+        else _q_error(
+            estimate.matching_segment_estimate,
+            database_truth.matching_segments_true,
+        )
+    )
+    distinct_qerror = (
+        None
+        if not database_truth.available
+        else _q_error(
+            estimate.distinct_trajectory_estimate,
+            database_truth.distinct_trajectories_true,
+        )
+    )
+    a_abs_error = (
+        None
+        if not database_truth.available
+        else abs(float(estimate.traj_dedup_factor) - float(database_truth.a_true))
+    )
     return PolDistinctEvaluation(
         query_id=record.get("query_id"),
         distinct_estimate_status="ok",
-        matching_segments_true=(None if exact is None else exact.matching_segments_true),
         matching_segment_estimate=estimate.matching_segment_estimate,
-        matching_segment_qerror=(
-            None
-            if exact is None
-            else _q_error(estimate.matching_segment_estimate, exact.matching_segments_true)
-        ),
-        distinct_trajectories_true=(None if exact is None else exact.distinct_trajectories_true),
+        matching_segment_qerror=matching_qerror,
         distinct_trajectory_estimate=estimate.distinct_trajectory_estimate,
-        distinct_trajectory_qerror=(
-            None
-            if exact is None
-            else _q_error(estimate.distinct_trajectory_estimate, exact.distinct_trajectories_true)
-        ),
-        a_true=(None if exact is None else exact.a_true),
+        distinct_trajectory_qerror=distinct_qerror,
         a_hat=estimate.traj_dedup_factor,
-        a_abs_error=(
-            None if exact is None else abs(float(estimate.traj_dedup_factor) - exact.a_true)
-        ),
+        a_abs_error=a_abs_error,
         model_forward_calls=estimate.model_forward_calls,
+        **common_truth,
     )
+
+
+def _truth_payload(
+    database_truth: DatabaseTrajectoryTruth,
+    exact: Any | None,
+) -> dict[str, Any]:
+    return {
+        "matching_segments_true": database_truth.matching_segments_true,
+        "distinct_trajectories_true": database_truth.distinct_trajectories_true,
+        "a_true": database_truth.a_true,
+        "database_matching_segments_true": database_truth.matching_segments_true,
+        "database_distinct_trajectories_true": database_truth.distinct_trajectories_true,
+        "database_a_true": database_truth.a_true,
+        "database_truth_status": database_truth.status,
+        "fixture_matching_segments": (
+            None if exact is None else exact.matching_segments_true
+        ),
+        "fixture_distinct_trajectories": (
+            None if exact is None else exact.distinct_trajectories_true
+        ),
+        "fixture_a": None if exact is None else exact.a_true,
+    }
 
 
 def _operator_token(operator: str, value: Any) -> PredicateToken:
@@ -231,6 +324,11 @@ def _spatial_columns(table: str, attribute: str) -> tuple[str, str, str, str]:
     if table == "trips" and attribute == "trip_geom":
         return "trips:s_x", "trips:s_y", "trips:e_x", "trips:e_y"
     return f"{table}:s_x", f"{table}:s_y", f"{table}:e_x", f"{table}:e_y"
+
+
+def _metadata_has_columns(metadata: ModelMetadata, names: tuple[str, ...]) -> bool:
+    available = {column.name for column in metadata.columns}
+    return all(name in available for name in names)
 
 
 def _q_error(estimate: float, true_value: float) -> float:

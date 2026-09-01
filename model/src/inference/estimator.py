@@ -85,15 +85,10 @@ class OnePassEstimator:
             raise ValueError("model does not expose traj_dedup_factor inference")
         runtime_config = trajectory_config or TrajectoryDistinctRuntimeConfig()
         if context is None:
-            if included_tables is None:
-                raise TrajectoryDistinctNotApplicable(
-                    "distinct trajectory inference requires query included_tables"
-                )
-            context = GeneratedTrainingContext(
-                tokens=tuple(tokens),
-                included_tables=frozenset(included_tables),
-                inverse_fanout_columns=frozenset(),
-                ordinary_predicates={},
+            del included_tables
+            raise TrajectoryDistinctNotApplicable(
+                "distinct trajectory inference requires a GeneratedTrainingContext "
+                "with physical query semantics"
             )
         eligibility = trajectory_distinct_context_eligibility(
             context,

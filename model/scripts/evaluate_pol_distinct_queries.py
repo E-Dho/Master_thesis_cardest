@@ -27,7 +27,10 @@ def main() -> None:
     parser.add_argument(
         "--exact-fixture-dir",
         default=None,
-        help="Optional prepared POL fixture directory for exact M_true/D_true/a_true.",
+        help=(
+            "Optional prepared POL fixture directory for fixture-only semantic "
+            "counts; production q-error uses workload database truth only."
+        ),
     )
     args = parser.parse_args()
     config = load_simple_yaml(args.config)
@@ -54,6 +57,14 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     status_counts: dict[str, int] = {}
+    database_truth_status_counts: dict[str, int] = {}
+    database_truth_count = 0
+    missing_database_truth_count = 0
+    supported_count = 0
+    unsupported_count = 0
+    matching_qerrors: list[float] = []
+    distinct_qerrors: list[float] = []
+    a_abs_errors: list[float] = []
     total = 0
     with queries_path.open("r", encoding="utf-8") as source, output_path.open(
         "w",
@@ -77,6 +88,26 @@ def main() -> None:
             total += 1
             status = str(payload["distinct_estimate_status"])
             status_counts[status] = int(status_counts.get(status, 0)) + 1
+            truth_status = str(payload.get("database_truth_status", "missing_database_truth"))
+            database_truth_status_counts[truth_status] = int(
+                database_truth_status_counts.get(truth_status, 0)
+            ) + 1
+            if truth_status == "database_truth_available":
+                database_truth_count += 1
+            else:
+                missing_database_truth_count += 1
+            if status == "ok":
+                supported_count += 1
+            else:
+                unsupported_count += 1
+            for key, sink_values in [
+                ("matching_segment_qerror", matching_qerrors),
+                ("distinct_trajectory_qerror", distinct_qerrors),
+                ("a_abs_error", a_abs_errors),
+            ]:
+                value = payload.get(key)
+                if value is not None:
+                    sink_values.append(float(value))
     summary_path = output_path.with_suffix(output_path.suffix + ".summary.json")
     summary_path.write_text(
         json.dumps(
@@ -85,6 +116,14 @@ def main() -> None:
                 "output_path": str(output_path),
                 "queries_total": total,
                 "status_counts": status_counts,
+                "database_truth_status_counts": database_truth_status_counts,
+                "supported_query_count": supported_count,
+                "unsupported_query_count": unsupported_count,
+                "queries_with_database_truth": database_truth_count,
+                "queries_without_database_truth": missing_database_truth_count,
+                "matching_segment_qerror": _percentile_summary(matching_qerrors),
+                "distinct_trajectory_qerror": _percentile_summary(distinct_qerrors),
+                "a_abs_error": _error_summary(a_abs_errors),
             },
             indent=2,
             sort_keys=True,
@@ -113,6 +152,33 @@ def _load_exact_fixture(
     trajectory_ids = tuple(np.load(trajectory_ids_path, allow_pickle=True).tolist())
     segment_ids = _segment_id_rows_to_tuples(_load_segment_ids_array(segment_ids_path))
     return ExactOracle(metadata, rows), trajectory_ids, segment_ids
+
+
+def _percentile_summary(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "median": None, "p90": None, "p95": None, "p99": None, "max": None}
+    array = np.asarray(values, dtype=float)
+    return {
+        "count": int(array.size),
+        "median": float(np.percentile(array, 50)),
+        "p90": float(np.percentile(array, 90)),
+        "p95": float(np.percentile(array, 95)),
+        "p99": float(np.percentile(array, 99)),
+        "max": float(np.max(array)),
+    }
+
+
+def _error_summary(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "mean": None, "median": None, "p95": None, "max": None}
+    array = np.asarray(values, dtype=float)
+    return {
+        "count": int(array.size),
+        "mean": float(np.mean(array)),
+        "median": float(np.percentile(array, 50)),
+        "p95": float(np.percentile(array, 95)),
+        "max": float(np.max(array)),
+    }
 
 
 if __name__ == "__main__":

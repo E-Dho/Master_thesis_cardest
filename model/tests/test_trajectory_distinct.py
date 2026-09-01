@@ -54,6 +54,8 @@ if HAS_TORCH:
     from model.src.model.resmade import TrajectoryDistinctConfig
     from model.src.training.resmade_trainer import (
         _RunningTrajectoryDistinctStats,
+        _run_validation,
+        train_resmade_sample_source,
         trajectory_dedup_loss_for_batch,
     )
 
@@ -160,6 +162,35 @@ class _TrajectorySource:
         self.rows = rows
         self.trajectory_ids = trajectory_ids
         self.trajectory_multiplicity_provider = provider
+
+    def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
+        rng = np.random.default_rng(seed)
+        indices = rng.integers(0, len(self.rows), size=batch_size)
+        return FullJoinBatch(
+            encoded_values=self.rows[indices],
+            column_metadata=self.metadata.columns,
+            trajectory_ids=tuple(self.trajectory_ids[int(index)] for index in indices),
+            fixture_rows_reused=batch_size,
+        )
+
+
+class _FakeDistinctEstimator:
+    def __init__(self, *, matching: float = 80.0, dedup: float = 0.5) -> None:
+        self.matching = matching
+        self.dedup = dedup
+
+    def estimate_distinct_trajectories(self, *args, **kwargs):
+        del args, kwargs
+        return type(
+            "FakeDistinctEstimate",
+            (),
+            {
+                "matching_segment_estimate": self.matching,
+                "traj_dedup_factor": self.dedup,
+                "distinct_trajectory_estimate": self.matching * self.dedup,
+                "model_forward_calls": 1,
+            },
+        )()
 
 
 class TrajectoryDistinctTest(unittest.TestCase):
@@ -794,7 +825,161 @@ class TrajectoryDistinctTest(unittest.TestCase):
             result.distinct_estimate_status,
             "unsupported_base_segment_spatial_measure",
         )
-        self.assertEqual(result.matching_segments_true, 1)
+        self.assertIsNone(result.matching_segments_true)
+        self.assertIsNone(result.distinct_trajectory_qerror)
+
+    def test_pol_temporal_database_truth_metrics(self) -> None:
+        metadata = _pol_segment_metadata()
+        record = {
+            "query_id": "q1",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_time",
+                    "dimension": "temporal",
+                    "type": "temporal_interval",
+                    "mode": "temporal_overlap",
+                    "lower": 10.0,
+                    "upper": 20.0,
+                }
+            ],
+            "join_cardinality": 100,
+            "entity_cardinality": 40,
+            "entity_sql": "SELECT COUNT(DISTINCT t.trip_id) FROM ...",
+        }
+        result = evaluate_pol_distinct_record(
+            record,
+            metadata=metadata,
+            estimator=_FakeDistinctEstimator(matching=80.0, dedup=0.5),
+        )
+        self.assertEqual(result.matching_segments_true, 100)
+        self.assertEqual(result.distinct_trajectories_true, 40)
+        self.assertEqual(result.database_matching_segments_true, 100)
+        self.assertAlmostEqual(result.a_true, 0.4)
+        self.assertAlmostEqual(result.matching_segment_qerror, 1.25)
+        self.assertAlmostEqual(result.distinct_trajectory_qerror, 1.0)
+        self.assertAlmostEqual(result.a_abs_error, 0.1)
+
+    def test_database_truth_precedes_fixture_truth(self) -> None:
+        metadata = _pol_segment_metadata()
+        rows = _encode_pol_segments(
+            metadata,
+            (
+                (0, 0.0, 10.0, 0.0, 0.0, 1.0, 1.0, 1, 1),
+                (1, 10.0, 20.0, 3.0, 3.0, 4.0, 4.0, 1, 1),
+                (2, 20.0, 30.0, 0.0, 3.0, 2.0, 3.0, 1, 1),
+            ),
+        )
+        record = {
+            "query_id": "q1",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_time",
+                    "dimension": "temporal",
+                    "type": "temporal_interval",
+                    "mode": "temporal_overlap",
+                    "lower": 10.0,
+                    "upper": 20.0,
+                }
+            ],
+            "join_cardinality": 100,
+            "entity_cardinality": 40,
+            "entity_sql": "SELECT COUNT(DISTINCT t.trip_id) FROM ...",
+        }
+        result = evaluate_pol_distinct_record(
+            record,
+            metadata=metadata,
+            estimator=_FakeDistinctEstimator(matching=80.0, dedup=0.5),
+            oracle=ExactOracle(metadata, rows),
+            trajectory_ids=(10, 10, 20),
+            segment_ids=((10, 0), (10, 1), (20, 2)),
+        )
+        self.assertEqual(result.matching_segments_true, 100)
+        self.assertEqual(result.distinct_trajectories_true, 40)
+        self.assertEqual(result.fixture_matching_segments, 2)
+        self.assertEqual(result.fixture_distinct_trajectories, 1)
+        self.assertAlmostEqual(result.matching_segment_qerror, 1.25)
+        self.assertAlmostEqual(result.distinct_trajectory_qerror, 1.0)
+
+    def test_missing_database_truth_produces_no_production_qerror(self) -> None:
+        metadata = _pol_segment_metadata()
+        rows = _encode_pol_segments(
+            metadata,
+            (
+                (0, 0.0, 10.0, 0.0, 0.0, 1.0, 1.0, 1, 1),
+                (1, 10.0, 20.0, 3.0, 3.0, 4.0, 4.0, 1, 1),
+            ),
+        )
+        record = {
+            "query_id": "q_missing_truth",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_time",
+                    "dimension": "temporal",
+                    "type": "temporal_interval",
+                    "mode": "temporal_overlap",
+                    "lower": 10.0,
+                    "upper": 20.0,
+                }
+            ],
+            "join_cardinality": None,
+            "entity_cardinality": None,
+        }
+        result = evaluate_pol_distinct_record(
+            record,
+            metadata=metadata,
+            estimator=_FakeDistinctEstimator(matching=80.0, dedup=0.5),
+            oracle=ExactOracle(metadata, rows),
+            trajectory_ids=(10, 10),
+            segment_ids=((10, 0), (10, 1)),
+        )
+        self.assertIsNone(result.matching_segments_true)
+        self.assertIsNone(result.distinct_trajectories_true)
+        self.assertIsNone(result.matching_segment_qerror)
+        self.assertIsNone(result.distinct_trajectory_qerror)
+        self.assertEqual(result.fixture_matching_segments, 2)
+        self.assertEqual(result.fixture_distinct_trajectories, 1)
+
+    def test_trip_geom_spatial_query_returns_unsupported_not_missing_column(self) -> None:
+        metadata = _pol_segment_metadata()
+        record = {
+            "query_id": "trip_spatial",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "trips",
+                    "attribute": "trip_geom",
+                    "dimension": "spatial",
+                    "type": "geometry",
+                    "mode": "spatial_intersects",
+                    "min_x": 0.0,
+                    "min_y": 0.0,
+                    "max_x": 2.0,
+                    "max_y": 2.0,
+                    "srid": 26916,
+                }
+            ],
+            "join_cardinality": 100,
+            "entity_cardinality": 40,
+            "entity_sql": "SELECT COUNT(DISTINCT t.trip_id) FROM ...",
+        }
+        context = pol_workload_record_to_context(record, metadata)
+        self.assertEqual(context.ordinary_predicates, {})
+        result = evaluate_pol_distinct_record(
+            record,
+            metadata=metadata,
+            estimator=_FakeDistinctEstimator(),
+        )
+        self.assertEqual(
+            result.distinct_estimate_status,
+            "unsupported_base_segment_spatial_measure",
+        )
+        self.assertEqual(result.matching_segments_true, 100)
 
     def test_runtime_config_mismatch_rejects_stale_index(self) -> None:
         metadata = _pol_segment_metadata()
@@ -1020,6 +1205,33 @@ class TrajectoryDistinctTorchTest(unittest.TestCase):
         self.assertAlmostEqual(summary["global_weighted_mse"], expected_mse, places=10)
         self.assertAlmostEqual(summary["global_weighted_ess"], expected_ess, places=10)
 
+    def test_global_weighted_mse_exact_zero(self) -> None:
+        running = _RunningTrajectoryDistinctStats()
+        for weights in (np.asarray([1.0, 2.0]), np.asarray([1000.0, 2000.0])):
+            running.update(
+                {
+                    "enabled": True,
+                    "trajectory_targets_attempted": len(weights),
+                    "trajectory_targets_generated": len(weights),
+                    "trajectory_targets_skipped": 0,
+                    "multiplicity_sum": float(len(weights)),
+                    "m_min": 1,
+                    "m_max": 1,
+                    "weighted_mse": 0.0,
+                    "unweighted_mse": 0.0,
+                    "weighted_squared_error_sum": 0.0,
+                    "unweighted_squared_error_sum": 0.0,
+                    "traj_loss_weight_sum": float(np.sum(weights / np.max(weights))),
+                    "traj_loss_weight_sq_sum": float(np.dot(weights / np.max(weights), weights / np.max(weights))),
+                    "traj_log_weight_sum": float(np.logaddexp.reduce(np.log(weights))),
+                    "traj_log_weight_sq_sum": float(np.logaddexp.reduce(2.0 * np.log(weights))),
+                    "traj_log_weighted_squared_error_sum": float("-inf"),
+                }
+            )
+        summary = running.to_json_dict()
+        self.assertEqual(summary["global_weighted_mse"], 0.0)
+        self.assertEqual(summary["global_unweighted_mse"], 0.0)
+
     def test_spatial_trajectory_target_is_skipped_when_base_measure_unsupported(self) -> None:
         metadata = _pol_segment_metadata()
         rows = _encode_pol_segments(
@@ -1081,6 +1293,149 @@ class TrajectoryDistinctTorchTest(unittest.TestCase):
         self.assertEqual(stats["trajectory_targets_generated"], 0)
         self.assertEqual(stats["trajectory_targets_skipped_base_spatial_measure"], 1)
 
+    def test_run_validation_two_batches_returns_finite_traj_metrics(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            trajectory_key="trip_id",
+            trajectory_static_columns=("trip.kind",),
+            segment_varying_columns=("segment.x", "segment.y"),
+            segment_table="segments",
+        )
+        source = _TrajectorySource(metadata, rows, trajectory_ids, provider)
+        vocab = PredicateVocabularies.from_metadata(metadata)
+        model = PredicateResMADE(
+            PredicateResMADEConfig(
+                predicate_input_bins=vocab.input_bins,
+                data_output_bins=metadata.data_output_bins,
+                column_kinds=tuple(column.kind.value for column in metadata.columns),
+                hidden_sizes=(16, 16),
+                direct_io_connections=True,
+                embedding_size=4,
+                trajectory_distinct_config=TrajectoryDistinctConfig(enabled=True),
+            )
+        )
+        config = {
+            "training": {"seed": 0, "head_loss_reduction": "sum"},
+            "fanout": {"compute_weights_in_log_space": True},
+            "anpm": {"mask_invalid_combinations": True},
+            "predicate_generation": {
+                "enabled": True,
+                "strategy": "row_satisfied",
+                "table_subset_sampling": "full",
+                "wildcard_probability": 1.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "trajectory_query_semantics": "none",
+            },
+            "trajectory_distinct": {
+                "enabled": True,
+                "segment_table": "segments",
+                "trajectory_key": "trip_id",
+                "segment_key": "trip_id,segment_idx",
+                "predicate_scope": "segment_query",
+            },
+        }
+        metrics = _run_validation(
+            model,
+            source,
+            metadata,
+            vocab,
+            config,
+            "cpu",
+            batch_size=2,
+            batches=2,
+            seed=0,
+        )
+        self.assertGreater(metrics["validation_traj_target_count"], 0)
+        self.assertTrue(np.isfinite(metrics["validation_traj_weighted_mse"]))
+        self.assertTrue(np.isfinite(metrics["validation_traj_unweighted_mse"]))
+
+    def test_validation_selection_metric_fails_when_no_eligible_targets(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        no_segment_rows = rows.copy()
+        no_segment_rows[:, 4] = metadata.columns[4].encode_value(0)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            trajectory_key="trip_id",
+            segment_varying_columns=("segment.x", "segment.y"),
+            segment_table="segments",
+        )
+        source = _TrajectorySource(metadata, no_segment_rows, trajectory_ids, provider)
+        config = {
+            "model": {
+                "type": "predicate_resmade",
+                "hidden_sizes": [16],
+                "residual_connections": True,
+                "direct_io_connections": True,
+                "embedding_size": 4,
+            },
+            "predicate_generation": {
+                "enabled": True,
+                "strategy": "row_satisfied",
+                "table_subset_sampling": "full",
+                "wildcard_probability": 1.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "trajectory_query_semantics": "none",
+            },
+            "fanout": {"compute_weights_in_log_space": True},
+            "training": {
+                "seed": 0,
+                "device": "cpu",
+                "batch_size": 2,
+                "learning_rate": 0.001,
+                "optimizer": "adam",
+                "epochs": 1,
+                "steps_per_epoch": 1,
+                "checkpoint_interval_steps": 0,
+                "validation_interval_steps": 1,
+                "head_loss_reduction": "sum",
+            },
+            "validation": {
+                "enabled": True,
+                "interval_steps": 1,
+                "fresh_sampler_batches": 2,
+                "batch_size": 2,
+                "selection_metric": "validation_traj_weighted_mse",
+                "minimize": True,
+            },
+            "inference": {"use_log_space_product": True},
+            "trajectory_distinct": {
+                "enabled": True,
+                "head_name": "traj_dedup_factor",
+                "loss": "mse",
+                "loss_weight": 1.0,
+                "output_activation": "sigmoid",
+                "anchor_samples_per_query": 1,
+                "entity_table": "trips",
+                "segment_table": "segments",
+                "trajectory_key": "trip_id",
+                "segment_key": "trip_id,segment_idx",
+                "predicate_scope": "segment_query",
+                "segment_varying_columns": ["segment.x", "segment.y"],
+            },
+            "factorization": {"enabled": False},
+            "logging": {},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config["logging"]["output_directory"] = tmpdir
+            with self.assertRaisesRegex(
+                ValueError,
+                "validation selection metric validation_traj_weighted_mse is unavailable",
+            ):
+                train_resmade_sample_source(source, config)
+
     def test_one_forward_distinct_inference_and_checkpoint_guard(self) -> None:
         metadata = _trajectory_metadata()
         vocab = PredicateVocabularies.from_metadata(metadata)
@@ -1108,6 +1463,11 @@ class TrajectoryDistinctTorchTest(unittest.TestCase):
             result.distinct_trajectory_estimate,
             result.matching_segment_estimate,
         )
+        with self.assertRaises(TrajectoryDistinctNotApplicable):
+            estimator.estimate_distinct_trajectories(
+                list(_query_context().tokens),
+                included_tables={"trips", "segments"},
+            )
 
         disabled = PredicateResMADE(
             PredicateResMADEConfig(

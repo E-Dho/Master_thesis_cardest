@@ -711,3 +711,15 @@ This replaces the previous last-validation-mini-batch value. A dedicated
 `pol_traj_dedup_importance_rare_smoke.yaml` config covers the intended wrapper
 composition with importance-sampled main batches, rare auxiliary batches, and
 trajectory distinct enabled.
+
+POL workload evaluation now separates database truth from local fixture truth.
+For executed `query_generation/` records, production `M_true`, `D_true`, and
+`a_true` come from `join_cardinality`, `entity_cardinality`, and their ratio.
+Fixture-oracle counts over `sample_rows.npy` are reported only as fixture
+diagnostics and are not used for production q-error. If a workload record lacks
+database cardinalities, q-error is unavailable rather than inferred from a
+finite fixture sample.
+
+This coding pass was prepared and tested locally. The real cluster smoke, 50M
+POL preparation, and 50M training run remain subsequent execution steps and are
+not implied by the local tests.

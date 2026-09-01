@@ -242,11 +242,20 @@ class _RunningTrajectoryDistinctStats:
                 ),
             ]:
                 value = diagnostics.get(key)
-                if value is not None and np.isfinite(float(value)):
+                if value is None:
+                    continue
+                log_value = float(value)
+                if np.isnan(log_value) or np.isposinf(log_value):
+                    raise ValueError(f"{key} must be finite or -inf")
+                if np.isneginf(log_value) and attr != "log_weighted_squared_error_sum":
+                    continue
+                if np.isneginf(log_value) and np.isneginf(getattr(self, attr)):
+                    setattr(self, attr, float("-inf"))
+                else:
                     setattr(
                         self,
                         attr,
-                        float(np.logaddexp(getattr(self, attr), float(value))),
+                        float(np.logaddexp(getattr(self, attr), log_value)),
                     )
             self.target_sum += float(diagnostics.get("target_sum", 0.0))
             self.prediction_sum += float(diagnostics.get("prediction_sum", 0.0))
@@ -340,7 +349,10 @@ class _RunningTrajectoryDistinctStats:
             "global_weighted_mse": (
                 float(np.exp(self.log_weighted_squared_error_sum - self.log_weight_sum))
                 if np.isfinite(self.log_weight_sum)
-                and np.isfinite(self.log_weighted_squared_error_sum)
+                and (
+                    np.isfinite(self.log_weighted_squared_error_sum)
+                    or np.isneginf(self.log_weighted_squared_error_sum)
+                )
                 else None
             ),
             "global_unweighted_mse": (
@@ -584,7 +596,6 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     fanout_ess_values: dict[str, list[float]] = {
         metadata.columns[index].name: [] for index in metadata.fanout_indices()
     }
-    traj_validation_stats = _RunningTrajectoryDistinctStats()
     fanout_inv_only_ess_values: dict[str, list[float]] = {
         metadata.columns[index].name: [] for index in metadata.fanout_indices()
     }
@@ -1966,6 +1977,7 @@ def _run_validation(
     fanout_ess_values: dict[str, list[float]] = {
         metadata.columns[index].name: [] for index in metadata.fanout_indices()
     }
+    traj_validation_stats = _RunningTrajectoryDistinctStats()
     fresh_rows = 0
     fixture_rows = 0
     predicate_config = config.get("predicate_generation", {})
