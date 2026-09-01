@@ -13,6 +13,7 @@ from model.src.data.importance_sampling import (
     ImportanceSamplingSampleSource,
     RareSupportSampleSource,
 )
+from model.src.data.trajectory_distinct import TrajectoryDistinctRuntimeConfig
 from model.src.model.factorization import (
     FactorizationConfig,
     apply_factorization_to_metadata,
@@ -71,6 +72,18 @@ def sample_source_from_config(
         )
     else:
         raise ValueError(f"unsupported dataset.type {dataset_type!r}")
+    if bool(config.get("trajectory_distinct", {}).get("enabled", False)):
+        validate = getattr(source, "validate_trajectory_distinct", None)
+        if validate is None:
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires a sample source with "
+                "trajectory distinct startup validation"
+            )
+        validate(
+            runtime_config=TrajectoryDistinctRuntimeConfig.from_dict(
+                config.get("trajectory_distinct", {})
+            )
+        )
     factorization = FactorizationConfig.from_dict(config.get("factorization", {}))
     if not factorization.enabled:
         wrapped = source

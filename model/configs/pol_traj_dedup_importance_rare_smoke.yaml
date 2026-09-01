@@ -1,12 +1,12 @@
 dataset:
   type: pol_trajectory_full_join
-  name: pol_50m_traj_dedup_single_anchor
-  prepared_directory: data/pol_prepared/pol_50m
+  name: pol_traj_dedup_importance_rare_smoke
+  prepared_directory: data/pol_prepared/pol_smoke
   sampling_mode: fixture
-  sample_batch_size: 2048
-  trajectory_ids_path: data/pol_prepared/pol_50m/sample_trajectory_ids.npy
-  segment_ids_path: data/pol_prepared/pol_50m/sample_segment_ids.npy
-  trajectory_index_path: data/pol_prepared/pol_50m/trajectory_segment_index
+  sample_batch_size: 128
+  trajectory_ids_path: data/pol_prepared/pol_smoke/sample_trajectory_ids.npy
+  segment_ids_path: data/pol_prepared/pol_smoke/sample_segment_ids.npy
+  trajectory_index_path: data/pol_prepared/pol_smoke/trajectory_segment_index
   num_workers: 0
 
 schema:
@@ -15,7 +15,7 @@ schema:
 
 model:
   type: predicate_resmade
-  hidden_sizes: [512, 512, 512, 512]
+  hidden_sizes: [64, 64]
   residual_connections: true
   direct_io_connections: true
   direct_io_source_kinds: [data, indicator, fanout]
@@ -23,9 +23,9 @@ model:
   activation: relu
   input_encoding: duet_binary
   output_encoding: embed
-  output_embedding_size: 64
+  output_embedding_size: 32
   output_embeddings_tied: false
-  embedding_size: 32
+  embedding_size: 16
   residual_dropout: 0.0
   fixed_ordering: true
 
@@ -40,11 +40,11 @@ factorization:
 
 anpm:
   enabled: true
-  previous_factor_embedding_size: 64
-  hidden_size: 64
+  previous_factor_embedding_size: 32
+  hidden_size: 32
   teacher_force_during_training: true
   mask_invalid_combinations: true
-  decode_chunk_size: 4096
+  decode_chunk_size: 1024
   final_activation: relu
   materialize_original_distribution_for_debug: false
 
@@ -69,8 +69,8 @@ predicate_generation:
   per_row_contexts: 1
   seed: 0
   trajectory_query_semantics: pol_segments
-  trajectory_temporal_probability: 0.35
-  trajectory_spatial_probability: 0.35
+  trajectory_temporal_probability: 0.5
+  trajectory_spatial_probability: 0.5
   trajectory_srid: 26916
 
 predicate_encoding:
@@ -79,7 +79,22 @@ predicate_encoding:
   max_predicates_per_column: 2
 
 importance_sampling:
-  enabled: false
+  enabled: true
+  mixture_probability: 0.2
+  discovery:
+    enabled: true
+    root_data_only: true
+    include_categorical_root_data: false
+    max_candidate_domain_size: 128
+    minimum_expected_context_support: 1
+    max_selected_strata: 4
+    support_planning_steps: 10
+  allocation:
+    strategy: support_deficit
+  diagnostics:
+    enabled: true
+    global_rho_reservoir_size: 256
+    per_stratum_rho_reservoir_size: 64
 
 rare_support:
   enabled: true
@@ -87,10 +102,10 @@ rare_support:
     enabled: true
     root_data_only: true
     include_categorical_root_data: false
-    max_candidate_domain_size: 4096
-    minimum_expected_context_support: 100
-    max_selected_strata: 64
-    support_planning_steps: 20000
+    max_candidate_domain_size: 128
+    minimum_expected_context_support: 1
+    max_selected_strata: 4
+    support_planning_steps: 10
   allocation:
     strategy: support_deficit
   diagnostics:
@@ -98,7 +113,7 @@ rare_support:
 
 rare_auxiliary:
   enabled: true
-  batch_size: 512
+  batch_size: 32
   beta: 0.25
 
 trajectory_distinct:
@@ -136,16 +151,15 @@ trajectory_distinct:
 training:
   seed: 0
   device: auto
-  batch_size: 2048
+  batch_size: 128
   learning_rate: 0.0001
   optimizer: adam
   epochs: 1
-  steps_per_epoch: 20000
-  early_stopping_patience_steps: 3000
-  early_stopping_min_delta: 0.0
+  steps_per_epoch: 2
+  early_stopping_patience_steps: null
   gradient_clip_norm: 5.0
-  checkpoint_interval_steps: 500
-  validation_interval_steps: 250
+  checkpoint_interval_steps: 1
+  validation_interval_steps: 1
   head_loss_reduction: sum
   mixed_precision: false
 
@@ -154,5 +168,8 @@ inference:
   factorized_decoder: anpm
   use_log_space_product: true
 
+validation:
+  selection_metric: validation_traj_weighted_mse
+
 logging:
-  output_directory: model/runs/pol_50m_traj_dedup_single_anchor
+  output_directory: model/runs/pol_traj_dedup_importance_rare_smoke

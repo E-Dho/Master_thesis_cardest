@@ -361,11 +361,6 @@ def validate_config(config: dict[str, Any]) -> None:
     rare_support = config.get("rare_support", {})
     rare_auxiliary = config.get("rare_auxiliary", {})
     if bool(rare_auxiliary.get("enabled", False)):
-        if bool(importance.get("enabled", False)):
-            raise ValueError(
-                "rare_auxiliary.enabled=true must not be combined with "
-                "importance_sampling.enabled=true"
-            )
         if not bool(rare_support.get("enabled", False)):
             raise ValueError("rare_auxiliary.enabled=true requires rare_support.enabled=true")
         if int(rare_auxiliary.get("batch_size", 0) or 0) <= 0:

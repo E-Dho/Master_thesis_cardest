@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,12 @@ from model.src.config import load_simple_yaml, validate_config
 from model.src.data.schema import ModelMetadata
 from model.src.data.trajectory_distinct import (
     CompactTrajectorySegmentIndex,
-    write_compact_trajectory_index,
+    SPATIAL_INTERSECTS_SEMANTICS_VERSION,
+    TEMPORAL_OVERLAP_SEMANTICS_VERSION,
+    TRAJECTORY_INDEX_FORMAT_VERSION,
+    TRAJECTORY_TARGET_SEMANTICS_VERSION,
+    _timestamp_to_float,
+    trajectory_index_compatibility_hash,
 )
 
 
@@ -65,18 +72,10 @@ def main() -> None:
     )
     if output_directory.suffix == ".npz":
         output_directory = output_directory.with_suffix("")
-    segments = _read_segments_tsv(Path(args.segments_tsv))
-    compact_manifest = write_compact_trajectory_index(
-        output_directory,
+    compact_manifest = _write_ordered_segments_index(
+        Path(args.segments_tsv),
+        output_directory=output_directory,
         metadata=metadata,
-        trip_ids=segments["trip_id"],
-        segment_idx=segments["segment_idx"],
-        t_s=segments["t_s"],
-        t_e=segments["t_e"],
-        s_x=segments["s_x"],
-        s_y=segments["s_y"],
-        e_x=segments["e_x"],
-        e_y=segments["e_y"],
         trajectory_key=str(trajectory_config.get("trajectory_key", "trip_id")),
         entity_table=str(trajectory_config.get("entity_table", "trips")),
         segment_table=str(trajectory_config.get("segment_table", "segments")),
@@ -108,9 +107,9 @@ def main() -> None:
                 raise SystemExit(
                     "sample provenance row count does not match sample_rows.npy: "
                     f"{len(trajectory_ids)} != {len(sample_rows)}"
-                )
+        )
         np.save(prepared_directory / "sample_trajectory_ids.npy", np.asarray(trajectory_ids))
-        np.save(prepared_directory / "sample_segment_ids.npy", np.asarray(segment_ids, dtype=object))
+        np.save(prepared_directory / "sample_segment_ids.npy", np.asarray(segment_ids, dtype=np.int64))
 
     storage = index.storage_summary()
     print(f"trajectory_index_path={output_directory}")
@@ -121,21 +120,193 @@ def main() -> None:
     print(f"bytes_per_segment={storage['bytes_per_segment']:.3f}")
     print(f"estimated_bytes_50m_segments={storage['estimated_bytes_50m_segments']}")
     print(f"compatibility_hash={compact_manifest['compatibility_hash']}")
+    print(f"min_segments_per_trajectory={compact_manifest['min_segments_per_trajectory']}")
+    print(f"mean_segments_per_trajectory={compact_manifest['mean_segments_per_trajectory']:.3f}")
+    print(f"p95_segments_per_trajectory={compact_manifest['p95_segments_per_trajectory']}")
+    print(f"max_segments_per_trajectory={compact_manifest['max_segments_per_trajectory']}")
 
 
-def _read_segments_tsv(path: Path) -> dict[str, list[Any]]:
+def _write_ordered_segments_index(
+    path: Path,
+    *,
+    output_directory: Path,
+    metadata: ModelMetadata,
+    trajectory_key: str,
+    entity_table: str,
+    segment_table: str,
+    segment_key: str,
+    trajectory_static_columns: tuple[str, ...],
+    segment_varying_columns: tuple[str, ...],
+    srid: int | None,
+) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"missing POL segments TSV: {path}")
-    columns = {
-        "trip_id": [],
-        "segment_idx": [],
-        "s_x": [],
-        "s_y": [],
-        "e_x": [],
-        "e_y": [],
-        "t_s": [],
-        "t_e": [],
+    started = time.perf_counter()
+    counts = _scan_ordered_segments(path)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    arrays = {
+        "trajectory_ids": "trajectory_ids.npy",
+        "offsets": "offsets.npy",
+        "segment_idx": "segment_idx.npy",
+        "t_s": "t_s.npy",
+        "t_e": "t_e.npy",
+        "s_x": "s_x.npy",
+        "s_y": "s_y.npy",
+        "e_x": "e_x.npy",
+        "e_y": "e_y.npy",
     }
+    trajectory_ids = np.lib.format.open_memmap(
+        output_directory / arrays["trajectory_ids"],
+        mode="w+",
+        dtype=np.int64,
+        shape=(counts["trajectory_count"],),
+    )
+    offsets = np.lib.format.open_memmap(
+        output_directory / arrays["offsets"],
+        mode="w+",
+        dtype=np.int64,
+        shape=(counts["trajectory_count"] + 1,),
+    )
+    segment_idx = np.lib.format.open_memmap(
+        output_directory / arrays["segment_idx"],
+        mode="w+",
+        dtype=np.int32,
+        shape=(counts["segment_count"],),
+    )
+    numeric_arrays = {
+        "t_s": np.lib.format.open_memmap(output_directory / arrays["t_s"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "t_e": np.lib.format.open_memmap(output_directory / arrays["t_e"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "s_x": np.lib.format.open_memmap(output_directory / arrays["s_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "s_y": np.lib.format.open_memmap(output_directory / arrays["s_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "e_x": np.lib.format.open_memmap(output_directory / arrays["e_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "e_y": np.lib.format.open_memmap(output_directory / arrays["e_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+    }
+    row_index = 0
+    trajectory_index = -1
+    previous_trip_id: int | None = None
+    offsets[0] = 0
+    for row in _iter_segment_rows(path):
+        trip_id = row["trip_id"]
+        if trip_id != previous_trip_id:
+            trajectory_index += 1
+            trajectory_ids[trajectory_index] = trip_id
+            offsets[trajectory_index] = row_index
+            previous_trip_id = trip_id
+        segment_idx[row_index] = row["segment_idx"]
+        numeric_arrays["t_s"][row_index] = row["t_s"]
+        numeric_arrays["t_e"][row_index] = row["t_e"]
+        numeric_arrays["s_x"][row_index] = row["s_x"]
+        numeric_arrays["s_y"][row_index] = row["s_y"]
+        numeric_arrays["e_x"][row_index] = row["e_x"]
+        numeric_arrays["e_y"][row_index] = row["e_y"]
+        row_index += 1
+    offsets[counts["trajectory_count"]] = counts["segment_count"]
+    for array in (trajectory_ids, offsets, segment_idx, *numeric_arrays.values()):
+        array.flush()
+    compatibility_hash = trajectory_index_compatibility_hash(
+        metadata,
+        predicate_columns=(),
+        trajectory_key=trajectory_key,
+        entity_table=entity_table,
+        segment_table=segment_table,
+        segment_key=segment_key,
+        trajectory_static_columns=trajectory_static_columns,
+        segment_varying_columns=segment_varying_columns,
+        srid=srid,
+        format_version=TRAJECTORY_INDEX_FORMAT_VERSION,
+    )
+    index_bytes = int(
+        counts["trajectory_count"] * np.dtype(np.int64).itemsize
+        + (counts["trajectory_count"] + 1) * np.dtype(np.int64).itemsize
+        + counts["segment_count"] * np.dtype(np.int32).itemsize
+        + counts["segment_count"] * 6 * np.dtype(np.float64).itemsize
+    )
+    manifest = {
+        "format_version": TRAJECTORY_INDEX_FORMAT_VERSION,
+        "index_type": "compact_pol_segment_mmap",
+        "target_semantics_version": TRAJECTORY_TARGET_SEMANTICS_VERSION,
+        "temporal_semantics_version": TEMPORAL_OVERLAP_SEMANTICS_VERSION,
+        "spatial_semantics_version": SPATIAL_INTERSECTS_SEMANTICS_VERSION,
+        "metadata": metadata.to_json_dict(),
+        "compatibility_hash": compatibility_hash,
+        "trajectory_key": trajectory_key,
+        "entity_table": entity_table,
+        "segment_table": segment_table,
+        "segment_key": segment_key,
+        "predicate_columns": [],
+        "trajectory_static_columns": list(trajectory_static_columns),
+        "segment_varying_columns": list(segment_varying_columns),
+        "srid": srid,
+        "trajectory_count": int(counts["trajectory_count"]),
+        "segment_count": int(counts["segment_count"]),
+        "min_segments_per_trajectory": int(counts["min_segments_per_trajectory"]),
+        "mean_segments_per_trajectory": float(counts["mean_segments_per_trajectory"]),
+        "p95_segments_per_trajectory": int(counts["p95_segments_per_trajectory"]),
+        "max_segments_per_trajectory": int(counts["max_segments_per_trajectory"]),
+        "index_bytes": index_bytes,
+        "bytes_per_segment": float(index_bytes / max(1, int(counts["segment_count"]))),
+        "preparation_seconds": float(time.perf_counter() - started),
+        "ordered_input_required": True,
+        "arrays": arrays,
+    }
+    (output_directory / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def _scan_ordered_segments(path: Path) -> dict[str, float | int]:
+    segment_count = 0
+    trajectory_count = 0
+    previous_key: tuple[int, int] | None = None
+    previous_trip_id: int | None = None
+    current_group_size = 0
+    group_reservoir: list[int] = []
+    reservoir_limit = 100_000
+    group_sum = 0
+    group_min: int | None = None
+    group_max = 0
+    for row in _iter_segment_rows(path):
+        key = (row["trip_id"], row["segment_idx"])
+        if previous_key is not None and key <= previous_key:
+            raise SystemExit(
+                "segments TSV must be strictly ordered by (trip_id, segment_idx); "
+                f"observed {key} after {previous_key}"
+            )
+        previous_key = key
+        if row["trip_id"] != previous_trip_id:
+            if current_group_size:
+                group_sum += current_group_size
+                group_min = current_group_size if group_min is None else min(group_min, current_group_size)
+                group_max = max(group_max, current_group_size)
+                if len(group_reservoir) < reservoir_limit:
+                    group_reservoir.append(current_group_size)
+            current_group_size = 0
+            trajectory_count += 1
+            previous_trip_id = row["trip_id"]
+        current_group_size += 1
+        segment_count += 1
+    if current_group_size:
+        group_sum += current_group_size
+        group_min = current_group_size if group_min is None else min(group_min, current_group_size)
+        group_max = max(group_max, current_group_size)
+        if len(group_reservoir) < reservoir_limit:
+            group_reservoir.append(current_group_size)
+    if segment_count <= 0:
+        raise SystemExit(f"no segment rows read from {path}")
+    group_array = np.asarray(group_reservoir, dtype=np.int64)
+    return {
+        "segment_count": int(segment_count),
+        "trajectory_count": int(trajectory_count),
+        "min_segments_per_trajectory": int(group_min or 0),
+        "mean_segments_per_trajectory": float(group_sum / max(trajectory_count, 1)),
+        "p95_segments_per_trajectory": int(np.percentile(group_array, 95)),
+        "max_segments_per_trajectory": int(group_max),
+    }
+
+
+def _iter_segment_rows(path: Path):
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle, delimiter="\t")
         for line_number, row in enumerate(reader, 1):
@@ -145,17 +316,30 @@ def _read_segments_tsv(path: Path) -> dict[str, list[Any]]:
                 continue
             if len(row) < 8:
                 raise SystemExit(f"bad segments.tsv row {line_number}: expected 8 columns")
-            columns["trip_id"].append(int(row[0]))
-            columns["segment_idx"].append(int(row[1]))
-            columns["s_x"].append(float(row[2]))
-            columns["s_y"].append(float(row[3]))
-            columns["e_x"].append(float(row[4]))
-            columns["e_y"].append(float(row[5]))
-            columns["t_s"].append(row[6])
-            columns["t_e"].append(row[7])
-    if not columns["trip_id"]:
-        raise SystemExit(f"no segment rows read from {path}")
-    return columns
+            trip_id = int(row[0])
+            segment_idx = int(row[1])
+            if trip_id < 0 or segment_idx < 0:
+                raise SystemExit(f"bad negative ids in segments.tsv row {line_number}")
+            s_x = float(row[2])
+            s_y = float(row[3])
+            e_x = float(row[4])
+            e_y = float(row[5])
+            t_s = _timestamp_to_float(row[6])
+            t_e = _timestamp_to_float(row[7])
+            if not all(math.isfinite(value) for value in (s_x, s_y, e_x, e_y, t_s, t_e)):
+                raise SystemExit(f"non-finite segment value in segments.tsv row {line_number}")
+            if t_e < t_s:
+                raise SystemExit(f"segment t_e < t_s in segments.tsv row {line_number}")
+            yield {
+                "trip_id": trip_id,
+                "segment_idx": segment_idx,
+                "s_x": s_x,
+                "s_y": s_y,
+                "e_x": e_x,
+                "e_y": e_y,
+                "t_s": t_s,
+                "t_e": t_e,
+            }
 
 
 def _read_sample_provenance_tsv(path: Path) -> tuple[list[int], list[tuple[int, int]]]:

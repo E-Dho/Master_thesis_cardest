@@ -639,3 +639,70 @@ Validation now reports trajectory-aware MSE/ESS/target diagnostics when the
 feature is enabled, and long-run aggregate trajectory multiplicity diagnostics
 use streaming counters plus a bounded reservoir instead of retaining every
 target.
+
+### Final Trajectory Semantic Wiring Pass
+
+The remaining review pass connected the production predicate generator to the
+trajectory semantic representation. `PredicateTrainingContextGenerator` now
+builds a single `GeneratedPhysicalQuery` and derives both the Duet token row and
+the optional `TrajectoryQuerySemantics` from that same sampled query. This is
+implemented for both the normal row-satisfied path and this project's
+row-specific `duet_batch_bounds` path.
+
+For POL temporal contexts, one sampled interval produces:
+
+```text
+Duet tokens:
+  segments:t_s < upper
+  segments:t_e >= lower
+
+TrajectoryQuerySemantics:
+  SegmentTemporalPredicate(start_column="segments:t_s",
+                           end_column="segments:t_e",
+                           lower=lower,
+                           upper=upper,
+                           semantics="overlap")
+```
+
+For POL spatial contexts, one sampled rectangle produces coordinate predicate
+tokens for the current ResMADE conditioning approximation and a
+`SegmentSpatialPredicate` carrying the physical rectangle. Local trajectory
+multiplicity and the exact oracle use the physical line-segment/AABB
+intersection semantics. `semantic_owned_columns(...)` prevents those columns
+from being scalar-filtered a second time before applying the richer semantic
+predicate.
+
+The exact oracle now evaluates `context_satisfies_row_with_trajectory_semantics`
+so exact `M_true`, `D_true`, and `a_true` share semantics with the local
+multiplicity provider. Segment IDs are normalized to immutable `(trip_id,
+segment_idx)` tuples before logical deduplication.
+
+Runtime startup now validates the loaded trajectory index against the active
+YAML trajectory config: entity/segment table, trajectory key, segment key,
+static/varying column lists, SRID, schema hash, semantic versions through the
+compatibility hash, and index format version. Fixture trajectory distinct also
+requires both `sample_trajectory_ids.npy` and numeric/hashable
+`sample_segment_ids.npy` before training starts.
+
+`prepare_pol_trajectory_distinct.py` was changed to the production-safe ordered
+builder: pass 1 validates ordering and segment values while counting rows and
+trajectory groups; pass 2 writes `.npy` arrays sequentially through
+`numpy.lib.format.open_memmap`. The input must be sorted by `(trip_id,
+segment_idx)`; unordered input fails with a clear message instead of performing
+a giant in-memory global sort. The helper
+`prepare_pol_full_join_fixture.py` samples `sample_rows.npy`,
+`sample_trajectory_ids.npy`, and `[N,2] int64 sample_segment_ids.npy` from the
+same full-join TSV rows.
+
+Validation trajectory metrics now aggregate globally:
+
+```text
+validation_traj_weighted_mse = sum(w * squared_error) / sum(w)
+validation_traj_unweighted_mse = sum(squared_error) / target_count
+validation_traj_weighted_ess = (sum w)^2 / sum(w^2)
+```
+
+This replaces the previous last-validation-mini-batch value. A dedicated
+`pol_traj_dedup_importance_rare_smoke.yaml` config covers the intended wrapper
+composition with importance-sampled main batches, rare auxiliary batches, and
+trajectory distinct enabled.

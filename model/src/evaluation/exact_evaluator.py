@@ -8,7 +8,10 @@ from model.src.data.schema import ModelMetadata
 from model.src.inference.masks import factors_from_distributions
 from model.src.predicates.encoding import column_factor
 from model.src.predicates.operators import PredicateToken
-from model.src.predicates.generation import GeneratedTrainingContext, context_satisfies_row
+from model.src.predicates.generation import GeneratedTrainingContext
+from model.src.data.trajectory_distinct import (
+    context_satisfies_row_with_trajectory_semantics,
+)
 
 
 @dataclass(frozen=True)
@@ -89,10 +92,12 @@ class ExactOracle:
         matching_segments = set()
         matching_trajectories = set()
         for row_index, (row, trajectory_id) in enumerate(zip(self.encoded_rows, trajectory_ids)):
-            if context_satisfies_row(context, row, self.metadata):
+            if context_satisfies_row_with_trajectory_semantics(context, row, self.metadata):
                 segment_id = (
                     segment_ids[row_index] if segment_ids is not None else row_index
                 )
+                if isinstance(segment_id, (list, np.ndarray)):
+                    segment_id = tuple(segment_id)
                 matching_segments.add(segment_id)
                 matching_trajectories.add(trajectory_id)
         matching = len(matching_segments)

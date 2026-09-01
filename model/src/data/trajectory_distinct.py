@@ -144,6 +144,97 @@ class TrajectoryMultiplicityProvider(Protocol):
         ...
 
 
+def semantic_owned_columns(query: TrajectoryQuerySemantics | None) -> frozenset[str]:
+    if query is None:
+        return frozenset()
+    owned: set[str] = set()
+    for temporal in query.temporal_predicates:
+        owned.add(temporal.start_column)
+        owned.add(temporal.end_column)
+    for spatial in query.spatial_predicates:
+        owned.update(
+            (
+                spatial.start_x_column,
+                spatial.start_y_column,
+                spatial.end_x_column,
+                spatial.end_y_column,
+            )
+        )
+    return frozenset(owned)
+
+
+def context_satisfies_row_with_trajectory_semantics(
+    context: GeneratedTrainingContext,
+    encoded_row: np.ndarray,
+    metadata: ModelMetadata,
+) -> bool:
+    """Evaluate one row against Duet tokens plus physical trajectory semantics."""
+
+    semantic_query = getattr(context, "trajectory_query", None)
+    owned = semantic_owned_columns(semantic_query)
+    for column_index, (column, token) in enumerate(zip(metadata.columns, context.tokens)):
+        value = column.domain[int(encoded_row[column_index])]
+        if column.kind == ColumnKind.DATA:
+            if column.name in owned:
+                continue
+            if not token.satisfies(value):
+                return False
+        if column.kind == ColumnKind.INDICATOR and token.op == PredicateOp.EQUAL and token.value != value:
+            return False
+    present_tables = {
+        column.table
+        for column_index, column in enumerate(metadata.columns)
+        if column.kind == ColumnKind.INDICATOR
+        and column.table is not None
+        and column.domain[int(encoded_row[column_index])] == 1
+    }
+    if present_tables and not set(context.included_tables).issubset(present_tables):
+        return False
+    if semantic_query is None:
+        return True
+    if semantic_query.scalar_predicates:
+        by_name = {column.name: index for index, column in enumerate(metadata.columns)}
+        for column_name, token in semantic_query.scalar_predicates:
+            if column_name in owned:
+                continue
+            column_index = by_name[column_name]
+            column = metadata.columns[column_index]
+            value = column.domain[int(encoded_row[column_index])]
+            if not token.satisfies(value):
+                return False
+    for temporal in semantic_query.temporal_predicates:
+        if not bool(
+            temporal_overlap_mask(
+                np.asarray([_decoded_row_value(metadata, encoded_row, temporal.start_column)], dtype=object),
+                np.asarray([_decoded_row_value(metadata, encoded_row, temporal.end_column)], dtype=object),
+                lower=temporal.lower,
+                upper=temporal.upper,
+            )[0]
+        ):
+            return False
+    for spatial in semantic_query.spatial_predicates:
+        if not bool(
+            segment_rectangle_intersects_mask(
+                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.start_x_column)], dtype=float),
+                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.start_y_column)], dtype=float),
+                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.end_x_column)], dtype=float),
+                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.end_y_column)], dtype=float),
+                spatial.min_x,
+                spatial.min_y,
+                spatial.max_x,
+                spatial.max_y,
+            )[0]
+        ):
+            return False
+    return True
+
+
+def _decoded_row_value(metadata: ModelMetadata, encoded_row: np.ndarray, column_name: str) -> Any:
+    column_index = metadata.column_index(column_name)
+    column = metadata.columns[column_index]
+    return column.domain[int(encoded_row[column_index])]
+
+
 def trajectory_distinct_context_eligibility(
     context: GeneratedTrainingContext,
     metadata: ModelMetadata,
@@ -278,6 +369,17 @@ class TrajectorySegmentIndex:
             srid=self.srid,
         )
 
+    def validate_runtime_compatibility(
+        self,
+        runtime_config: TrajectoryDistinctRuntimeConfig,
+        metadata: ModelMetadata,
+    ) -> None:
+        validate_trajectory_index_runtime_compatibility(
+            index=self,
+            runtime_config=runtime_config,
+            metadata=metadata,
+        )
+
     def evaluate_batch(
         self,
         *,
@@ -388,11 +490,14 @@ class TrajectorySegmentIndex:
     ) -> np.ndarray:
         mask = np.ones(encoded_rows.shape[0], dtype=bool)
         varying = set(self.segment_varying_columns) | set(self.predicate_columns)
+        semantic_query = getattr(context, "trajectory_query", None)
+        owned = semantic_owned_columns(semantic_query)
         for column_index, (column, token) in enumerate(zip(self.metadata.columns, context.tokens)):
             if (
                 column.kind != ColumnKind.DATA
                 or token.op == PredicateOp.WILDCARD
                 or column.name not in varying
+                or column.name in owned
             ):
                 continue
             decoded = np.asarray(
@@ -400,7 +505,6 @@ class TrajectorySegmentIndex:
                 dtype=object,
             )
             mask &= _token_satisfies_array(decoded, token)
-        semantic_query = getattr(context, "trajectory_query", None)
         if semantic_query is not None:
             for temporal in semantic_query.temporal_predicates:
                 start_values = self._decoded_column(encoded_rows, temporal.start_column)
@@ -638,6 +742,17 @@ class CompactTrajectorySegmentIndex:
             srid=self.srid,
         )
 
+    def validate_runtime_compatibility(
+        self,
+        runtime_config: TrajectoryDistinctRuntimeConfig,
+        metadata: ModelMetadata,
+    ) -> None:
+        validate_trajectory_index_runtime_compatibility(
+            index=self,
+            runtime_config=runtime_config,
+            metadata=metadata,
+        )
+
     @property
     def segment_count(self) -> int:
         return int(self.segment_idx.shape[0])
@@ -796,8 +911,12 @@ class CompactTrajectorySegmentIndex:
         context: GeneratedTrainingContext,
     ) -> np.ndarray:
         mask = np.ones(stop - start, dtype=bool)
+        semantic_query = getattr(context, "trajectory_query", None)
+        owned = semantic_owned_columns(semantic_query)
         for column, token in zip(self.metadata.columns, context.tokens):
             if column.kind != ColumnKind.DATA or token.op == PredicateOp.WILDCARD:
+                continue
+            if column.name in owned:
                 continue
             if column.name not in self.segment_varying_columns:
                 continue
@@ -805,7 +924,6 @@ class CompactTrajectorySegmentIndex:
             if values is None:
                 continue
             mask &= _token_satisfies_numeric_array(values, token)
-        semantic_query = getattr(context, "trajectory_query", None)
         if semantic_query is not None:
             for temporal in semantic_query.temporal_predicates:
                 mask &= temporal_overlap_mask(
@@ -997,6 +1115,60 @@ def _token_satisfies_array(values: np.ndarray, token: PredicateToken) -> np.ndar
         except TypeError:
             result[index] = False
     return result
+
+
+def validate_trajectory_index_runtime_compatibility(
+    *,
+    index: object,
+    runtime_config: TrajectoryDistinctRuntimeConfig,
+    metadata: ModelMetadata,
+) -> None:
+    mismatches: list[str] = []
+    for field_name in (
+        "entity_table",
+        "segment_table",
+        "trajectory_key",
+        "segment_key",
+        "trajectory_static_columns",
+        "segment_varying_columns",
+        "srid",
+    ):
+        expected = getattr(runtime_config, field_name)
+        observed = getattr(index, field_name)
+        if observed != expected:
+            mismatches.append(f"{field_name}: index={observed!r}, config={expected!r}")
+    index_metadata = getattr(index, "metadata")
+    expected_schema = metadata.schema_hash or metadata.stable_schema_hash()
+    observed_schema = index_metadata.schema_hash or index_metadata.stable_schema_hash()
+    if observed_schema != expected_schema:
+        mismatches.append(
+            f"metadata_schema_hash: index={observed_schema!r}, config={expected_schema!r}"
+        )
+    if getattr(index, "format_version") != TRAJECTORY_INDEX_FORMAT_VERSION:
+        mismatches.append(
+            "index_format_version: "
+            f"index={getattr(index, 'format_version')!r}, "
+            f"expected={TRAJECTORY_INDEX_FORMAT_VERSION!r}"
+        )
+    expected_hash = trajectory_index_compatibility_hash(
+        metadata,
+        predicate_columns=getattr(index, "predicate_columns", ()),
+        trajectory_key=runtime_config.trajectory_key,
+        entity_table=runtime_config.entity_table,
+        segment_table=runtime_config.segment_table,
+        segment_key=runtime_config.segment_key,
+        trajectory_static_columns=runtime_config.trajectory_static_columns,
+        segment_varying_columns=runtime_config.segment_varying_columns,
+        srid=runtime_config.srid,
+        format_version=TRAJECTORY_INDEX_FORMAT_VERSION,
+    )
+    if getattr(index, "compatibility_hash") != expected_hash:
+        mismatches.append("compatibility_hash does not match current runtime config")
+    if mismatches:
+        raise ValueError(
+            "trajectory index is incompatible with current trajectory_distinct config: "
+            + "; ".join(mismatches)
+        )
 
 
 def _token_satisfies_numeric_array(values: np.ndarray, token: PredicateToken) -> np.ndarray:

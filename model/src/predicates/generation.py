@@ -32,6 +32,14 @@ class GeneratedTrainingContext:
 
 
 @dataclass(frozen=True)
+class GeneratedPhysicalQuery:
+    included_tables: frozenset[str]
+    inverse_fanout_columns: frozenset[str]
+    ordinary_predicates: Mapping[str, PredicateToken]
+    trajectory_query: Any | None = None
+
+
+@dataclass(frozen=True)
 class PredicateGenerationStats:
     """Counters emitted while generating row-specific training contexts."""
 
@@ -128,6 +136,15 @@ class PredicateTrainingContextGenerator:
                 "normalize_predicate_probabilities=false"
             )
         self.table_subset_sampling = str(self.config.get("table_subset_sampling", "full"))
+        self.trajectory_query_semantics = str(
+            self.config.get("trajectory_query_semantics", "auto_pol_segments")
+        )
+        self.trajectory_temporal_probability = float(
+            self.config.get("trajectory_temporal_probability", 0.0)
+        )
+        self.trajectory_spatial_probability = float(
+            self.config.get("trajectory_spatial_probability", 0.0)
+        )
         self._cache_by_metadata_id: dict[int, tuple[_ColumnPredicateCache | None, ...]] = {}
 
     def probability_diagnostics(self) -> dict[str, float | bool]:
@@ -374,27 +391,54 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         rng: np.random.Generator,
     ) -> GeneratedTrainingContext:
+        query = self._generate_physical_query(encoded_row, metadata, rng)
+        tokens = tuple(
+            tokens_for_query_tables(
+                metadata,
+                set(query.included_tables),
+                set(query.inverse_fanout_columns),
+                dict(query.ordinary_predicates),
+            )
+        )
+        return GeneratedTrainingContext(
+            tokens=tokens,
+            included_tables=query.included_tables,
+            inverse_fanout_columns=query.inverse_fanout_columns,
+            ordinary_predicates=query.ordinary_predicates,
+            trajectory_query=query.trajectory_query,
+        )
+
+    def _generate_physical_query(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> GeneratedPhysicalQuery:
         included_tables = self._sample_included_tables(encoded_row, metadata, rng)
         inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
-        ordinary = self._ordinary_predicates(
+        semantic_owned: set[str] = set()
+        trajectory_query = self._pol_trajectory_query_for_row(
             encoded_row,
             metadata,
             rng,
             included_tables,
         )
-        tokens = tuple(
-            tokens_for_query_tables(
-                metadata,
-                set(included_tables),
-                set(inverse_fanouts),
-                dict(ordinary),
-            )
+        if trajectory_query is not None:
+            semantic_owned.update(_semantic_owned_column_names(trajectory_query))
+        ordinary = self._ordinary_predicates(
+            encoded_row,
+            metadata,
+            rng,
+            included_tables,
+            excluded_columns=frozenset(semantic_owned),
         )
-        return GeneratedTrainingContext(
-            tokens=tokens,
+        if trajectory_query is not None:
+            ordinary.update(dict(getattr(trajectory_query, "scalar_predicates", ())))
+        return GeneratedPhysicalQuery(
             included_tables=frozenset(included_tables),
             inverse_fanout_columns=frozenset(inverse_fanouts),
             ordinary_predicates=ordinary,
+            trajectory_query=trajectory_query,
         )
 
     def _generate_legacy_fixed_context(
@@ -484,11 +528,14 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         rng: np.random.Generator,
         included_tables: frozenset[str],
+        excluded_columns: frozenset[str] = frozenset(),
     ) -> dict[str, PredicateToken]:
         ordinary: dict[str, PredicateToken] = {}
         caches = self._column_caches(metadata)
         for column_index, column in enumerate(metadata.columns):
             if column.kind != ColumnKind.DATA:
+                continue
+            if column.name in excluded_columns:
                 continue
             if column.table is not None and column.table not in included_tables:
                 continue
@@ -497,6 +544,131 @@ class PredicateTrainingContextGenerator:
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
         return ordinary
+
+    def _pol_trajectory_query_for_row(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+        included_tables: frozenset[str],
+    ) -> Any | None:
+        if self.trajectory_query_semantics not in {"auto_pol_segments", "pol_segments"}:
+            return None
+        if "segments" not in included_tables:
+            return None
+        required = {
+            "segments:t_s",
+            "segments:t_e",
+            "segments:s_x",
+            "segments:s_y",
+            "segments:e_x",
+            "segments:e_y",
+        }
+        names = {column.name for column in metadata.columns}
+        if not required.issubset(names):
+            if self.trajectory_query_semantics == "pol_segments":
+                raise ValueError("pol_segments trajectory query semantics require POL segment columns")
+            return None
+        scalar_predicates: list[tuple[str, PredicateToken]] = []
+        temporal_predicates = []
+        spatial_predicates = []
+        if float(rng.random()) < self.trajectory_temporal_probability:
+            generated = self._sample_pol_temporal_query(encoded_row, metadata, rng)
+            if generated is not None:
+                scalar_predicates.extend(generated[0])
+                temporal_predicates.append(generated[1])
+        if float(rng.random()) < self.trajectory_spatial_probability:
+            generated = self._sample_pol_spatial_query(encoded_row, metadata, rng)
+            if generated is not None:
+                scalar_predicates.extend(generated[0])
+                spatial_predicates.append(generated[1])
+        if not temporal_predicates and not spatial_predicates and not scalar_predicates:
+            return None
+        from model.src.data.trajectory_distinct import TrajectoryQuerySemantics
+
+        return TrajectoryQuerySemantics(
+            scalar_predicates=tuple(scalar_predicates),
+            temporal_predicates=tuple(temporal_predicates),
+            spatial_predicates=tuple(spatial_predicates),
+        )
+
+    def _sample_pol_temporal_query(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
+        from model.src.data.trajectory_distinct import SegmentTemporalPredicate
+
+        caches = self._column_caches(metadata)
+        start_index = metadata.column_index("segments:t_s")
+        end_index = metadata.column_index("segments:t_e")
+        start_value = metadata.columns[start_index].domain[int(encoded_row[start_index])]
+        end_value = metadata.columns[end_index].domain[int(encoded_row[end_index])]
+        start_cache = caches[start_index]
+        end_cache = caches[end_index]
+        if start_cache is None or end_cache is None:
+            return None
+        lower_candidates = [value for value in end_cache.comparable_values if value <= end_value]
+        upper_candidates = [value for value in start_cache.comparable_values if start_value < value]
+        if not lower_candidates or not upper_candidates:
+            return None
+        lower = lower_candidates[int(rng.integers(0, len(lower_candidates)))]
+        upper = upper_candidates[int(rng.integers(0, len(upper_candidates)))]
+        scalar = [
+            ("segments:t_s", PredicateToken(PredicateOp.LESS_THAN, value=upper)),
+            ("segments:t_e", PredicateToken(PredicateOp.GREATER_EQUAL, value=lower)),
+        ]
+        return scalar, SegmentTemporalPredicate(
+            "segments:t_s",
+            "segments:t_e",
+            lower=lower,
+            upper=upper,
+            semantics="overlap",
+        )
+
+    def _sample_pol_spatial_query(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+    ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
+        from model.src.data.trajectory_distinct import SegmentSpatialPredicate
+
+        column_names = ("segments:s_x", "segments:s_y", "segments:e_x", "segments:e_y")
+        values = {
+            name: float(metadata.columns[metadata.column_index(name)].domain[int(encoded_row[metadata.column_index(name)])])
+            for name in column_names
+        }
+        x_low_anchor = min(values["segments:s_x"], values["segments:e_x"])
+        x_high_anchor = max(values["segments:s_x"], values["segments:e_x"])
+        y_low_anchor = min(values["segments:s_y"], values["segments:e_y"])
+        y_high_anchor = max(values["segments:s_y"], values["segments:e_y"])
+        x_domain = _numeric_values_for_columns(metadata, ("segments:s_x", "segments:e_x"))
+        y_domain = _numeric_values_for_columns(metadata, ("segments:s_y", "segments:e_y"))
+        x_lower_candidates = [value for value in x_domain if value <= x_low_anchor]
+        x_upper_candidates = [value for value in x_domain if value >= x_high_anchor]
+        y_lower_candidates = [value for value in y_domain if value <= y_low_anchor]
+        y_upper_candidates = [value for value in y_domain if value >= y_high_anchor]
+        if not (x_lower_candidates and x_upper_candidates and y_lower_candidates and y_upper_candidates):
+            return None
+        min_x = float(x_lower_candidates[int(rng.integers(0, len(x_lower_candidates)))])
+        max_x = float(x_upper_candidates[int(rng.integers(0, len(x_upper_candidates)))])
+        min_y = float(y_lower_candidates[int(rng.integers(0, len(y_lower_candidates)))])
+        max_y = float(y_upper_candidates[int(rng.integers(0, len(y_upper_candidates)))])
+        scalar = [
+            ("segments:s_x", PredicateToken.range(min_x, max_x)),
+            ("segments:e_x", PredicateToken.range(min_x, max_x)),
+            ("segments:s_y", PredicateToken.range(min_y, max_y)),
+            ("segments:e_y", PredicateToken.range(min_y, max_y)),
+        ]
+        return scalar, SegmentSpatialPredicate(
+            min_x=min_x,
+            min_y=min_y,
+            max_x=max_x,
+            max_y=max_y,
+            srid=int(self.config.get("trajectory_srid", 26916)),
+        )
 
     def _sample_satisfied_predicate(
         self,
@@ -1085,6 +1257,38 @@ def comparable_domain_values(domain: tuple[Any, ...]) -> list[Any]:
             continue
         comparable.append(value)
     return comparable
+
+
+def _semantic_owned_column_names(trajectory_query: Any) -> frozenset[str]:
+    owned: set[str] = set()
+    for temporal in getattr(trajectory_query, "temporal_predicates", ()):
+        owned.add(temporal.start_column)
+        owned.add(temporal.end_column)
+    for spatial in getattr(trajectory_query, "spatial_predicates", ()):
+        owned.update(
+            (
+                spatial.start_x_column,
+                spatial.start_y_column,
+                spatial.end_x_column,
+                spatial.end_y_column,
+            )
+        )
+    return frozenset(owned)
+
+
+def _numeric_values_for_columns(
+    metadata: ModelMetadata,
+    column_names: tuple[str, ...],
+) -> tuple[float, ...]:
+    values: set[float] = set()
+    for column_name in column_names:
+        column = metadata.columns[metadata.column_index(column_name)]
+        for value in comparable_domain_values(column.domain):
+            try:
+                values.add(float(value))
+            except (TypeError, ValueError):
+                continue
+    return tuple(sorted(values))
 
 
 def _fanout_child_table(fanout_source: str | None) -> str | None:

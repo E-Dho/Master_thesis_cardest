@@ -278,6 +278,25 @@ case. The semantic payload is carried on `GeneratedTrainingContext` as an
 optional `TrajectoryQuerySemantics`, while the normal model still consumes the
 ordinary Duet predicate tokens.
 
+The production predicate generator now creates one physical query decision and
+derives both representations from it:
+
+```text
+sampled FOJ row
+  -> GeneratedPhysicalQuery
+     -> Duet PredicateToken[] for ResMADE
+     -> TrajectoryQuerySemantics for local m_t(Q)
+```
+
+For POL temporal predicates, the same `lower` and `upper` bounds produce
+`segments:t_e >= lower`, `segments:t_s < upper`, and the trajectory overlap
+predicate. For POL spatial predicates, one sampled rectangle is retained as the
+physical `ST_Intersects` rectangle; the model-side coordinate tokens are the
+current scalar approximation of that same rectangle. The trajectory target and
+exact distinct oracle use the physical line/rectangle semantics. Semantic-owned
+columns are skipped by generic scalar filtering so temporal/spatial predicates
+are not applied twice.
+
 The terminal trajectory loss uses the main-batch tuple importance correction
 when present and multiplies every active `INV_FANOUT` reciprocal because the
 head sits after all fanout columns:
@@ -343,6 +362,23 @@ The provenance TSV must align row-for-row with `sample_rows.npy` and provide
 `sample_trajectory_ids.npy` and `sample_segment_ids.npy` lengths at startup.
 Live POL/NeuroCard sampling with trajectory distinct remains fail-closed until
 the sampler emits provenance together with each sampled FOJ row.
+
+The standard fixture producer is:
+
+```bash
+python3 -m model.scripts.prepare_pol_full_join_fixture \
+  --config model/configs/pol_50m_traj_dedup_single_anchor.yaml \
+  --full-join-tsv /path/to/pol_full_join_with_trip_segment_ids.tsv \
+  --sample-rows 2048
+```
+
+The input TSV must contain `trip_id`, `segment_idx`, and all model metadata
+column names. `sample_rows.npy`, `sample_trajectory_ids.npy`, and numeric
+`sample_segment_ids.npy` with shape `[N, 2]` are written from the same sampled
+rows. The compact index builder requires `segments.tsv` to be ordered by
+`(trip_id, segment_idx)` and writes arrays sequentially with
+`numpy.lib.format.open_memmap`, avoiding Python lists of all 50M rows and
+avoiding a giant in-memory sort.
 
 ## Optimized ANPM Inference
 

@@ -13,6 +13,7 @@ import numpy as np
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.trajectory_distinct import (
     CompactTrajectorySegmentIndex,
+    TrajectoryDistinctRuntimeConfig,
     TrajectorySegmentIndex,
 )
 
@@ -154,11 +155,10 @@ class NeuroCardFullJoinSampleSource:
                 allow_pickle=True,
             )
         if segment_ids_path is not None:
-            self._sample_segment_ids = np.load(Path(segment_ids_path), allow_pickle=True)
+            self._sample_segment_ids = _load_segment_ids_array(Path(segment_ids_path))
         elif (self.prepared_directory / "sample_segment_ids.npy").exists():
-            self._sample_segment_ids = np.load(
-                self.prepared_directory / "sample_segment_ids.npy",
-                allow_pickle=True,
+            self._sample_segment_ids = _load_segment_ids_array(
+                self.prepared_directory / "sample_segment_ids.npy"
             )
         if trajectory_index_path is None:
             directory_candidate = self.prepared_directory / "trajectory_segment_index"
@@ -215,7 +215,7 @@ class NeuroCardFullJoinSampleSource:
                 trajectory_ids = tuple(self._sample_trajectory_ids[indices].tolist())
             segment_ids = None
             if self._sample_segment_ids is not None:
-                segment_ids = tuple(self._sample_segment_ids[indices].tolist())
+                segment_ids = _segment_id_rows_to_tuples(self._sample_segment_ids[indices])
             self.sample_batches_generated += 1
             self.fixture_rows_reused += int(batch_size)
             return FullJoinBatch(
@@ -258,7 +258,7 @@ class NeuroCardFullJoinSampleSource:
             trajectory_ids = tuple(self._sample_trajectory_ids[selected_indices].tolist())
         segment_ids = None
         if self._sample_segment_ids is not None:
-            segment_ids = tuple(self._sample_segment_ids[selected_indices].tolist())
+            segment_ids = _segment_id_rows_to_tuples(self._sample_segment_ids[selected_indices])
         self.sample_batches_generated += 1
         self.fixture_rows_reused += int(len(strata_tuple))
         return FullJoinBatch(
@@ -295,6 +295,41 @@ class NeuroCardFullJoinSampleSource:
         if self._trajectory_multiplicity_provider is None:
             raise AttributeError("no trajectory segment index is configured")
         return self._trajectory_multiplicity_provider
+
+    def validate_trajectory_distinct(
+        self,
+        *,
+        runtime_config: TrajectoryDistinctRuntimeConfig,
+    ) -> None:
+        if self.sampling_mode == "live":
+            raise ValueError(
+                "trajectory_distinct.enabled=true with sampling_mode=live is unsupported "
+                "because live sampler provenance is unavailable"
+            )
+        provider = self.trajectory_multiplicity_provider
+        validate = getattr(provider, "validate_runtime_compatibility", None)
+        if validate is None:
+            raise ValueError("trajectory multiplicity provider lacks runtime validation")
+        validate(runtime_config, self.metadata)
+        if self._sample_trajectory_ids is None:
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires sample_trajectory_ids.npy "
+                "or dataset.trajectory_ids_path"
+            )
+        if self._sample_segment_ids is None:
+            raise ValueError(
+                "trajectory_distinct.enabled=true requires sample_segment_ids.npy "
+                "or dataset.segment_ids_path"
+            )
+        for segment_id in self._segment_id_tuple_sample(limit=16):
+            if not isinstance(segment_id, tuple) or len(segment_id) != 2:
+                raise ValueError("segment provenance ids must be immutable (trip_id, segment_idx) tuples")
+            hash(segment_id)
+
+    def _segment_id_tuple_sample(self, *, limit: int) -> tuple[tuple[int, int], ...]:
+        if self._sample_segment_ids is None:
+            return ()
+        return _segment_id_rows_to_tuples(self._sample_segment_ids[:limit])
 
 
 class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
@@ -769,6 +804,31 @@ def canonicalize_fanout_value(value: object, *, outer_padding: bool = False) -> 
     if fanout_value <= 0:
         raise ValueError(f"fanout values must be strictly positive, got {value!r}")
     return fanout_value
+
+
+def _load_segment_ids_array(path: Path) -> np.ndarray:
+    try:
+        loaded = np.load(path)
+    except ValueError:
+        loaded = np.load(path, allow_pickle=True)
+    array = np.asarray(loaded)
+    if array.ndim != 2 or array.shape[1] != 2:
+        converted = np.asarray([tuple(value) for value in array.tolist()], dtype=np.int64)
+        if converted.ndim != 2 or converted.shape[1] != 2:
+            raise ValueError("sample_segment_ids.npy must have shape [N, 2]")
+        array = converted
+    return np.asarray(array, dtype=np.int64)
+
+
+def _segment_id_rows_to_tuples(values: np.ndarray) -> tuple[tuple[int, int], ...]:
+    array = np.asarray(values, dtype=np.int64)
+    if array.ndim == 1:
+        if array.shape[0] != 2:
+            raise ValueError("one segment id row must contain exactly two integers")
+        array = array.reshape(1, 2)
+    if array.ndim != 2 or array.shape[1] != 2:
+        raise ValueError("segment id rows must have shape [N, 2]")
+    return tuple((int(row[0]), int(row[1])) for row in array)
 
 
 def build_synthetic_chain_dataset() -> SyntheticDataset:

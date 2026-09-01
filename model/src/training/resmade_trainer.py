@@ -185,6 +185,12 @@ class _RunningTrajectoryDistinctStats:
     unweighted_mse: _RunningScalarStats = field(default_factory=_RunningScalarStats)
     weighted_ess: _RunningScalarStats = field(default_factory=_RunningScalarStats)
     provider_seconds: _RunningScalarStats = field(default_factory=_RunningScalarStats)
+    weighted_squared_error_sum: float = 0.0
+    unweighted_squared_error_sum: float = 0.0
+    traj_loss_weight_sum: float = 0.0
+    traj_loss_weight_sq_sum: float = 0.0
+    target_sum: float = 0.0
+    prediction_sum: float = 0.0
 
     def update(self, diagnostics: dict[str, Any]) -> None:
         if not diagnostics.get("enabled", False):
@@ -208,6 +214,18 @@ class _RunningTrajectoryDistinctStats:
         m_count = int(diagnostics.get("trajectory_targets_generated", 0))
         if m_count:
             self.multiplicity_sum += float(diagnostics.get("multiplicity_sum", 0.0))
+            self.weighted_squared_error_sum += float(
+                diagnostics.get("weighted_squared_error_sum", 0.0)
+            )
+            self.unweighted_squared_error_sum += float(
+                diagnostics.get("unweighted_squared_error_sum", 0.0)
+            )
+            self.traj_loss_weight_sum += float(diagnostics.get("traj_loss_weight_sum", 0.0))
+            self.traj_loss_weight_sq_sum += float(
+                diagnostics.get("traj_loss_weight_sq_sum", 0.0)
+            )
+            self.target_sum += float(diagnostics.get("target_sum", 0.0))
+            self.prediction_sum += float(diagnostics.get("prediction_sum", 0.0))
             m_min = int(diagnostics.get("m_min", 0))
             m_max = int(diagnostics.get("m_max", 0))
             self.multiplicity_min = (
@@ -292,6 +310,33 @@ class _RunningTrajectoryDistinctStats:
             "prediction": self.predictions.to_json_dict(),
             "weighted_mse": self.weighted_mse.to_json_dict(),
             "unweighted_mse": self.unweighted_mse.to_json_dict(),
+            "global_weighted_mse": (
+                float(self.weighted_squared_error_sum / self.traj_loss_weight_sum)
+                if self.traj_loss_weight_sum > 0.0
+                else None
+            ),
+            "global_unweighted_mse": (
+                float(self.unweighted_squared_error_sum / self.targets_generated)
+                if self.targets_generated
+                else None
+            ),
+            "global_target_mean": (
+                float(self.target_sum / self.targets_generated)
+                if self.targets_generated
+                else None
+            ),
+            "global_prediction_mean": (
+                float(self.prediction_sum / self.targets_generated)
+                if self.targets_generated
+                else None
+            ),
+            "global_weighted_ess": (
+                float((self.traj_loss_weight_sum * self.traj_loss_weight_sum) / self.traj_loss_weight_sq_sum)
+                if self.traj_loss_weight_sq_sum > 0.0
+                else None
+            ),
+            "traj_loss_weight_sum": float(self.traj_loss_weight_sum),
+            "traj_loss_weight_sq_sum": float(self.traj_loss_weight_sq_sum),
             "weighted_ess": self.weighted_ess.to_json_dict(),
             "provider_seconds": self.provider_seconds.to_json_dict(),
             "warning": warning,
@@ -1569,7 +1614,10 @@ def trajectory_dedup_loss_for_batch(
     squared = (pred - target_tensor) ** 2
     loss = torch.sum(weight_tensor * squared) / (torch.sum(weight_tensor) + 1.0e-12)
     detached_pred = pred.detach().cpu().numpy().astype(float)
-    unweighted_mse = float(np.mean((detached_pred - targets) ** 2))
+    squared_np = (detached_pred - targets) ** 2
+    unweighted_squared_error_sum = float(np.sum(squared_np))
+    weighted_squared_error_sum = float(np.dot(weights, squared_np))
+    unweighted_mse = float(unweighted_squared_error_sum / max(len(targets), 1))
     weighted_mse = float(loss.detach().cpu())
     stats = {
         "enabled": True,
@@ -1604,12 +1652,16 @@ def trajectory_dedup_loss_for_batch(
         "fraction_m_ge_5": float(np.mean(np.asarray(multiplicities) >= 5)),
         "fraction_m_ge_10": float(np.mean(np.asarray(multiplicities) >= 10)),
         "target_mean": float(np.mean(targets)),
+        "target_sum": float(np.sum(targets)),
         "target_median": float(np.percentile(targets, 50)),
         "prediction_mean": float(np.mean(detached_pred)),
+        "prediction_sum": float(np.sum(detached_pred)),
         "prediction_min": float(np.min(detached_pred)),
         "prediction_max": float(np.max(detached_pred)),
         "weighted_mse": weighted_mse,
         "unweighted_mse": unweighted_mse,
+        "weighted_squared_error_sum": weighted_squared_error_sum,
+        "unweighted_squared_error_sum": unweighted_squared_error_sum,
         "weighted_ess": effective_sample_size(weights),
         "traj_dedup_importance_weight_min": float(np.min(weights)),
         "traj_dedup_importance_weight_max": float(np.max(weights)),
@@ -1936,12 +1988,12 @@ def _run_validation(
         "validation_fixture_rows_reused": int(fixture_rows),
         "validation_fanout_effective_sample_size": fanout_summary,
         "validation_traj_weighted_mse": (
-            trajectory_summary["weighted_mse"]["last"]
+            trajectory_summary["global_weighted_mse"]
             if trajectory_summary.get("enabled")
             else None
         ),
         "validation_traj_unweighted_mse": (
-            trajectory_summary["unweighted_mse"]["last"]
+            trajectory_summary["global_unweighted_mse"]
             if trajectory_summary.get("enabled")
             else None
         ),
@@ -1959,17 +2011,17 @@ def _run_validation(
             {},
         ).get("fraction_m_equals_1"),
         "validation_traj_weighted_ess": (
-            trajectory_summary["weighted_ess"]["last"]
+            trajectory_summary["global_weighted_ess"]
             if trajectory_summary.get("enabled")
             else None
         ),
         "validation_traj_prediction_mean": (
-            trajectory_summary["prediction"]["last"]
+            trajectory_summary["global_prediction_mean"]
             if trajectory_summary.get("enabled")
             else None
         ),
         "validation_traj_target_mean": (
-            trajectory_summary["target"]["last"]
+            trajectory_summary["global_target_mean"]
             if trajectory_summary.get("enabled")
             else None
         ),
