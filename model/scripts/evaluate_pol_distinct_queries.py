@@ -11,7 +11,10 @@ from model.src.data.full_join_sampler import _load_segment_ids_array, _segment_i
 from model.src.data.schema import ModelMetadata
 from model.src.data.trajectory_distinct import TrajectoryDistinctRuntimeConfig
 from model.src.evaluation.exact_evaluator import ExactOracle
-from model.src.evaluation.pol_query_adapter import evaluate_pol_distinct_record
+from model.src.evaluation.pol_query_adapter import (
+    assert_checkpoint_trajectory_config_compatible,
+    evaluate_pol_distinct_record,
+)
 from model.src.inference.estimator import OnePassEstimator
 from model.src.predicates.vocabulary import PredicateVocabularies
 
@@ -53,6 +56,7 @@ def main() -> None:
     runtime_config = TrajectoryDistinctRuntimeConfig.from_dict(
         config.get("trajectory_distinct", {})
     )
+    assert_checkpoint_trajectory_config_compatible(payload, runtime_config)
     queries_path = Path(args.queries)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

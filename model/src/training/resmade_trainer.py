@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import random
 from dataclasses import dataclass, field
@@ -647,6 +648,14 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     )
     validation_batches = int(validation_config.get("fresh_sampler_batches", 0) or 0)
     validation_batch_size = int(validation_config.get("batch_size", batch_size) or batch_size)
+    validation_sample_source = sample_source
+    validation_source_mode = "same_fixture_resampled"
+    if validation_config.get("prepared_directory") is not None:
+        validation_sample_source = _validation_sample_source_from_config(config, validation_config)
+        validation_source_mode = "held_out_fixture"
+        validation_metadata = getattr(validation_sample_source, "metadata", None)
+        if validation_metadata is None or validation_metadata.stable_schema_hash() != metadata.stable_schema_hash():
+            raise ValueError("validation fixture metadata does not match training metadata")
     selection_metric = str(
         validation_config.get("selection_metric", "validation_weighted_nll")
     )
@@ -816,7 +825,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 if validation_enabled and global_step % validation_interval == 0:
                     validation_metrics = _run_validation(
                         model,
-                        sample_source,
+                        validation_sample_source,
                         metadata,
                         vocabularies,
                         config,
@@ -824,6 +833,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         batch_size=validation_batch_size,
                         batches=validation_batches,
                         seed=seed + 1_000_000 + global_step,
+                        source_mode=validation_source_mode,
                     )
                     validation_fresh_sampler_rows += int(
                         validation_metrics["validation_fresh_sampler_rows"]
@@ -1155,6 +1165,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             "interval_steps": validation_interval if validation_enabled else None,
             "fresh_sampler_batches": validation_batches if validation_enabled else None,
             "batch_size": validation_batch_size if validation_enabled else None,
+            "source_mode": validation_source_mode if validation_enabled else None,
+            "prepared_directory": validation_config.get("prepared_directory")
+            if validation_enabled
+            else None,
             "selection_metric": selection_metric if validation_enabled else None,
             "minimize": minimize_selection if validation_enabled else None,
             "best_metric": best_metric,
@@ -1220,6 +1234,34 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         validation_summary=summary["validation"],
         early_stopping_summary=summary["early_stopping"],
     )
+
+
+def _validation_sample_source_from_config(
+    config: dict[str, Any],
+    validation_config: dict[str, Any],
+) -> object:
+    """Build an optional held-out fixture validation source from the same config."""
+
+    from model.src.data.sample_sources import sample_source_from_config
+
+    prepared_directory = validation_config.get("prepared_directory")
+    if prepared_directory is None:
+        raise ValueError("validation.prepared_directory is required for held-out validation")
+    prepared = Path(str(prepared_directory))
+    validation_source_config = copy.deepcopy(config)
+    dataset = validation_source_config.setdefault("dataset", {})
+    dataset["prepared_directory"] = str(prepared)
+    dataset["sampling_mode"] = str(
+        validation_config.get("sampling_mode", dataset.get("sampling_mode", "fixture"))
+    )
+    for key, filename in {
+        "trajectory_ids_path": "sample_trajectory_ids.npy",
+        "segment_ids_path": "sample_segment_ids.npy",
+    }.items():
+        dataset[key] = str(validation_config.get(key, prepared / filename))
+    if validation_config.get("trajectory_index_path") is not None:
+        dataset["trajectory_index_path"] = str(validation_config["trajectory_index_path"])
+    return sample_source_from_config(validation_source_config)
 
 
 def _train_one_batch(
@@ -1962,6 +2004,7 @@ def _run_validation(
     batch_size: int,
     batches: int,
     seed: int,
+    source_mode: str = "same_fixture_resampled",
 ) -> dict[str, Any]:
     import torch
 
@@ -2093,6 +2136,7 @@ def _run_validation(
         "validation_indicator_nll": float(np.mean(indicator_losses)) if indicator_losses else 0.0,
         "validation_batches": int(batches),
         "validation_batch_size": int(batch_size),
+        "validation_source_mode": str(source_mode),
         "validation_rows": int(batch_size * batches),
         "validation_fresh_sampler_rows": int(fresh_rows),
         "validation_fixture_rows_reused": int(fixture_rows),

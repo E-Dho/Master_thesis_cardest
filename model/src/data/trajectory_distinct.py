@@ -117,10 +117,25 @@ class SegmentSpatialPredicate:
 
 
 @dataclass(frozen=True)
+class PhysicalSpatialPredicate:
+    """Generic physical geometry/rectangle predicate without endpoint columns."""
+
+    table: str
+    attribute: str
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+    srid: int | None = None
+    geometry_column: str | None = None
+    semantics: Literal["intersects"] = "intersects"
+
+
+@dataclass(frozen=True)
 class TrajectoryQuerySemantics:
     scalar_predicates: tuple[tuple[str, PredicateToken], ...] = ()
     temporal_predicates: tuple[SegmentTemporalPredicate, ...] = ()
-    spatial_predicates: tuple[SegmentSpatialPredicate, ...] = ()
+    spatial_predicates: tuple[object, ...] = ()
 
     @property
     def query_type(self) -> str:
@@ -174,14 +189,17 @@ def semantic_owned_columns(query: TrajectoryQuerySemantics | None) -> frozenset[
         owned.add(temporal.start_column)
         owned.add(temporal.end_column)
     for spatial in query.spatial_predicates:
-        owned.update(
-            (
-                spatial.start_x_column,
-                spatial.start_y_column,
-                spatial.end_x_column,
-                spatial.end_y_column,
+        if isinstance(spatial, SegmentSpatialPredicate):
+            owned.update(
+                (
+                    spatial.start_x_column,
+                    spatial.start_y_column,
+                    spatial.end_x_column,
+                    spatial.end_y_column,
+                )
             )
-        )
+        elif isinstance(spatial, PhysicalSpatialPredicate) and spatial.geometry_column:
+            owned.add(spatial.geometry_column)
     return frozenset(owned)
 
 
@@ -235,6 +253,8 @@ def context_satisfies_row_with_trajectory_semantics(
         ):
             return False
     for spatial in semantic_query.spatial_predicates:
+        if not isinstance(spatial, SegmentSpatialPredicate):
+            raise UnsupportedTrajectoryContext("unsupported_spatial_semantics")
         if not bool(
             segment_rectangle_intersects_mask(
                 np.asarray([_decoded_row_value(metadata, encoded_row, spatial.start_x_column)], dtype=float),
@@ -517,6 +537,8 @@ class TrajectorySegmentIndex:
                     if name not in varying:
                         return "unsupported_semantics"
             for spatial in getattr(semantic_query, "spatial_predicates", ()):
+                if not isinstance(spatial, SegmentSpatialPredicate):
+                    return "unsupported_semantics"
                 for name in (
                     spatial.start_x_column,
                     spatial.start_y_column,
@@ -560,6 +582,8 @@ class TrajectorySegmentIndex:
                     upper=temporal.upper,
                 )
             for spatial in semantic_query.spatial_predicates:
+                if not isinstance(spatial, SegmentSpatialPredicate):
+                    raise UnsupportedTrajectoryContext("unsupported_spatial_semantics")
                 sx = self._decoded_column(encoded_rows, spatial.start_x_column).astype(float)
                 sy = self._decoded_column(encoded_rows, spatial.start_y_column).astype(float)
                 ex = self._decoded_column(encoded_rows, spatial.end_x_column).astype(float)
@@ -934,6 +958,8 @@ class CompactTrajectorySegmentIndex:
                     if name not in varying:
                         return "unsupported_semantics"
             for spatial in getattr(semantic_query, "spatial_predicates", ()):
+                if not isinstance(spatial, SegmentSpatialPredicate):
+                    return "unsupported_semantics"
                 if spatial.semantics != "intersects":
                     return "unsupported_semantics"
                 if spatial.srid is not None and self.srid is not None and spatial.srid != self.srid:
@@ -977,6 +1003,8 @@ class CompactTrajectorySegmentIndex:
                     upper=temporal.upper,
                 )
             for spatial in semantic_query.spatial_predicates:
+                if not isinstance(spatial, SegmentSpatialPredicate):
+                    raise UnsupportedTrajectoryContext("unsupported_spatial_semantics")
                 mask &= segment_rectangle_intersects_mask(
                     self._required_segment_values(spatial.start_x_column, start, stop),
                     self._required_segment_values(spatial.start_y_column, start, stop),

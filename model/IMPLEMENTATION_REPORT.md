@@ -638,7 +638,10 @@ emitted together with sampled FOJ rows.
 Validation now reports trajectory-aware MSE/ESS/target diagnostics when the
 feature is enabled, and long-run aggregate trajectory multiplicity diagnostics
 use streaming counters plus a bounded reservoir instead of retaining every
-target.
+target. Validation source semantics are explicit: without
+`validation.prepared_directory`, the trainer reports
+`same_fixture_resampled`; with it, the trainer constructs a schema-compatible
+held-out prepared source and reports `held_out_fixture`.
 
 ### Final Trajectory Semantic Wiring Pass
 
@@ -714,11 +717,22 @@ trajectory distinct enabled.
 
 POL workload evaluation now separates database truth from local fixture truth.
 For executed `query_generation/` records, production `M_true`, `D_true`, and
-`a_true` come from `join_cardinality`, `entity_cardinality`, and their ratio.
+`a_true` come from `join_cardinality`, `entity_cardinality`, and their ratio
+when `M_true > 0`. Empty queries with `M_true = D_true = 0` report
+`a_true = null` and `a_abs_error = null`; `M_true = 0, D_true > 0` is rejected
+as inconsistent truth.
 Fixture-oracle counts over `sample_rows.npy` are reported only as fixture
 diagnostics and are not used for production q-error. If a workload record lacks
 database cardinalities, q-error is unavailable rather than inferred from a
 finite fixture sample.
+
+The POL evaluation CLI also checks the checkpoint's stored
+`trajectory_distinct` runtime fields and
+`trajectory_target_semantics_version` against the active YAML before scoring.
+Trip-level physical geometry predicates are represented as generic physical
+spatial predicates, not fake endpoint columns, so unsupported physical spatial
+distinct estimates fail closed instead of accidentally conditioning on invented
+`trips:s_x/y/e_x/y` fields.
 
 This coding pass was prepared and tested locally. The real cluster smoke, 50M
 POL preparation, and 50M training run remain subsequent execution steps and are

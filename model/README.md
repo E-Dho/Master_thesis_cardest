@@ -329,7 +329,7 @@ against PostgreSQL/MobilityDB:
 ```text
 M_true = record["join_cardinality"]
 D_true = record["entity_cardinality"]
-a_true = D_true / M_true, or 0 when M_true is 0
+a_true = D_true / M_true when M_true > 0, otherwise unavailable
 ```
 
 These fields correspond to the database population modeled by the join
@@ -338,6 +338,30 @@ for deterministic semantic tests, but fixture counts are reported separately as
 fixture counts and are not used for production q-error. When workload records do
 not contain database cardinalities, production q-error is reported as
 unavailable rather than silently falling back to fixture truth.
+
+When `M_true = 0`, `D_true` must also be `0`; otherwise the record is rejected as
+inconsistent. Empty population queries report `a_true: null` and
+`a_abs_error: null` because the deduplication ratio is undefined for an empty
+matching-segment set.
+
+Evaluation CLIs reject stale trajectory checkpoints when the runtime
+`trajectory_distinct` table/key/static/varying-column/SRID configuration or the
+target semantics version differs from the checkpoint metadata. This prevents
+mixing checkpoints trained under incompatible trajectory-target semantics.
+
+### Validation Source
+
+Training validation is explicit about its source:
+
+```text
+validation.prepared_directory unset -> same_fixture_resampled
+validation.prepared_directory set   -> held_out_fixture
+```
+
+`same_fixture_resampled` reuses the training fixture with independent validation
+RNG streams. `held_out_fixture` constructs a separate prepared sample source
+from `validation.prepared_directory` and validates that its schema matches the
+training metadata before any validation batch is used.
 
 ### POL Trajectory Preparation
 

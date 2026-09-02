@@ -156,6 +156,7 @@ inference:
 
 validation:
   enabled: true
+  prepared_directory: null
   interval_steps: 250
   fresh_sampler_batches: 4
   batch_size: 2048

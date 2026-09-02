@@ -5,6 +5,8 @@ from typing import Any, Mapping
 
 from model.src.data.schema import ColumnKind, ModelMetadata
 from model.src.data.trajectory_distinct import (
+    PhysicalSpatialPredicate,
+    TRAJECTORY_TARGET_SEMANTICS_VERSION,
     TrajectoryDistinctNotApplicable,
     TrajectoryDistinctRuntimeConfig,
     TrajectoryQuerySemantics,
@@ -55,6 +57,43 @@ class DatabaseTrajectoryTruth:
     matching_segments_true: int | None = None
     distinct_trajectories_true: int | None = None
     a_true: float | None = None
+
+
+def assert_checkpoint_trajectory_config_compatible(
+    checkpoint_payload: Mapping[str, Any],
+    runtime_config: TrajectoryDistinctRuntimeConfig,
+) -> None:
+    """Reject evaluating checkpoints under incompatible trajectory semantics."""
+
+    stored = checkpoint_payload.get("trajectory_distinct")
+    if stored is None:
+        stored = checkpoint_payload.get("model_configuration", {}).get("trajectory_distinct", {})
+    stored = dict(stored or {})
+    if not bool(stored.get("enabled", False)):
+        raise ValueError("checkpoint was not trained with trajectory_distinct.enabled=true")
+    stored_runtime = TrajectoryDistinctRuntimeConfig.from_dict(stored)
+    for field in (
+        "entity_table",
+        "segment_table",
+        "trajectory_key",
+        "segment_key",
+        "predicate_scope",
+        "srid",
+        "trajectory_static_columns",
+        "segment_varying_columns",
+    ):
+        if getattr(stored_runtime, field) != getattr(runtime_config, field):
+            raise ValueError(
+                "checkpoint trajectory_distinct config does not match runtime "
+                f"field {field}: checkpoint={getattr(stored_runtime, field)!r}, "
+                f"runtime={getattr(runtime_config, field)!r}"
+            )
+    stored_version = checkpoint_payload.get("trajectory_target_semantics_version")
+    if stored_version != TRAJECTORY_TARGET_SEMANTICS_VERSION:
+        raise ValueError(
+            "checkpoint trajectory target semantics version does not match runtime: "
+            f"checkpoint={stored_version!r}, runtime={TRAJECTORY_TARGET_SEMANTICS_VERSION!r}"
+        )
 
 
 def pol_workload_record_to_context(
@@ -112,25 +151,39 @@ def pol_workload_record_to_context(
             min_y = float(predicate["min_y"])
             max_x = float(predicate["max_x"])
             max_y = float(predicate["max_y"])
-            if _metadata_has_columns(metadata, columns):
+            has_endpoint_columns = _metadata_has_columns(metadata, columns)
+            if has_endpoint_columns:
                 for column_name in columns:
                     if column_name.endswith(":s_x") or column_name.endswith(":e_x"):
                         ordinary[column_name] = PredicateToken.range(min_x, max_x)
                     else:
                         ordinary[column_name] = PredicateToken.range(min_y, max_y)
-            spatial_predicates.append(
-                SegmentSpatialPredicate(
-                    min_x,
-                    min_y,
-                    max_x,
-                    max_y,
-                    srid=(srid if srid is not None else int(predicate.get("srid", 26916))),
-                    start_x_column=columns[0],
-                    start_y_column=columns[1],
-                    end_x_column=columns[2],
-                    end_y_column=columns[3],
+                spatial_predicates.append(
+                    SegmentSpatialPredicate(
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        srid=(srid if srid is not None else int(predicate.get("srid", 26916))),
+                        start_x_column=columns[0],
+                        start_y_column=columns[1],
+                        end_x_column=columns[2],
+                        end_y_column=columns[3],
+                    )
                 )
-            )
+            else:
+                spatial_predicates.append(
+                    PhysicalSpatialPredicate(
+                        table=table,
+                        attribute=attribute,
+                        min_x=min_x,
+                        min_y=min_y,
+                        max_x=max_x,
+                        max_y=max_y,
+                        srid=(srid if srid is not None else int(predicate.get("srid", 26916))),
+                        geometry_column=_geometry_column(table, attribute),
+                    )
+                )
         else:
             raise ValueError(f"unsupported POL predicate mode {mode!r}")
     inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
@@ -178,12 +231,14 @@ def database_truth_for_trajectory_query(
     distinct = int(raw_entity)
     if matching < 0 or distinct < 0:
         return DatabaseTrajectoryTruth(False, "negative_database_truth")
+    if matching == 0 and distinct != 0:
+        return DatabaseTrajectoryTruth(False, "inconsistent_database_truth")
     return DatabaseTrajectoryTruth(
         True,
         "database_truth_available",
         matching_segments_true=matching,
         distinct_trajectories_true=distinct,
-        a_true=0.0 if matching == 0 else float(distinct / matching),
+        a_true=None if matching == 0 else float(distinct / matching),
     )
 
 
@@ -259,7 +314,7 @@ def evaluate_pol_distinct_record(
     )
     a_abs_error = (
         None
-        if not database_truth.available
+        if not database_truth.available or database_truth.a_true is None
         else abs(float(estimate.traj_dedup_factor) - float(database_truth.a_true))
     )
     return PolDistinctEvaluation(
@@ -324,6 +379,14 @@ def _spatial_columns(table: str, attribute: str) -> tuple[str, str, str, str]:
     if table == "trips" and attribute == "trip_geom":
         return "trips:s_x", "trips:s_y", "trips:e_x", "trips:e_y"
     return f"{table}:s_x", f"{table}:s_y", f"{table}:e_x", f"{table}:e_y"
+
+
+def _geometry_column(table: str, attribute: str) -> str:
+    if attribute == "trip_geom":
+        return f"{table}:trip_geom"
+    if attribute == "segment_geom":
+        return f"{table}:segment_geom"
+    return f"{table}:{attribute}"
 
 
 def _metadata_has_columns(metadata: ModelMetadata, names: tuple[str, ...]) -> bool:
