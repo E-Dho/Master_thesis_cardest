@@ -18,7 +18,6 @@ from model.src.data.trajectory_distinct import (
     CompactTrajectorySegmentIndex,
     segment_rectangle_intersects_mask,
 )
-from model.scripts.prepare_pol_staging_data import _iter_segment_values
 
 
 @dataclass(frozen=True)
@@ -369,11 +368,20 @@ def _segments_from_tsv(path: Path) -> dict[str, np.ndarray]:
     s_y: list[float] = []
     e_x: list[float] = []
     e_y: list[float] = []
-    for row in _iter_segment_values(path):
-        s_x.append(float(row["s_x"]))
-        s_y.append(float(row["s_y"]))
-        e_x.append(float(row["e_x"]))
-        e_y.append(float(row["e_y"]))
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for line_number, line in enumerate(handle, 1):
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            row = line.split("\t")
+            if len(row) < 6:
+                raise SystemExit(
+                    f"bad segments.tsv row {line_number}: expected at least 6 columns"
+                )
+            s_x.append(float(row[2]))
+            s_y.append(float(row[3]))
+            e_x.append(float(row[4]))
+            e_y.append(float(row[5]))
     if not s_x:
         raise SystemExit(f"no segment rows found in {path}")
     return {
