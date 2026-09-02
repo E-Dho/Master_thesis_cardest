@@ -207,7 +207,7 @@ class NeuroCardFullJoinSampleSource:
         if self.sampling_mode not in {"fixture", "materialized_large_sample"}:
             raise ValueError(f"unsupported NeuroCard sampling mode {self.sampling_mode!r}")
         if sample_path.exists():
-            rows = np.load(sample_path)
+            rows = np.load(sample_path, mmap_mode="r")
             rng = np.random.default_rng(seed)
             indices = rng.integers(0, len(rows), size=batch_size)
             trajectory_ids = None

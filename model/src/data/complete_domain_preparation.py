@@ -399,7 +399,7 @@ def validate_prepared_manifest(prepared_directory: str | Path) -> ModelMetadata:
     _validate_output_slices(metadata)
     sample_path = directory / "sample_rows.npy"
     if sample_path.exists():
-        rows = np.load(sample_path)
+        rows = np.load(sample_path, mmap_mode="r")
         if rows.ndim != 2 or rows.shape[1] != len(metadata.columns):
             raise ValueError(
                 f"sample_rows.npy shape {rows.shape} does not match "

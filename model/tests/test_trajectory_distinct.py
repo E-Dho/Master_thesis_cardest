@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -1199,6 +1200,120 @@ class TrajectoryDistinctTest(unittest.TestCase):
                         ),
                     )
                 )
+
+    def test_prepare_pol_staging_data_builds_fixture_and_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            staging = root / "staging"
+            prepared = root / "prepared"
+            staging.mkdir()
+            (staging / "agents.tsv").write_text(
+                "\n".join(
+                    [
+                        "1\t30.0\tGraduate\tA\t0.5\t2",
+                        "2\t40.0\tHighSchoolOrCollege\tB\t0.7\t3",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (staging / "trips.tsv").write_text(
+                "\n".join(
+                    [
+                        "10\t1\t2020-01-01T00:00:00.000\t2020-01-01T00:05:00.000\t2",
+                        "20\t2\t2020-01-02T00:00:00.000\t2020-01-02T00:05:00.000\t1",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (staging / "segments.tsv").write_text(
+                "\n".join(
+                    [
+                        "10\t0\t0.0\t0.0\t1.0\t1.0\t2020-01-01T00:00:00.000\t2020-01-01T00:01:00.000",
+                        "10\t1\t1.0\t1.0\t2.0\t2.0\t2020-01-01T00:01:00.000\t2020-01-01T00:02:00.000",
+                        "20\t0\t2.0\t2.0\t3.0\t3.0\t2020-01-02T00:00:00.000\t2020-01-02T00:01:00.000",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                f"""
+dataset:
+  type: pol_trajectory_full_join
+  name: pol_test
+  prepared_directory: {prepared}
+  sampling_mode: fixture
+  trajectory_index_path: {prepared}/trajectory_segment_index
+
+factorization:
+  enabled: false
+
+trajectory_distinct:
+  enabled: true
+  entity_table: trips
+  segment_table: segments
+  trajectory_key: trip_id
+  segment_key: trip_id,segment_idx
+  predicate_scope: segment_query
+  srid: 26916
+  trajectory_static_columns:
+    - agents:age
+    - trips:trip_geom
+  segment_varying_columns:
+    - segments:segment_idx
+    - segments:t_s
+    - segments:t_e
+    - segments:s_x
+    - segments:s_y
+    - segments:e_x
+    - segments:e_y
+""",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "model.scripts.prepare_pol_staging_data",
+                    "--config",
+                    str(config_path),
+                    "--staging-dir",
+                    str(staging),
+                    "--sample-rows",
+                    "2",
+                    "--seed",
+                    "0",
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertIn("prepared_directory=", completed.stdout)
+            source = NeuroCardFullJoinSampleSource(prepared)
+            self.assertEqual(len(source.metadata.columns), 21)
+            self.assertIn("trips:trip_geom", [column.name for column in source.metadata.columns])
+            self.assertEqual(np.load(prepared / "sample_rows.npy", mmap_mode="r").shape, (2, 21))
+            self.assertEqual(np.load(prepared / "sample_trajectory_ids.npy").shape, (2,))
+            self.assertEqual(np.load(prepared / "sample_segment_ids.npy").shape, (2, 2))
+            source.validate_trajectory_distinct(
+                runtime_config=TrajectoryDistinctRuntimeConfig(
+                    segment_varying_columns=(
+                        "segments:segment_idx",
+                        "segments:t_s",
+                        "segments:t_e",
+                        "segments:s_x",
+                        "segments:s_y",
+                        "segments:e_x",
+                        "segments:e_y",
+                    ),
+                    trajectory_static_columns=("agents:age", "trips:trip_geom"),
+                    srid=26916,
+                )
+            )
 
     def test_exact_oracle_uses_trajectory_semantics(self) -> None:
         metadata = _pol_segment_metadata()
