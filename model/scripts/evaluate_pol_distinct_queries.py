@@ -56,7 +56,11 @@ def main() -> None:
     runtime_config = TrajectoryDistinctRuntimeConfig.from_dict(
         config.get("trajectory_distinct", {})
     )
-    assert_checkpoint_trajectory_config_compatible(payload, runtime_config)
+    assert_checkpoint_trajectory_config_compatible(
+        payload,
+        runtime_config,
+        config.get("trajectory_spatial", {}),
+    )
     queries_path = Path(args.queries)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +90,7 @@ def main() -> None:
                 trajectory_ids=trajectory_ids,
                 segment_ids=segment_ids,
                 trajectory_config=runtime_config,
+                trajectory_spatial=config.get("trajectory_spatial", {}),
             )
             payload = result.to_json_dict()
             sink.write(json.dumps(payload, sort_keys=True) + "\n")

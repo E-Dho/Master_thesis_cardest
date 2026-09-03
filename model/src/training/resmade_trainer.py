@@ -1264,6 +1264,13 @@ def _validation_sample_source_from_config(
     return sample_source_from_config(validation_source_config)
 
 
+def _predicate_generation_config(config: dict[str, Any]) -> dict[str, Any]:
+    predicate_config = dict(config.get("predicate_generation", {}))
+    if "trajectory_spatial" not in predicate_config:
+        predicate_config["trajectory_spatial"] = dict(config.get("trajectory_spatial", {}))
+    return predicate_config
+
+
 def _train_one_batch(
     model: PredicateResMADE,
     optimizer: object,
@@ -1278,7 +1285,7 @@ def _train_one_batch(
 ) -> TrainingStepResult:
     import torch
 
-    predicate_config = config.get("predicate_generation", {})
+    predicate_config = _predicate_generation_config(config)
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
     rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
     context_generator = PredicateTrainingContextGenerator(predicate_config)
@@ -2023,7 +2030,7 @@ def _run_validation(
     traj_validation_stats = _RunningTrajectoryDistinctStats()
     fresh_rows = 0
     fixture_rows = 0
-    predicate_config = config.get("predicate_generation", {})
+    predicate_config = _predicate_generation_config(config)
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
     context_generator = PredicateTrainingContextGenerator(predicate_config)
     discard_buffer = getattr(sample_source, "discard_buffer", None)

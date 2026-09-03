@@ -60,13 +60,17 @@ class SpatialIntersectionStats:
     window_height: float
     window_area: float
     M_Q: int
+    M_MBR_Q: int
     B_Q: int
     O_Q: int
     C_Q: int
+    MBR_false_positives: int
     B_fraction: float | None
     O_fraction: float | None
     C_fraction: float | None
     current_endpoint_model_recall: float | None
+    MBR_precision: float | None
+    MBR_overestimation: float | None
     mean_matching_segment_length: float | None
     min_matching_segment_length: float | None
     p50_matching_segment_length: float | None
@@ -213,6 +217,7 @@ def analyze_rectangle_query(
     b_count = 0
     o_count = 0
     c_count = 0
+    mbr_count = 0
     length_sum = 0.0
     length_min = math.inf
     length_max = 0.0
@@ -236,6 +241,16 @@ def analyze_rectangle_query(
             & (min_y <= ey_chunk)
             & (ey_chunk <= max_y)
         )
+        seg_min_x = np.minimum(sx_chunk, ex_chunk)
+        seg_max_x = np.maximum(sx_chunk, ex_chunk)
+        seg_min_y = np.minimum(sy_chunk, ey_chunk)
+        seg_max_y = np.maximum(sy_chunk, ey_chunk)
+        mbr_overlaps = (
+            (seg_min_x <= max_x)
+            & (seg_max_x >= min_x)
+            & (seg_min_y <= max_y)
+            & (seg_max_y >= min_y)
+        )
         intersects = segment_rectangle_intersects_mask(
             sx_chunk,
             sy_chunk,
@@ -252,6 +267,7 @@ def analyze_rectangle_query(
         b_count += int(np.count_nonzero(both))
         o_count += int(np.count_nonzero(one))
         c_count += int(np.count_nonzero(crossing))
+        mbr_count += int(np.count_nonzero(mbr_overlaps))
         if np.any(intersects):
             lengths = np.hypot(
                 ex_chunk[intersects] - sx_chunk[intersects],
@@ -262,6 +278,7 @@ def analyze_rectangle_query(
             length_max = max(length_max, float(np.max(lengths)))
             matching_length_chunks.append(lengths.astype(float, copy=False))
     matching = b_count + o_count + c_count
+    mbr_false_positives = mbr_count - matching
     width = max_x - min_x
     height = max_y - min_y
     area = width * height
@@ -287,13 +304,17 @@ def analyze_rectangle_query(
         window_height=height,
         window_area=area,
         M_Q=matching,
+        M_MBR_Q=mbr_count,
         B_Q=b_count,
         O_Q=o_count,
         C_Q=c_count,
+        MBR_false_positives=mbr_false_positives,
         B_fraction=_fraction(b_count, matching),
         O_fraction=_fraction(o_count, matching),
         C_fraction=_fraction(c_count, matching),
         current_endpoint_model_recall=_fraction(b_count, matching),
+        MBR_precision=_fraction(matching, mbr_count),
+        MBR_overestimation=_fraction(mbr_count, matching),
         mean_matching_segment_length=mean_length,
         min_matching_segment_length=None if matching == 0 else length_min,
         p50_matching_segment_length=length_percentiles["p50"],
@@ -319,6 +340,8 @@ def summarize_results(
     total_b = sum(result.B_Q for result in results)
     total_o = sum(result.O_Q for result in results)
     total_c = sum(result.C_Q for result in results)
+    total_mbr = sum(result.M_MBR_Q for result in results)
+    total_mbr_false_positives = sum(result.MBR_false_positives for result in results)
     return {
         "spatial_queries_analyzed": len(results),
         "predicate_filter": {
@@ -326,6 +349,8 @@ def summarize_results(
             "include_other_spatial_predicates": include_other_spatial_predicates,
         },
         "total_matching_segments": int(total_m),
+        "total_mbr_candidate_segments": int(total_mbr),
+        "total_mbr_false_positives": int(total_mbr_false_positives),
         "total_B_Q": int(total_b),
         "total_O_Q": int(total_o),
         "total_C_Q": int(total_c),
@@ -335,6 +360,10 @@ def summarize_results(
             "C_Q_over_M_Q": _percentile_summary([r.C_fraction for r in results]),
             "current_endpoint_model_recall": _percentile_summary(
                 [r.current_endpoint_model_recall for r in results]
+            ),
+            "MBR_precision": _percentile_summary([r.MBR_precision for r in results]),
+            "MBR_overestimation": _percentile_summary(
+                [r.MBR_overestimation for r in results]
             ),
         },
         "matching_segment_length_percentiles_by_query": {
@@ -364,6 +393,9 @@ def summarize_results(
             "B_fraction": _fraction(total_b, total_m),
             "O_fraction": _fraction(total_o, total_m),
             "C_fraction": _fraction(total_c, total_m),
+            "MBR_precision": _fraction(total_m, total_mbr),
+            "MBR_overestimation": _fraction(total_mbr, total_m),
+            "MBR_false_positive_fraction": _fraction(total_mbr_false_positives, total_mbr),
         },
         "normalized_window_size_buckets": _bucket_summary(results, bucket_edges),
         "normalized_window_size_buckets_by_interval": {
@@ -416,6 +448,12 @@ def summarize_results(
                 and 0 <= result.O_Q <= result.M_Q
                 and 0 <= result.C_Q <= result.M_Q
                 for result in results
+            ),
+            "all_mbr_counts_cover_true_matches": all(
+                result.M_Q <= result.M_MBR_Q for result in results
+            ),
+            "all_mbr_false_positives_nonnegative": all(
+                result.MBR_false_positives >= 0 for result in results
             ),
         },
     }
@@ -508,6 +546,16 @@ def _segments_from_tsv(path: Path) -> dict[str, np.ndarray]:
 def _validate_stats(stats: SpatialIntersectionStats) -> None:
     if stats.B_Q + stats.O_Q + stats.C_Q != stats.M_Q:
         raise ValueError(f"partition sanity check failed for {stats.query_id}")
+    if stats.M_Q > stats.M_MBR_Q:
+        raise ValueError(
+            f"MBR sanity check failed for {stats.query_id}: "
+            f"M_Q={stats.M_Q} > M_MBR_Q={stats.M_MBR_Q}"
+        )
+    if stats.MBR_false_positives < 0:
+        raise ValueError(
+            f"MBR false-positive sanity check failed for {stats.query_id}: "
+            f"{stats.MBR_false_positives}"
+        )
     for name in ("B_Q", "O_Q", "C_Q"):
         value = int(getattr(stats, name))
         if value < 0 or value > stats.M_Q:
@@ -538,12 +586,17 @@ def _write_bounded_range_breakdown_csv(
         "center_source",
         "query_count",
         "sum_M_Q",
+        "sum_M_MBR_Q",
         "sum_B_Q",
         "sum_O_Q",
         "sum_C_Q",
+        "sum_MBR_false_positives",
         "B_weighted",
         "O_weighted",
         "C_weighted",
+        "MBR_precision_weighted",
+        "MBR_overestimation_weighted",
+        "MBR_false_positive_fraction_weighted",
         "median_M_Q",
         "n_C_fraction_gt_0_5",
         "median_M_Q_C_fraction_gt_0_5",
@@ -564,6 +617,16 @@ def _write_bounded_range_breakdown_csv(
         "C_p95",
         "C_p99",
         "C_max",
+        "MBR_precision_p50",
+        "MBR_precision_p90",
+        "MBR_precision_p95",
+        "MBR_precision_p99",
+        "MBR_precision_max",
+        "MBR_overestimation_p50",
+        "MBR_overestimation_p90",
+        "MBR_overestimation_p95",
+        "MBR_overestimation_p99",
+        "MBR_overestimation_max",
     ]
     rows = bounded_range_breakdown_rows(results)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -595,9 +658,11 @@ def bounded_range_breakdown_rows(
     for label, members in sorted(groups.items()):
         interval, width_source, center_source = label.split(" x ", maxsplit=2)
         total_m = sum(result.M_Q for result in members)
+        total_mbr = sum(result.M_MBR_Q for result in members)
         total_b = sum(result.B_Q for result in members)
         total_o = sum(result.O_Q for result in members)
         total_c = sum(result.C_Q for result in members)
+        total_mbr_false_positives = sum(result.MBR_false_positives for result in members)
         c_gt_0_5 = [
             result.M_Q
             for result in members
@@ -615,12 +680,19 @@ def bounded_range_breakdown_rows(
                 "center_source": center_source,
                 "query_count": len(members),
                 "sum_M_Q": int(total_m),
+                "sum_M_MBR_Q": int(total_mbr),
                 "sum_B_Q": int(total_b),
                 "sum_O_Q": int(total_o),
                 "sum_C_Q": int(total_c),
+                "sum_MBR_false_positives": int(total_mbr_false_positives),
                 "B_weighted": _fraction(total_b, total_m),
                 "O_weighted": _fraction(total_o, total_m),
                 "C_weighted": _fraction(total_c, total_m),
+                "MBR_precision_weighted": _fraction(total_m, total_mbr),
+                "MBR_overestimation_weighted": _fraction(total_mbr, total_m),
+                "MBR_false_positive_fraction_weighted": _fraction(
+                    total_mbr_false_positives, total_mbr
+                ),
                 "median_M_Q": _percentile([r.M_Q for r in members], 50),
                 "n_C_fraction_gt_0_5": len(c_gt_0_5),
                 "median_M_Q_C_fraction_gt_0_5": _percentile(c_gt_0_5, 50),
@@ -641,6 +713,36 @@ def bounded_range_breakdown_rows(
                 "C_p95": _percentile([r.C_fraction for r in members], 95),
                 "C_p99": _percentile([r.C_fraction for r in members], 99),
                 "C_max": _max_or_none([r.C_fraction for r in members]),
+                "MBR_precision_p50": _percentile(
+                    [r.MBR_precision for r in members], 50
+                ),
+                "MBR_precision_p90": _percentile(
+                    [r.MBR_precision for r in members], 90
+                ),
+                "MBR_precision_p95": _percentile(
+                    [r.MBR_precision for r in members], 95
+                ),
+                "MBR_precision_p99": _percentile(
+                    [r.MBR_precision for r in members], 99
+                ),
+                "MBR_precision_max": _max_or_none(
+                    [r.MBR_precision for r in members]
+                ),
+                "MBR_overestimation_p50": _percentile(
+                    [r.MBR_overestimation for r in members], 50
+                ),
+                "MBR_overestimation_p90": _percentile(
+                    [r.MBR_overestimation for r in members], 90
+                ),
+                "MBR_overestimation_p95": _percentile(
+                    [r.MBR_overestimation for r in members], 95
+                ),
+                "MBR_overestimation_p99": _percentile(
+                    [r.MBR_overestimation for r in members], 99
+                ),
+                "MBR_overestimation_max": _max_or_none(
+                    [r.MBR_overestimation for r in members]
+                ),
             }
         )
     return rows
@@ -659,18 +761,32 @@ def _bucket_summary(
             and lower <= result.sqrt_window_area_over_mean_matching_segment_length < upper
         ]
         total_m = sum(result.M_Q for result in members)
+        total_mbr = sum(result.M_MBR_Q for result in members)
+        total_mbr_false_positives = sum(result.MBR_false_positives for result in members)
         buckets.append(
             {
                 "lower_inclusive": lower,
                 "upper_exclusive": upper,
                 "query_count": len(members),
                 "total_matching_segments": int(total_m),
+                "total_mbr_candidate_segments": int(total_mbr),
+                "weighted_MBR_precision": _fraction(total_m, total_mbr),
+                "weighted_MBR_overestimation": _fraction(total_mbr, total_m),
+                "weighted_MBR_false_positive_fraction": _fraction(
+                    total_mbr_false_positives, total_mbr
+                ),
                 "weighted_O_fraction": _fraction(sum(r.O_Q for r in members), total_m),
                 "weighted_C_fraction": _fraction(sum(r.C_Q for r in members), total_m),
                 "mean_O_fraction": _mean([r.O_fraction for r in members]),
                 "mean_C_fraction": _mean([r.C_fraction for r in members]),
                 "p50_O_fraction": _percentile([r.O_fraction for r in members], 50),
                 "p50_C_fraction": _percentile([r.C_fraction for r in members], 50),
+                "MBR_precision": _percentile_summary(
+                    [r.MBR_precision for r in members]
+                ),
+                "MBR_overestimation": _percentile_summary(
+                    [r.MBR_overestimation for r in members]
+                ),
             }
         )
     return buckets
@@ -688,24 +804,35 @@ def _grouped_summaries(
 
 def _group_summary(results: Sequence[SpatialIntersectionStats]) -> dict[str, Any]:
     total_m = sum(result.M_Q for result in results)
+    total_mbr = sum(result.M_MBR_Q for result in results)
     total_b = sum(result.B_Q for result in results)
     total_o = sum(result.O_Q for result in results)
     total_c = sum(result.C_Q for result in results)
+    total_mbr_false_positives = sum(result.MBR_false_positives for result in results)
     return {
         "query_count": len(results),
         "sum_M_Q": int(total_m),
+        "sum_M_MBR_Q": int(total_mbr),
         "sum_B_Q": int(total_b),
         "sum_O_Q": int(total_o),
         "sum_C_Q": int(total_c),
+        "sum_MBR_false_positives": int(total_mbr_false_positives),
         "cardinality_weighted_fractions": {
             "B_fraction": _fraction(total_b, total_m),
             "O_fraction": _fraction(total_o, total_m),
             "C_fraction": _fraction(total_c, total_m),
+            "MBR_precision": _fraction(total_m, total_mbr),
+            "MBR_overestimation": _fraction(total_mbr, total_m),
+            "MBR_false_positive_fraction": _fraction(total_mbr_false_positives, total_mbr),
         },
         "ratio_percentiles": {
             "B_Q_over_M_Q": _percentile_summary([r.B_fraction for r in results]),
             "O_Q_over_M_Q": _percentile_summary([r.O_fraction for r in results]),
             "C_Q_over_M_Q": _percentile_summary([r.C_fraction for r in results]),
+            "MBR_precision": _percentile_summary([r.MBR_precision for r in results]),
+            "MBR_overestimation": _percentile_summary(
+                [r.MBR_overestimation for r in results]
+            ),
         },
     }
 

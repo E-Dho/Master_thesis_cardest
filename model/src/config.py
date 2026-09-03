@@ -82,6 +82,12 @@ def validate_config(config: dict[str, Any]) -> None:
     anpm_config = ANPMConfig.from_dict(config.get("anpm", {}))
     anpm_config.validate()
     trajectory_distinct = config.get("trajectory_distinct", {})
+    trajectory_spatial = config.get("trajectory_spatial", {})
+    if bool(trajectory_spatial.get("enabled", False)):
+        if str(trajectory_spatial.get("representation", "")) != "segment_mbr":
+            raise ValueError(
+                "trajectory_spatial.representation must be segment_mbr when enabled"
+            )
     trajectory_distinct_enabled = bool(trajectory_distinct.get("enabled", False))
     if str(trajectory_distinct.get("loss", "mse")) != "mse":
         raise ValueError("trajectory_distinct.loss currently supports only mse")

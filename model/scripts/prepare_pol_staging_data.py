@@ -57,6 +57,12 @@ MODEL_SEGMENT_COLUMNS = (
     "e_x",
     "e_y",
 )
+MODEL_SEGMENT_MBR_COLUMNS = (
+    "seg_min_x",
+    "seg_max_x",
+    "seg_min_y",
+    "seg_max_y",
+)
 
 
 def main() -> None:
@@ -80,6 +86,11 @@ def main() -> None:
         default=None,
         help="Override dataset.prepared_directory from the config.",
     )
+    parser.add_argument(
+        "--force-rebuild-index",
+        action="store_true",
+        help="Replace an existing compact trajectory index after writing a complete temporary replacement.",
+    )
     args = parser.parse_args()
 
     started = time.perf_counter()
@@ -87,6 +98,7 @@ def main() -> None:
     validate_config(config)
     staging = Path(args.staging_dir)
     prepared = Path(args.prepared_directory or config["dataset"]["prepared_directory"])
+    use_segment_mbr = _uses_segment_mbr(config)
     agents_path = staging / "agents.tsv"
     trips_path = staging / "trips.tsv"
     segments_path = staging / "segments.tsv"
@@ -96,7 +108,10 @@ def main() -> None:
 
     agents, agent_domains = _read_agents(agents_path)
     trips, trip_domains, trips_per_agent = _read_trips(trips_path)
-    segment_domains, segments_per_trip, segment_count = _scan_segments(segments_path)
+    segment_domains, segments_per_trip, segment_count = _scan_segments(
+        segments_path,
+        use_segment_mbr=use_segment_mbr,
+    )
     metadata = _build_metadata(
         agent_domains=agent_domains,
         trip_domains=trip_domains,
@@ -104,6 +119,7 @@ def main() -> None:
         trips_per_agent=trips_per_agent,
         segments_per_trip=segments_per_trip,
         full_join_cardinality=segment_count,
+        use_segment_mbr=use_segment_mbr,
     )
 
     prepared.mkdir(parents=True, exist_ok=True)
@@ -119,6 +135,7 @@ def main() -> None:
         "sample_rows": int(segment_count if int(args.sample_rows) <= 0 else int(args.sample_rows)),
         "domains_complete": True,
         "staging_directory": str(staging),
+        "trajectory_spatial": dict(config.get("trajectory_spatial", {})),
     }
     (prepared / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
@@ -135,6 +152,7 @@ def main() -> None:
         output_directory=prepared,
         sample_rows=int(args.sample_rows),
         seed=int(args.seed),
+        use_segment_mbr=use_segment_mbr,
     )
     np.save(prepared / "sample_trajectory_ids.npy", trajectory_ids)
     np.save(prepared / "sample_segment_ids.npy", segment_ids)
@@ -164,6 +182,9 @@ def main() -> None:
             if trajectory_config.get("srid") is None
             else int(trajectory_config.get("srid"))
         ),
+        source_segments_path=segments_path,
+        config_path=Path(args.config),
+        force_rebuild=bool(args.force_rebuild_index),
     )
 
     stats = preparation_stats(
@@ -238,8 +259,13 @@ def _read_trips(
 
 def _scan_segments(
     path: Path,
+    *,
+    use_segment_mbr: bool = False,
 ) -> tuple[dict[str, set[Any]], Counter[int], int]:
     domains = {name: set() for name in SEGMENT_COLUMNS[1:]}
+    if use_segment_mbr:
+        for name in MODEL_SEGMENT_MBR_COLUMNS:
+            domains[name] = set()
     segments_per_trip: Counter[int] = Counter()
     count = 0
     for segment in _iter_segment_values(path):
@@ -248,6 +274,9 @@ def _scan_segments(
         count += 1
         for name in SEGMENT_COLUMNS[1:]:
             domains[name].add(segment[name])
+        if use_segment_mbr:
+            for name in MODEL_SEGMENT_MBR_COLUMNS:
+                domains[name].add(segment[name])
     return domains, segments_per_trip, count
 
 
@@ -259,6 +288,7 @@ def _build_metadata(
     trips_per_agent: Counter[int],
     segments_per_trip: Counter[int],
     full_join_cardinality: int,
+    use_segment_mbr: bool = False,
 ) -> ModelMetadata:
     columns: list[ColumnMetadata] = []
     for name in AGENT_COLUMNS[1:]:
@@ -288,6 +318,16 @@ def _build_metadata(
                 table="segments",
             )
         )
+    if use_segment_mbr:
+        for name in MODEL_SEGMENT_MBR_COLUMNS:
+            columns.append(
+                ColumnMetadata(
+                    f"segments:{name}",
+                    ColumnKind.DATA,
+                    complete_ordinary_domain(segment_domains[name]),
+                    table="segments",
+                )
+            )
     columns.extend(
         (
             ColumnMetadata("I_agents", ColumnKind.INDICATOR, (0, 1), table="agents"),
@@ -334,6 +374,7 @@ def _write_sample_rows(
     output_directory: Path,
     sample_rows: int,
     seed: int,
+    use_segment_mbr: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     total_segments = sum(segments_per_trip.values())
     if sample_rows <= 0 or sample_rows >= total_segments:
@@ -370,12 +411,7 @@ def _write_sample_rows(
         agent = agents.get(agent_id)
         if agent is None:
             raise SystemExit(f"trips.tsv references unknown agent_id {agent_id}")
-        values = (
-            *agent,
-            start_time,
-            end_time,
-            num_segments,
-            trip_geom,
+        segment_values = [
             segment["segment_idx"],
             segment["t_s"],
             segment["t_e"],
@@ -383,6 +419,23 @@ def _write_sample_rows(
             segment["s_y"],
             segment["e_x"],
             segment["e_y"],
+        ]
+        if use_segment_mbr:
+            segment_values.extend(
+                [
+                    segment["seg_min_x"],
+                    segment["seg_max_x"],
+                    segment["seg_min_y"],
+                    segment["seg_max_y"],
+                ]
+            )
+        values = (
+            *agent,
+            start_time,
+            end_time,
+            num_segments,
+            trip_geom,
+            *segment_values,
             1,
             1,
             1,
@@ -407,7 +460,7 @@ def _iter_segment_values(path: Path) -> Iterable[dict[str, Any]]:
     for row in _iter_tsv(path):
         if len(row) < len(SEGMENT_COLUMNS):
             raise SystemExit(f"bad segments.tsv row: expected {len(SEGMENT_COLUMNS)} columns")
-        yield {
+        values = {
             "trip_id": int(row[0]),
             "segment_idx": int(row[1]),
             "s_x": float(row[2]),
@@ -417,6 +470,23 @@ def _iter_segment_values(path: Path) -> Iterable[dict[str, Any]]:
             "t_s": _timestamp_to_float(row[6]),
             "t_e": _timestamp_to_float(row[7]),
         }
+        values["seg_min_x"] = min(values["s_x"], values["e_x"])
+        values["seg_max_x"] = max(values["s_x"], values["e_x"])
+        values["seg_min_y"] = min(values["s_y"], values["e_y"])
+        values["seg_max_y"] = max(values["s_y"], values["e_y"])
+        yield values
+
+
+def _uses_segment_mbr(config: dict[str, Any]) -> bool:
+    trajectory_spatial = config.get("trajectory_spatial", {})
+    if not bool(trajectory_spatial.get("enabled", False)):
+        return False
+    representation = str(trajectory_spatial.get("representation", ""))
+    if representation != "segment_mbr":
+        raise ValueError(
+            "trajectory_spatial.representation must be segment_mbr when enabled"
+        )
+    return True
 
 
 def _iter_tsv(path: Path) -> Iterable[list[str]]:

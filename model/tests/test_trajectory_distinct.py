@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,7 @@ from model.src.data.trajectory_distinct import (
     CompactTrajectorySegmentIndex,
     ONE_PASS_AR_SEGMENT_MEASURE_CAPABILITY,
     PhysicalSpatialPredicate,
+    SegmentMbrSpatialPredicate,
     SegmentSpatialPredicate,
     SegmentTemporalPredicate,
     TRAJECTORY_TARGET_SEMANTICS_VERSION,
@@ -28,6 +30,7 @@ from model.src.data.trajectory_distinct import (
     TrajectoryQuerySemantics,
     UnsupportedTrajectoryContext,
     context_satisfies_row_with_trajectory_semantics,
+    segment_mbr_rectangle_overlap_mask,
     segment_rectangle_intersects_mask,
     temporal_overlap_mask,
     trajectory_base_measure_support,
@@ -120,6 +123,26 @@ def _pol_segment_metadata() -> ModelMetadata:
     )
     return ModelMetadata(
         columns=columns,
+        full_join_cardinality=3,
+        join_root="trips",
+        join_tables=("trips", "segments"),
+        join_edges=(("trips", "segments"),),
+    )
+
+
+def _pol_segment_mbr_metadata() -> ModelMetadata:
+    base = list(_pol_segment_metadata().columns[:-2])
+    base.extend(
+        [
+            ColumnMetadata("segments:seg_min_x", ColumnKind.DATA, (-1.0, 0.0, 1.0, 3.0), table="segments"),
+            ColumnMetadata("segments:seg_max_x", ColumnKind.DATA, (1.0, 2.0, 3.0, 4.0), table="segments"),
+            ColumnMetadata("segments:seg_min_y", ColumnKind.DATA, (0.0, 1.0, 3.0), table="segments"),
+            ColumnMetadata("segments:seg_max_y", ColumnKind.DATA, (1.0, 2.0, 3.0, 4.0), table="segments"),
+        ]
+    )
+    base.extend(_pol_segment_metadata().columns[-2:])
+    return ModelMetadata(
+        columns=tuple(base),
         full_join_cardinality=3,
         join_root="trips",
         join_tables=("trips", "segments"),
@@ -1275,7 +1298,7 @@ trajectory_distinct:
             )
             completed = subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     "-m",
                     "model.scripts.prepare_pol_staging_data",
                     "--config",
@@ -1314,6 +1337,391 @@ trajectory_distinct:
                     srid=26916,
                 )
             )
+
+    def test_prepare_pol_staging_data_builds_mbr_fixture_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            staging = root / "staging"
+            prepared = root / "prepared_mbr"
+            staging.mkdir()
+            (staging / "agents.tsv").write_text(
+                "1\t30.0\tGraduate\tA\t0.5\t2\n",
+                encoding="utf-8",
+            )
+            (staging / "trips.tsv").write_text(
+                "10\t1\t2020-01-01T00:00:00.000\t2020-01-01T00:05:00.000\t1\n",
+                encoding="utf-8",
+            )
+            (staging / "segments.tsv").write_text(
+                "10\t0\t-1.0\t1.0\t3.0\t2.0\t2020-01-01T00:00:00.000\t2020-01-01T00:01:00.000\n",
+                encoding="utf-8",
+            )
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                f"""
+dataset:
+  type: pol_trajectory_full_join
+  name: pol_test_mbr
+  prepared_directory: {prepared}
+  sampling_mode: fixture
+  trajectory_index_path: {prepared}/trajectory_segment_index
+
+trajectory_spatial:
+  enabled: true
+  representation: segment_mbr
+
+factorization:
+  enabled: false
+
+trajectory_distinct:
+  enabled: true
+  entity_table: trips
+  segment_table: segments
+  trajectory_key: trip_id
+  segment_key: trip_id,segment_idx
+  predicate_scope: segment_query
+  srid: 26916
+  trajectory_static_columns:
+    - agents:age
+    - trips:trip_geom
+  segment_varying_columns:
+    - segments:segment_idx
+    - segments:t_s
+    - segments:t_e
+    - segments:s_x
+    - segments:s_y
+    - segments:e_x
+    - segments:e_y
+    - segments:seg_min_x
+    - segments:seg_max_x
+    - segments:seg_min_y
+    - segments:seg_max_y
+""",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "model.scripts.prepare_pol_staging_data",
+                    "--config",
+                    str(config_path),
+                    "--staging-dir",
+                    str(staging),
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            source = NeuroCardFullJoinSampleSource(prepared)
+            names = [column.name for column in source.metadata.columns]
+            self.assertIn("segments:seg_min_x", names)
+            self.assertIn("segments:seg_max_y", names)
+            self.assertEqual(np.load(prepared / "sample_rows.npy", mmap_mode="r").shape, (1, 25))
+            provider = CompactTrajectorySegmentIndex.from_directory(
+                prepared / "trajectory_segment_index"
+            )
+            self.assertEqual(float(provider.seg_min_x[0]), -1.0)
+            self.assertEqual(float(provider.seg_max_x[0]), 3.0)
+            source.validate_trajectory_distinct(
+                runtime_config=TrajectoryDistinctRuntimeConfig(
+                    segment_varying_columns=(
+                        "segments:segment_idx",
+                        "segments:t_s",
+                        "segments:t_e",
+                        "segments:s_x",
+                        "segments:s_y",
+                        "segments:e_x",
+                        "segments:e_y",
+                        "segments:seg_min_x",
+                        "segments:seg_max_x",
+                        "segments:seg_min_y",
+                        "segments:seg_max_y",
+                    ),
+                    trajectory_static_columns=("agents:age", "trips:trip_geom"),
+                    srid=26916,
+                )
+            )
+
+    def test_segment_mbr_overlap_includes_boundary_and_crossing_candidates(self) -> None:
+        mask = segment_mbr_rectangle_overlap_mask(
+            np.asarray([-1.0, 3.0, -1.0]),
+            np.asarray([3.0, 4.0, -0.5]),
+            np.asarray([1.0, 3.0, 3.0]),
+            np.asarray([1.0, 4.0, 4.0]),
+            0.0,
+            0.0,
+            2.0,
+            2.0,
+        )
+        self.assertTrue(np.array_equal(mask, [True, False, False]))
+
+    def test_pol_query_adapter_segment_mbr_uses_four_virtual_bounds(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        row = _encode_pol_segments(
+            metadata,
+            ((0, 0.0, 10.0, -1.0, 1.0, 3.0, 1.0, -1.0, 3.0, 1.0, 1.0, 1, 1),),
+        )[0]
+        record = {
+            "query_id": "spatial_mbr",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_geom",
+                    "dimension": "spatial",
+                    "type": "geometry",
+                    "mode": "spatial_intersects",
+                    "min_x": 0.0,
+                    "min_y": 0.0,
+                    "max_x": 2.0,
+                    "max_y": 2.0,
+                    "srid": 26916,
+                }
+            ],
+        }
+        context = pol_workload_record_to_context(
+            record,
+            metadata,
+            trajectory_spatial={"enabled": True, "representation": "segment_mbr"},
+        )
+        self.assertEqual(
+            context.ordinary_predicates["segments:seg_min_x"],
+            PredicateToken(PredicateOp.LESS_EQUAL, value=2.0),
+        )
+        self.assertEqual(
+            context.ordinary_predicates["segments:seg_max_x"],
+            PredicateToken(PredicateOp.GREATER_EQUAL, value=0.0),
+        )
+        self.assertIsInstance(
+            context.trajectory_query.spatial_predicates[0],  # type: ignore[union-attr]
+            SegmentMbrSpatialPredicate,
+        )
+        self.assertTrue(context_satisfies_row_with_trajectory_semantics(context, row, metadata))
+        self.assertTrue(trajectory_base_measure_support(context).eligible)
+
+    def test_pol_query_adapter_disabled_keeps_endpoint_representation(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        record = {
+            "query_id": "spatial_endpoint",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_geom",
+                    "dimension": "spatial",
+                    "type": "geometry",
+                    "mode": "spatial_intersects",
+                    "min_x": 0.0,
+                    "min_y": 0.0,
+                    "max_x": 2.0,
+                    "max_y": 2.0,
+                    "srid": 26916,
+                }
+            ],
+        }
+        context = pol_workload_record_to_context(
+            record,
+            metadata,
+            trajectory_spatial={"enabled": False},
+        )
+        self.assertIn("segments:s_x", context.ordinary_predicates)
+        self.assertNotIn("segments:seg_min_x", context.ordinary_predicates)
+        self.assertIsInstance(
+            context.trajectory_query.spatial_predicates[0],  # type: ignore[union-attr]
+            SegmentSpatialPredicate,
+        )
+
+    def test_mbr_workload_distinct_evaluation_remains_fail_closed(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        record = {
+            "query_id": "spatial_mbr_distinct",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_geom",
+                    "dimension": "spatial",
+                    "type": "geometry",
+                    "mode": "spatial_intersects",
+                    "min_x": 0.0,
+                    "min_y": 0.0,
+                    "max_x": 2.0,
+                    "max_y": 2.0,
+                    "srid": 26916,
+                }
+            ],
+            "join_cardinality": 10,
+            "entity_cardinality": 5,
+        }
+        result = evaluate_pol_distinct_record(
+            record,
+            metadata=metadata,
+            estimator=_FakeDistinctEstimator(matching=10.0, dedup=0.5),
+            trajectory_spatial={"enabled": True, "representation": "segment_mbr"},
+        )
+        self.assertEqual(
+            result.distinct_estimate_status,
+            "unsupported_physical_spatial_distinct_mbr_approximation",
+        )
+        self.assertEqual(result.matching_segments_true, 10)
+        self.assertIsNone(result.distinct_trajectory_estimate)
+
+    def test_row_satisfied_generator_segment_mbr_context_matches_boc_rows(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        rows = _encode_pol_segments(
+            metadata,
+            (
+                (0, 0.0, 10.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1, 1),
+                (1, 10.0, 20.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1, 1),
+                (2, 20.0, 30.0, -1.0, 1.0, 3.0, 1.0, -1.0, 3.0, 1.0, 1.0, 1, 1),
+            ),
+        )
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "row_satisfied",
+                "table_subset_sampling": "full",
+                "wildcard_probability": 1.0,
+                "equality_probability": 0.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "trajectory_query_semantics": "pol_segments",
+                "trajectory_temporal_probability": 0.0,
+                "trajectory_spatial_probability": 1.0,
+                "trajectory_spatial": {"enabled": True, "representation": "segment_mbr"},
+            }
+        )
+        contexts, _, _ = generator.generate_batch(
+            encoded_rows=rows,
+            metadata=metadata,
+            rng=np.random.default_rng(0),
+        )
+        self.assertEqual(len(contexts), 3)
+        for context, row in zip(contexts, rows):
+            self.assertTrue(
+                context_satisfies_row_with_trajectory_semantics(context, row, metadata)
+            )
+            self.assertIsInstance(
+                context.trajectory_query.spatial_predicates[0],  # type: ignore[union-attr]
+                SegmentMbrSpatialPredicate,
+            )
+
+    def test_compact_index_persists_and_reloads_mbr_arrays(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            write_compact_trajectory_index(
+                tmpdir,
+                metadata=metadata,
+                trip_ids=(10,),
+                segment_idx=(0,),
+                t_s=(0.0,),
+                t_e=(10.0,),
+                s_x=(-1.0,),
+                s_y=(1.0,),
+                e_x=(3.0,),
+                e_y=(2.0,),
+                segment_varying_columns=(
+                    "segments:segment_idx",
+                    "segments:t_s",
+                    "segments:t_e",
+                    "segments:s_x",
+                    "segments:s_y",
+                    "segments:e_x",
+                    "segments:e_y",
+                    "segments:seg_min_x",
+                    "segments:seg_max_x",
+                    "segments:seg_min_y",
+                    "segments:seg_max_y",
+                ),
+            )
+            provider = CompactTrajectorySegmentIndex.from_directory(tmpdir)
+            self.assertEqual(float(provider.seg_min_x[0]), -1.0)
+            self.assertEqual(float(provider.seg_max_x[0]), 3.0)
+            self.assertEqual(float(provider.seg_min_y[0]), 1.0)
+            self.assertEqual(float(provider.seg_max_y[0]), 2.0)
+
+    def test_prepare_index_reuses_compatible_and_rejects_stale_without_force(self) -> None:
+        from model.scripts.prepare_pol_trajectory_distinct import _write_ordered_segments_index
+
+        metadata = _pol_segment_metadata()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segments = root / "segments.tsv"
+            segments.write_text(
+                "10\t0\t0.0\t0.0\t1.0\t1.0\t2020-01-01T00:00:00.000\t2020-01-01T00:01:00.000\n",
+                encoding="utf-8",
+            )
+            output = root / "index"
+            first = _write_ordered_segments_index(
+                segments,
+                output_directory=output,
+                metadata=metadata,
+                trajectory_key="trip_id",
+                entity_table="trips",
+                segment_table="segments",
+                segment_key="trip_id,segment_idx",
+                trajectory_static_columns=(),
+                segment_varying_columns=("segments:segment_idx",),
+                srid=26916,
+            )
+            second = _write_ordered_segments_index(
+                segments,
+                output_directory=output,
+                metadata=metadata,
+                trajectory_key="trip_id",
+                entity_table="trips",
+                segment_table="segments",
+                segment_key="trip_id,segment_idx",
+                trajectory_static_columns=(),
+                segment_varying_columns=("segments:segment_idx",),
+                srid=26916,
+            )
+            self.assertFalse(first.get("reused_existing_index", False))
+            self.assertTrue(second["reused_existing_index"])
+            with self.assertRaises(SystemExit):
+                _write_ordered_segments_index(
+                    segments,
+                    output_directory=output,
+                    metadata=metadata,
+                    trajectory_key="trip_id",
+                    entity_table="trips",
+                    segment_table="segments",
+                    segment_key="trip_id,segment_idx",
+                    trajectory_static_columns=(),
+                    segment_varying_columns=("segments:t_s",),
+                    srid=26916,
+                )
+
+    def test_sample_source_missing_configured_trajectory_index_fails_clearly(self) -> None:
+        metadata = _pol_segment_metadata()
+        rows = _encode_pol_segments(
+            metadata,
+            ((0, 0.0, 10.0, 0.0, 0.0, 1.0, 1.0, 1, 1),),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest = {
+                "dataset_name": "pol_fixture",
+                "dataset_type": "pol_trajectory_full_join",
+                "join_cardinality": 1,
+                "metadata": metadata.to_json_dict(),
+                "domains_complete": True,
+                "metadata_source": "complete_base_tables_and_join_metadata",
+                "sample_rows": 1,
+                "format_version": 2,
+            }
+            root.joinpath("manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            np.save(root / "sample_rows.npy", rows)
+            np.save(root / "sample_trajectory_ids.npy", np.asarray([10], dtype=np.int64))
+            np.save(root / "sample_segment_ids.npy", np.asarray([[10, 0]], dtype=np.int64))
+            with self.assertRaisesRegex(RuntimeError, "will not build it implicitly"):
+                NeuroCardFullJoinSampleSource(
+                    root,
+                    trajectory_index_path=root / "missing_index",
+                )
 
     def test_exact_oracle_uses_trajectory_semantics(self) -> None:
         metadata = _pol_segment_metadata()

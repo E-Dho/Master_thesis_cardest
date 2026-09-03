@@ -18,7 +18,7 @@ from model.src.predicates.operators import PredicateOp, PredicateToken
 TRAJECTORY_TARGET_SEMANTICS_VERSION = "single_anchor_query_only_v2"
 TEMPORAL_OVERLAP_SEMANTICS_VERSION = "pol_half_open_overlap_v1"
 SPATIAL_INTERSECTS_SEMANTICS_VERSION = "line_segment_aabb_intersects_v1"
-TRAJECTORY_INDEX_FORMAT_VERSION = 2
+TRAJECTORY_INDEX_FORMAT_VERSION = 3
 
 
 class UnsupportedTrajectoryContext(ValueError):
@@ -117,6 +117,22 @@ class SegmentSpatialPredicate:
 
 
 @dataclass(frozen=True)
+class SegmentMbrSpatialPredicate:
+    """Segment MBR/rectangle overlap approximation for POL spatial predicates."""
+
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+    srid: int | None = None
+    min_x_column: str = "segments:seg_min_x"
+    max_x_column: str = "segments:seg_max_x"
+    min_y_column: str = "segments:seg_min_y"
+    max_y_column: str = "segments:seg_max_y"
+    semantics: Literal["mbr_overlap"] = "mbr_overlap"
+
+
+@dataclass(frozen=True)
 class PhysicalSpatialPredicate:
     """Generic physical geometry/rectangle predicate without endpoint columns."""
 
@@ -198,6 +214,15 @@ def semantic_owned_columns(query: TrajectoryQuerySemantics | None) -> frozenset[
                     spatial.end_y_column,
                 )
             )
+        elif isinstance(spatial, SegmentMbrSpatialPredicate):
+            owned.update(
+                (
+                    spatial.min_x_column,
+                    spatial.max_x_column,
+                    spatial.min_y_column,
+                    spatial.max_y_column,
+                )
+            )
         elif isinstance(spatial, PhysicalSpatialPredicate) and spatial.geometry_column:
             owned.add(spatial.geometry_column)
     return frozenset(owned)
@@ -253,21 +278,36 @@ def context_satisfies_row_with_trajectory_semantics(
         ):
             return False
     for spatial in semantic_query.spatial_predicates:
-        if not isinstance(spatial, SegmentSpatialPredicate):
+        if isinstance(spatial, SegmentSpatialPredicate):
+            if not bool(
+                segment_rectangle_intersects_mask(
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.start_x_column)], dtype=float),
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.start_y_column)], dtype=float),
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.end_x_column)], dtype=float),
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.end_y_column)], dtype=float),
+                    spatial.min_x,
+                    spatial.min_y,
+                    spatial.max_x,
+                    spatial.max_y,
+                )[0]
+            ):
+                return False
+        elif isinstance(spatial, SegmentMbrSpatialPredicate):
+            if not bool(
+                segment_mbr_rectangle_overlap_mask(
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.min_x_column)], dtype=float),
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.max_x_column)], dtype=float),
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.min_y_column)], dtype=float),
+                    np.asarray([_decoded_row_value(metadata, encoded_row, spatial.max_y_column)], dtype=float),
+                    spatial.min_x,
+                    spatial.min_y,
+                    spatial.max_x,
+                    spatial.max_y,
+                )[0]
+            ):
+                return False
+        else:
             raise UnsupportedTrajectoryContext("unsupported_spatial_semantics")
-        if not bool(
-            segment_rectangle_intersects_mask(
-                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.start_x_column)], dtype=float),
-                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.start_y_column)], dtype=float),
-                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.end_x_column)], dtype=float),
-                np.asarray([_decoded_row_value(metadata, encoded_row, spatial.end_y_column)], dtype=float),
-                spatial.min_x,
-                spatial.min_y,
-                spatial.max_x,
-                spatial.max_y,
-            )[0]
-        ):
-            return False
     return True
 
 
@@ -305,8 +345,16 @@ def trajectory_base_measure_support(
             if capability.supports_scalar
             else TrajectoryDistinctEligibility(False, "unsupported_base_segment_scalar_measure")
         )
-    if getattr(query, "spatial_predicates", ()) and not capability.supports_spatial_intersects:
+    spatial_predicates = tuple(getattr(query, "spatial_predicates", ()))
+    physical_spatial = tuple(
+        spatial
+        for spatial in spatial_predicates
+        if not isinstance(spatial, SegmentMbrSpatialPredicate)
+    )
+    if physical_spatial and not capability.supports_spatial_intersects:
         return TrajectoryDistinctEligibility(False, "unsupported_base_segment_spatial_measure")
+    if spatial_predicates and not physical_spatial and not capability.supports_scalar:
+        return TrajectoryDistinctEligibility(False, "unsupported_base_segment_scalar_measure")
     if getattr(query, "temporal_predicates", ()) and not capability.supports_temporal_overlap:
         return TrajectoryDistinctEligibility(False, "unsupported_base_segment_temporal_measure")
     if getattr(query, "scalar_predicates", ()) and not capability.supports_scalar:
@@ -537,14 +585,23 @@ class TrajectorySegmentIndex:
                     if name not in varying:
                         return "unsupported_semantics"
             for spatial in getattr(semantic_query, "spatial_predicates", ()):
-                if not isinstance(spatial, SegmentSpatialPredicate):
+                if isinstance(spatial, SegmentSpatialPredicate):
+                    names = (
+                        spatial.start_x_column,
+                        spatial.start_y_column,
+                        spatial.end_x_column,
+                        spatial.end_y_column,
+                    )
+                elif isinstance(spatial, SegmentMbrSpatialPredicate):
+                    names = (
+                        spatial.min_x_column,
+                        spatial.max_x_column,
+                        spatial.min_y_column,
+                        spatial.max_y_column,
+                    )
+                else:
                     return "unsupported_semantics"
-                for name in (
-                    spatial.start_x_column,
-                    spatial.start_y_column,
-                    spatial.end_x_column,
-                    spatial.end_y_column,
-                ):
+                for name in names:
                     if name not in varying:
                         return "unsupported_semantics"
         return None
@@ -582,22 +639,34 @@ class TrajectorySegmentIndex:
                     upper=temporal.upper,
                 )
             for spatial in semantic_query.spatial_predicates:
-                if not isinstance(spatial, SegmentSpatialPredicate):
+                if isinstance(spatial, SegmentSpatialPredicate):
+                    sx = self._decoded_column(encoded_rows, spatial.start_x_column).astype(float)
+                    sy = self._decoded_column(encoded_rows, spatial.start_y_column).astype(float)
+                    ex = self._decoded_column(encoded_rows, spatial.end_x_column).astype(float)
+                    ey = self._decoded_column(encoded_rows, spatial.end_y_column).astype(float)
+                    mask &= segment_rectangle_intersects_mask(
+                        sx,
+                        sy,
+                        ex,
+                        ey,
+                        spatial.min_x,
+                        spatial.min_y,
+                        spatial.max_x,
+                        spatial.max_y,
+                    )
+                elif isinstance(spatial, SegmentMbrSpatialPredicate):
+                    mask &= segment_mbr_rectangle_overlap_mask(
+                        self._decoded_column(encoded_rows, spatial.min_x_column).astype(float),
+                        self._decoded_column(encoded_rows, spatial.max_x_column).astype(float),
+                        self._decoded_column(encoded_rows, spatial.min_y_column).astype(float),
+                        self._decoded_column(encoded_rows, spatial.max_y_column).astype(float),
+                        spatial.min_x,
+                        spatial.min_y,
+                        spatial.max_x,
+                        spatial.max_y,
+                    )
+                else:
                     raise UnsupportedTrajectoryContext("unsupported_spatial_semantics")
-                sx = self._decoded_column(encoded_rows, spatial.start_x_column).astype(float)
-                sy = self._decoded_column(encoded_rows, spatial.start_y_column).astype(float)
-                ex = self._decoded_column(encoded_rows, spatial.end_x_column).astype(float)
-                ey = self._decoded_column(encoded_rows, spatial.end_y_column).astype(float)
-                mask &= segment_rectangle_intersects_mask(
-                    sx,
-                    sy,
-                    ex,
-                    ey,
-                    spatial.min_x,
-                    spatial.min_y,
-                    spatial.max_x,
-                    spatial.max_y,
-                )
         return mask
 
     def _decoded_column(self, encoded_rows: np.ndarray, column_name: str) -> np.ndarray:
@@ -714,6 +783,10 @@ class CompactTrajectorySegmentIndex:
     s_y: np.ndarray
     e_x: np.ndarray
     e_y: np.ndarray
+    seg_min_x: np.ndarray
+    seg_max_x: np.ndarray
+    seg_min_y: np.ndarray
+    seg_max_y: np.ndarray
     trajectory_key: str
     compatibility_hash: str
     entity_table: str = "trips"
@@ -754,6 +827,13 @@ class CompactTrajectorySegmentIndex:
         srid = manifest.get("srid")
         srid = None if srid is None else int(srid)
         format_version = int(manifest.get("format_version", TRAJECTORY_INDEX_FORMAT_VERSION))
+        if format_version != TRAJECTORY_INDEX_FORMAT_VERSION:
+            raise ValueError(
+                "compact trajectory index format is stale or incompatible: "
+                f"index={format_version}, expected={TRAJECTORY_INDEX_FORMAT_VERSION}. "
+                "Run python3 -m model.scripts.prepare_pol_trajectory_distinct "
+                "--config <config> --segments-tsv <segments.tsv>."
+            )
         expected_hash = trajectory_index_compatibility_hash(
             metadata,
             predicate_columns=predicate_columns,
@@ -787,6 +867,10 @@ class CompactTrajectorySegmentIndex:
             s_y=np.load(root / arrays.get("s_y", "s_y.npy"), mmap_mode="r"),
             e_x=np.load(root / arrays.get("e_x", "e_x.npy"), mmap_mode="r"),
             e_y=np.load(root / arrays.get("e_y", "e_y.npy"), mmap_mode="r"),
+            seg_min_x=np.load(root / arrays.get("seg_min_x", "seg_min_x.npy"), mmap_mode="r"),
+            seg_max_x=np.load(root / arrays.get("seg_max_x", "seg_max_x.npy"), mmap_mode="r"),
+            seg_min_y=np.load(root / arrays.get("seg_min_y", "seg_min_y.npy"), mmap_mode="r"),
+            seg_max_y=np.load(root / arrays.get("seg_max_y", "seg_max_y.npy"), mmap_mode="r"),
             trajectory_key=trajectory_key,
             compatibility_hash=stored_hash,
             entity_table=entity_table,
@@ -840,6 +924,10 @@ class CompactTrajectorySegmentIndex:
                     self.s_y,
                     self.e_x,
                     self.e_y,
+                    self.seg_min_x,
+                    self.seg_max_x,
+                    self.seg_min_y,
+                    self.seg_max_y,
                 )
             )
         )
@@ -958,18 +1046,27 @@ class CompactTrajectorySegmentIndex:
                     if name not in varying:
                         return "unsupported_semantics"
             for spatial in getattr(semantic_query, "spatial_predicates", ()):
-                if not isinstance(spatial, SegmentSpatialPredicate):
+                if isinstance(spatial, SegmentSpatialPredicate):
+                    names = (
+                        spatial.start_x_column,
+                        spatial.start_y_column,
+                        spatial.end_x_column,
+                        spatial.end_y_column,
+                    )
+                elif isinstance(spatial, SegmentMbrSpatialPredicate):
+                    names = (
+                        spatial.min_x_column,
+                        spatial.max_x_column,
+                        spatial.min_y_column,
+                        spatial.max_y_column,
+                    )
+                else:
                     return "unsupported_semantics"
-                if spatial.semantics != "intersects":
+                if spatial.semantics not in {"intersects", "mbr_overlap"}:
                     return "unsupported_semantics"
                 if spatial.srid is not None and self.srid is not None and spatial.srid != self.srid:
                     return "unsupported_semantics"
-                for name in (
-                    spatial.start_x_column,
-                    spatial.start_y_column,
-                    spatial.end_x_column,
-                    spatial.end_y_column,
-                ):
+                for name in names:
                     if name not in varying:
                         return "unsupported_semantics"
         return None
@@ -1003,18 +1100,30 @@ class CompactTrajectorySegmentIndex:
                     upper=temporal.upper,
                 )
             for spatial in semantic_query.spatial_predicates:
-                if not isinstance(spatial, SegmentSpatialPredicate):
+                if isinstance(spatial, SegmentSpatialPredicate):
+                    mask &= segment_rectangle_intersects_mask(
+                        self._required_segment_values(spatial.start_x_column, start, stop),
+                        self._required_segment_values(spatial.start_y_column, start, stop),
+                        self._required_segment_values(spatial.end_x_column, start, stop),
+                        self._required_segment_values(spatial.end_y_column, start, stop),
+                        spatial.min_x,
+                        spatial.min_y,
+                        spatial.max_x,
+                        spatial.max_y,
+                    )
+                elif isinstance(spatial, SegmentMbrSpatialPredicate):
+                    mask &= segment_mbr_rectangle_overlap_mask(
+                        self._required_segment_values(spatial.min_x_column, start, stop),
+                        self._required_segment_values(spatial.max_x_column, start, stop),
+                        self._required_segment_values(spatial.min_y_column, start, stop),
+                        self._required_segment_values(spatial.max_y_column, start, stop),
+                        spatial.min_x,
+                        spatial.min_y,
+                        spatial.max_x,
+                        spatial.max_y,
+                    )
+                else:
                     raise UnsupportedTrajectoryContext("unsupported_spatial_semantics")
-                mask &= segment_rectangle_intersects_mask(
-                    self._required_segment_values(spatial.start_x_column, start, stop),
-                    self._required_segment_values(spatial.start_y_column, start, stop),
-                    self._required_segment_values(spatial.end_x_column, start, stop),
-                    self._required_segment_values(spatial.end_y_column, start, stop),
-                    spatial.min_x,
-                    spatial.min_y,
-                    spatial.max_x,
-                    spatial.max_y,
-                )
         return mask
 
     def _required_segment_values(self, column_name: str, start: int, stop: int) -> np.ndarray:
@@ -1032,6 +1141,10 @@ class CompactTrajectorySegmentIndex:
             "segments:s_y": self.s_y,
             "segments:e_x": self.e_x,
             "segments:e_y": self.e_y,
+            "segments:seg_min_x": self.seg_min_x,
+            "segments:seg_max_x": self.seg_max_x,
+            "segments:seg_min_y": self.seg_min_y,
+            "segments:seg_max_y": self.seg_max_y,
             "segment_idx": self.segment_idx,
             "t_s": self.t_s,
             "t_e": self.t_e,
@@ -1039,6 +1152,10 @@ class CompactTrajectorySegmentIndex:
             "s_y": self.s_y,
             "e_x": self.e_x,
             "e_y": self.e_y,
+            "seg_min_x": self.seg_min_x,
+            "seg_max_x": self.seg_max_x,
+            "seg_min_y": self.seg_min_y,
+            "seg_max_y": self.seg_max_y,
         }
         array = by_column.get(column_name)
         if array is None:
@@ -1124,6 +1241,14 @@ def write_compact_trajectory_index(
         "e_x": np.asarray(e_x_array[order], dtype=np.float64),
         "e_y": np.asarray(e_y_array[order], dtype=np.float64),
     }
+    arrays.update(
+        {
+            "seg_min_x": np.minimum(arrays["s_x"], arrays["e_x"]).astype(np.float64),
+            "seg_max_x": np.maximum(arrays["s_x"], arrays["e_x"]).astype(np.float64),
+            "seg_min_y": np.minimum(arrays["s_y"], arrays["e_y"]).astype(np.float64),
+            "seg_max_y": np.maximum(arrays["s_y"], arrays["e_y"]).astype(np.float64),
+        }
+    )
     filenames = {name: f"{name}.npy" for name in arrays}
     for name, values in arrays.items():
         np.save(root / filenames[name], values)
@@ -1160,6 +1285,8 @@ def write_compact_trajectory_index(
         "segment_count": int(sorted_trip_ids.shape[0]),
         "index_bytes": index_bytes,
         "bytes_per_segment": float(index_bytes / max(1, int(sorted_trip_ids.shape[0]))),
+        "schema_hash": metadata.schema_hash or metadata.stable_schema_hash(),
+        "mbr_arrays_persisted": True,
         "arrays": filenames,
     }
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -1326,6 +1453,32 @@ def segment_rectangle_intersects_mask(
     for y in (min_y, max_y):
         intersects |= _crosses_horizontal_edge(sx, sy, ex, ey, y, min_x, max_x)
     return intersects
+
+
+def segment_mbr_rectangle_overlap_mask(
+    seg_min_x: np.ndarray,
+    seg_max_x: np.ndarray,
+    seg_min_y: np.ndarray,
+    seg_max_y: np.ndarray,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+) -> np.ndarray:
+    """Boundary-inclusive segment MBR/rectangle overlap."""
+
+    seg_min_x = np.asarray(seg_min_x, dtype=float)
+    seg_max_x = np.asarray(seg_max_x, dtype=float)
+    seg_min_y = np.asarray(seg_min_y, dtype=float)
+    seg_max_y = np.asarray(seg_max_y, dtype=float)
+    min_x, max_x = sorted((float(min_x), float(max_x)))
+    min_y, max_y = sorted((float(min_y), float(max_y)))
+    return (
+        (seg_min_x <= max_x)
+        & (seg_max_x >= min_x)
+        & (seg_min_y <= max_y)
+        & (seg_max_y >= min_y)
+    )
 
 
 def _crosses_vertical_edge(

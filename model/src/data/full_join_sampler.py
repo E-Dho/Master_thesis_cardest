@@ -171,11 +171,20 @@ class NeuroCardFullJoinSampleSource:
             self._trajectory_multiplicity_provider = None
         else:
             index_path = Path(trajectory_index_path)
-            self._trajectory_multiplicity_provider = (
-                CompactTrajectorySegmentIndex.from_directory(index_path)
-                if index_path.is_dir()
-                else TrajectorySegmentIndex.from_npz(index_path)
-            )
+            try:
+                self._trajectory_multiplicity_provider = (
+                    CompactTrajectorySegmentIndex.from_directory(index_path)
+                    if index_path.is_dir()
+                    else TrajectorySegmentIndex.from_npz(index_path)
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                raise RuntimeError(
+                    "trajectory_distinct training requires a prepared compatible "
+                    "trajectory segment index and will not build it implicitly. "
+                    "Run: python3 -m model.scripts.prepare_pol_trajectory_distinct "
+                    "--config <config> --segments-tsv <segments.tsv> "
+                    f"--output-directory {index_path}"
+                ) from exc
         sample_path = self.prepared_directory / "sample_rows.npy"
         if sample_path.exists():
             sample_rows = np.load(sample_path, mmap_mode="r")

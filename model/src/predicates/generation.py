@@ -145,6 +145,23 @@ class PredicateTrainingContextGenerator:
         self.trajectory_spatial_probability = float(
             self.config.get("trajectory_spatial_probability", 0.0)
         )
+        trajectory_spatial = self.config.get("trajectory_spatial", {})
+        if trajectory_spatial is None:
+            trajectory_spatial = {}
+        self.trajectory_spatial_enabled = bool(
+            trajectory_spatial.get("enabled", False)
+        )
+        self.trajectory_spatial_representation = str(
+            trajectory_spatial.get("representation", "")
+        )
+        if (
+            self.trajectory_spatial_enabled
+            and self.trajectory_spatial_representation != "segment_mbr"
+        ):
+            raise ValueError(
+                "predicate_generation.trajectory_spatial.representation must be "
+                "segment_mbr when enabled"
+            )
         self._cache_by_metadata_id: dict[int, tuple[_ColumnPredicateCache | None, ...]] = {}
 
     def probability_diagnostics(self) -> dict[str, float | bool]:
@@ -633,17 +650,83 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         rng: np.random.Generator,
     ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
-        """Sample the current model-side endpoint-box spatial approximation.
+        """Sample a row-satisfied POL spatial rectangle context."""
 
-        The four scalar tokens below condition both segment endpoints to lie in
-        the sampled rectangle. That is not equivalent to physical
-        ``ST_Intersects(segment_geom, R)`` for crossing segments whose endpoints
-        are outside the rectangle. Distinct-trajectory supervision gates these
-        physical spatial predicates until the base segment estimator supports
-        line/rectangle intersection as the same event.
-        """
+        from model.src.data.trajectory_distinct import (
+            SegmentMbrSpatialPredicate,
+            SegmentSpatialPredicate,
+        )
 
-        from model.src.data.trajectory_distinct import SegmentSpatialPredicate
+        if self.trajectory_spatial_enabled:
+            mbr_columns = (
+                "segments:seg_min_x",
+                "segments:seg_max_x",
+                "segments:seg_min_y",
+                "segments:seg_max_y",
+            )
+            names = {column.name for column in metadata.columns}
+            if not set(mbr_columns).issubset(names):
+                if self.trajectory_query_semantics == "pol_segments":
+                    raise ValueError(
+                        "trajectory_spatial.segment_mbr requires prepared POL MBR columns"
+                    )
+                return None
+            values = {
+                name: float(
+                    metadata.columns[metadata.column_index(name)].domain[
+                        int(encoded_row[metadata.column_index(name)])
+                    ]
+                )
+                for name in mbr_columns
+            }
+            seg_min_x_domain = _numeric_values_for_columns(metadata, ("segments:seg_min_x",))
+            seg_max_x_domain = _numeric_values_for_columns(metadata, ("segments:seg_max_x",))
+            seg_min_y_domain = _numeric_values_for_columns(metadata, ("segments:seg_min_y",))
+            seg_max_y_domain = _numeric_values_for_columns(metadata, ("segments:seg_max_y",))
+            x_upper_candidates = [
+                value
+                for value in seg_min_x_domain
+                if value >= values["segments:seg_min_x"]
+            ]
+            x_lower_candidates = [
+                value
+                for value in seg_max_x_domain
+                if value <= values["segments:seg_max_x"]
+            ]
+            y_upper_candidates = [
+                value
+                for value in seg_min_y_domain
+                if value >= values["segments:seg_min_y"]
+            ]
+            y_lower_candidates = [
+                value
+                for value in seg_max_y_domain
+                if value <= values["segments:seg_max_y"]
+            ]
+            if not (
+                x_lower_candidates
+                and x_upper_candidates
+                and y_lower_candidates
+                and y_upper_candidates
+            ):
+                return None
+            min_x = float(x_lower_candidates[int(rng.integers(0, len(x_lower_candidates)))])
+            max_x = float(x_upper_candidates[int(rng.integers(0, len(x_upper_candidates)))])
+            min_y = float(y_lower_candidates[int(rng.integers(0, len(y_lower_candidates)))])
+            max_y = float(y_upper_candidates[int(rng.integers(0, len(y_upper_candidates)))])
+            scalar = [
+                ("segments:seg_min_x", PredicateToken(PredicateOp.LESS_EQUAL, value=max_x)),
+                ("segments:seg_max_x", PredicateToken(PredicateOp.GREATER_EQUAL, value=min_x)),
+                ("segments:seg_min_y", PredicateToken(PredicateOp.LESS_EQUAL, value=max_y)),
+                ("segments:seg_max_y", PredicateToken(PredicateOp.GREATER_EQUAL, value=min_y)),
+            ]
+            return scalar, SegmentMbrSpatialPredicate(
+                min_x=min_x,
+                min_y=min_y,
+                max_x=max_x,
+                max_y=max_y,
+                srid=int(self.config.get("trajectory_srid", 26916)),
+            )
 
         column_names = ("segments:s_x", "segments:s_y", "segments:e_x", "segments:e_y")
         values = {
@@ -1275,14 +1358,24 @@ def _semantic_owned_column_names(trajectory_query: Any) -> frozenset[str]:
         owned.add(temporal.start_column)
         owned.add(temporal.end_column)
     for spatial in getattr(trajectory_query, "spatial_predicates", ()):
-        owned.update(
-            (
-                spatial.start_x_column,
-                spatial.start_y_column,
-                spatial.end_x_column,
-                spatial.end_y_column,
+        if hasattr(spatial, "start_x_column"):
+            owned.update(
+                (
+                    spatial.start_x_column,
+                    spatial.start_y_column,
+                    spatial.end_x_column,
+                    spatial.end_y_column,
+                )
             )
-        )
+        else:
+            owned.update(
+                (
+                    spatial.min_x_column,
+                    spatial.max_x_column,
+                    spatial.min_y_column,
+                    spatial.max_y_column,
+                )
+            )
     return frozenset(owned)
 
 

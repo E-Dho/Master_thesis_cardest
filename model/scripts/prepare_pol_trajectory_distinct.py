@@ -4,6 +4,8 @@ import argparse
 import csv
 import json
 import math
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -51,6 +53,11 @@ def main() -> None:
         default=None,
         help="optional sample_rows.npy path for provenance length validation.",
     )
+    parser.add_argument(
+        "--force-rebuild",
+        action="store_true",
+        help="Replace an existing compact index. Without this, compatible indexes are reused and stale indexes fail.",
+    )
     args = parser.parse_args()
 
     config = load_simple_yaml(args.config)
@@ -91,6 +98,9 @@ def main() -> None:
             if trajectory_config.get("srid") is None
             else int(trajectory_config.get("srid"))
         ),
+        source_segments_path=Path(args.segments_tsv),
+        config_path=Path(args.config),
+        force_rebuild=bool(args.force_rebuild),
     )
     index = CompactTrajectorySegmentIndex.from_directory(output_directory)
 
@@ -114,6 +124,7 @@ def main() -> None:
     storage = index.storage_summary()
     print(f"trajectory_index_path={output_directory}")
     print(f"trajectory_index_format_version={compact_manifest['format_version']}")
+    print(f"reused_existing_index={bool(compact_manifest.get('reused_existing_index', False))}")
     print(f"trajectory_count={storage['trajectory_count']}")
     print(f"segment_count={storage['segment_count']}")
     print(f"index_bytes={storage['index_bytes']}")
@@ -138,12 +149,59 @@ def _write_ordered_segments_index(
     trajectory_static_columns: tuple[str, ...],
     segment_varying_columns: tuple[str, ...],
     srid: int | None,
+    source_segments_path: Path | None = None,
+    config_path: Path | None = None,
+    force_rebuild: bool = False,
 ) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"missing POL segments TSV: {path}")
     started = time.perf_counter()
+    compatibility_hash = trajectory_index_compatibility_hash(
+        metadata,
+        predicate_columns=(),
+        trajectory_key=trajectory_key,
+        entity_table=entity_table,
+        segment_table=segment_table,
+        segment_key=segment_key,
+        trajectory_static_columns=trajectory_static_columns,
+        segment_varying_columns=segment_varying_columns,
+        srid=srid,
+        format_version=TRAJECTORY_INDEX_FORMAT_VERSION,
+    )
+    if output_directory.exists():
+        if not force_rebuild:
+            try:
+                existing = CompactTrajectorySegmentIndex.from_directory(output_directory)
+                existing.validate_runtime_compatibility(
+                    existing.runtime_config,
+                    metadata,
+                )
+                if existing.compatibility_hash == compatibility_hash:
+                    manifest = json.loads(
+                        (output_directory / "manifest.json").read_text(encoding="utf-8")
+                    )
+                    manifest["reused_existing_index"] = True
+                    return manifest
+                raise SystemExit(
+                    "existing trajectory index compatibility hash does not match "
+                    "the requested metadata/config. Rerun with --force-rebuild to "
+                    "replace it after confirming no training job is using the directory."
+                )
+            except Exception as exc:
+                raise SystemExit(
+                    "existing trajectory index is missing, stale, or incompatible: "
+                    f"{output_directory}. Rerun this preparation command with "
+                    "--force-rebuild to replace it after confirming no training job is "
+                    f"using the directory. Original error: {exc}"
+                ) from exc
     counts = _scan_ordered_segments(path)
-    output_directory.mkdir(parents=True, exist_ok=True)
+    output_directory.parent.mkdir(parents=True, exist_ok=True)
+    tmp_directory = output_directory.with_name(
+        f".{output_directory.name}.tmp.{int(time.time())}.{os.getpid()}"
+    )
+    if tmp_directory.exists():
+        shutil.rmtree(tmp_directory)
+    tmp_directory.mkdir(parents=True, exist_ok=False)
     arrays = {
         "trajectory_ids": "trajectory_ids.npy",
         "offsets": "offsets.npy",
@@ -154,32 +212,40 @@ def _write_ordered_segments_index(
         "s_y": "s_y.npy",
         "e_x": "e_x.npy",
         "e_y": "e_y.npy",
+        "seg_min_x": "seg_min_x.npy",
+        "seg_max_x": "seg_max_x.npy",
+        "seg_min_y": "seg_min_y.npy",
+        "seg_max_y": "seg_max_y.npy",
     }
     trajectory_ids = np.lib.format.open_memmap(
-        output_directory / arrays["trajectory_ids"],
+        tmp_directory / arrays["trajectory_ids"],
         mode="w+",
         dtype=np.int64,
         shape=(counts["trajectory_count"],),
     )
     offsets = np.lib.format.open_memmap(
-        output_directory / arrays["offsets"],
+        tmp_directory / arrays["offsets"],
         mode="w+",
         dtype=np.int64,
         shape=(counts["trajectory_count"] + 1,),
     )
     segment_idx = np.lib.format.open_memmap(
-        output_directory / arrays["segment_idx"],
+        tmp_directory / arrays["segment_idx"],
         mode="w+",
         dtype=np.int32,
         shape=(counts["segment_count"],),
     )
     numeric_arrays = {
-        "t_s": np.lib.format.open_memmap(output_directory / arrays["t_s"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
-        "t_e": np.lib.format.open_memmap(output_directory / arrays["t_e"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
-        "s_x": np.lib.format.open_memmap(output_directory / arrays["s_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
-        "s_y": np.lib.format.open_memmap(output_directory / arrays["s_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
-        "e_x": np.lib.format.open_memmap(output_directory / arrays["e_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
-        "e_y": np.lib.format.open_memmap(output_directory / arrays["e_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "t_s": np.lib.format.open_memmap(tmp_directory / arrays["t_s"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "t_e": np.lib.format.open_memmap(tmp_directory / arrays["t_e"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "s_x": np.lib.format.open_memmap(tmp_directory / arrays["s_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "s_y": np.lib.format.open_memmap(tmp_directory / arrays["s_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "e_x": np.lib.format.open_memmap(tmp_directory / arrays["e_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "e_y": np.lib.format.open_memmap(tmp_directory / arrays["e_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "seg_min_x": np.lib.format.open_memmap(tmp_directory / arrays["seg_min_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "seg_max_x": np.lib.format.open_memmap(tmp_directory / arrays["seg_max_x"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "seg_min_y": np.lib.format.open_memmap(tmp_directory / arrays["seg_min_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
+        "seg_max_y": np.lib.format.open_memmap(tmp_directory / arrays["seg_max_y"], mode="w+", dtype=np.float64, shape=(counts["segment_count"],)),
     }
     row_index = 0
     trajectory_index = -1
@@ -199,27 +265,19 @@ def _write_ordered_segments_index(
         numeric_arrays["s_y"][row_index] = row["s_y"]
         numeric_arrays["e_x"][row_index] = row["e_x"]
         numeric_arrays["e_y"][row_index] = row["e_y"]
+        numeric_arrays["seg_min_x"][row_index] = min(row["s_x"], row["e_x"])
+        numeric_arrays["seg_max_x"][row_index] = max(row["s_x"], row["e_x"])
+        numeric_arrays["seg_min_y"][row_index] = min(row["s_y"], row["e_y"])
+        numeric_arrays["seg_max_y"][row_index] = max(row["s_y"], row["e_y"])
         row_index += 1
     offsets[counts["trajectory_count"]] = counts["segment_count"]
     for array in (trajectory_ids, offsets, segment_idx, *numeric_arrays.values()):
         array.flush()
-    compatibility_hash = trajectory_index_compatibility_hash(
-        metadata,
-        predicate_columns=(),
-        trajectory_key=trajectory_key,
-        entity_table=entity_table,
-        segment_table=segment_table,
-        segment_key=segment_key,
-        trajectory_static_columns=trajectory_static_columns,
-        segment_varying_columns=segment_varying_columns,
-        srid=srid,
-        format_version=TRAJECTORY_INDEX_FORMAT_VERSION,
-    )
     index_bytes = int(
         counts["trajectory_count"] * np.dtype(np.int64).itemsize
         + (counts["trajectory_count"] + 1) * np.dtype(np.int64).itemsize
         + counts["segment_count"] * np.dtype(np.int32).itemsize
-        + counts["segment_count"] * 6 * np.dtype(np.float64).itemsize
+        + counts["segment_count"] * 10 * np.dtype(np.float64).itemsize
     )
     manifest = {
         "format_version": TRAJECTORY_INDEX_FORMAT_VERSION,
@@ -247,12 +305,20 @@ def _write_ordered_segments_index(
         "bytes_per_segment": float(index_bytes / max(1, int(counts["segment_count"]))),
         "preparation_seconds": float(time.perf_counter() - started),
         "ordered_input_required": True,
+        "source_segments_path": str(source_segments_path or path),
+        "source_segments_size_bytes": int(path.stat().st_size),
+        "config_path": None if config_path is None else str(config_path),
+        "schema_hash": metadata.schema_hash or metadata.stable_schema_hash(),
+        "mbr_arrays_persisted": True,
         "arrays": arrays,
     }
-    (output_directory / "manifest.json").write_text(
+    (tmp_directory / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    if output_directory.exists():
+        shutil.rmtree(output_directory)
+    tmp_directory.rename(output_directory)
     return manifest
 
 

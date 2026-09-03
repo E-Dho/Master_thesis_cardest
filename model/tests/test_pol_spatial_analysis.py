@@ -32,6 +32,10 @@ class PolSpatialAnalysisTest(unittest.TestCase):
         self.assertEqual(stats.B_Q, 1)
         self.assertEqual(stats.O_Q, 1)
         self.assertEqual(stats.C_Q, 1)
+        self.assertEqual(stats.M_MBR_Q, 3)
+        self.assertEqual(stats.MBR_false_positives, 0)
+        self.assertAlmostEqual(stats.MBR_precision, 1.0)
+        self.assertAlmostEqual(stats.MBR_overestimation, 1.0)
         self.assertAlmostEqual(stats.current_endpoint_model_recall, 1.0 / 3.0)
         self.assertAlmostEqual(
             stats.mean_matching_segment_length,
@@ -41,6 +45,27 @@ class PolSpatialAnalysisTest(unittest.TestCase):
         self.assertIsNotNone(stats.p90_matching_segment_length)
         self.assertIsNotNone(stats.p95_matching_segment_length)
         self.assertIsNotNone(stats.p99_matching_segment_length)
+
+    def test_counts_diagonal_mbr_false_positive(self) -> None:
+        stats = analyze_rectangle_query(
+            _query(
+                "q_mbr_false_positive",
+                min_x=0.0,
+                min_y=1.5,
+                max_x=0.5,
+                max_y=2.0,
+            ),
+            sx=np.asarray([0.0, 0.25]),
+            sy=np.asarray([0.0, 1.75]),
+            ex=np.asarray([2.0, 0.30]),
+            ey=np.asarray([2.0, 1.80]),
+            chunk_size=1,
+        )
+        self.assertEqual(stats.M_Q, 1)
+        self.assertEqual(stats.M_MBR_Q, 2)
+        self.assertEqual(stats.MBR_false_positives, 1)
+        self.assertAlmostEqual(stats.MBR_precision, 0.5)
+        self.assertAlmostEqual(stats.MBR_overestimation, 2.0)
 
     def test_summary_reports_global_fractions_and_buckets(self) -> None:
         results = [
@@ -56,6 +81,8 @@ class PolSpatialAnalysisTest(unittest.TestCase):
         summary = summarize_results(results, bucket_edges=(0.0, 10.0, float("inf")))
         self.assertEqual(summary["spatial_queries_analyzed"], 1)
         self.assertEqual(summary["total_matching_segments"], 2)
+        self.assertEqual(summary["total_mbr_candidate_segments"], 2)
+        self.assertEqual(summary["total_mbr_false_positives"], 0)
         self.assertAlmostEqual(
             summary["cardinality_weighted_global_fractions"]["B_fraction"],
             0.5,
@@ -64,8 +91,18 @@ class PolSpatialAnalysisTest(unittest.TestCase):
             summary["cardinality_weighted_global_fractions"]["C_fraction"],
             0.5,
         )
+        self.assertAlmostEqual(
+            summary["cardinality_weighted_global_fractions"]["MBR_precision"],
+            1.0,
+        )
         self.assertTrue(summary["sanity_checks"]["all_partition_counts_match"])
+        self.assertTrue(summary["sanity_checks"]["all_mbr_counts_cover_true_matches"])
+        self.assertTrue(summary["sanity_checks"]["all_mbr_false_positives_nonnegative"])
         self.assertEqual(summary["normalized_window_size_buckets"][0]["query_count"], 1)
+        self.assertEqual(
+            summary["normalized_window_size_buckets"][0]["MBR_precision"]["count"],
+            1,
+        )
         self.assertEqual(
             summary["matching_segment_length_percentiles_by_query"]["mean"]["count"],
             1,
@@ -156,6 +193,8 @@ class PolSpatialAnalysisTest(unittest.TestCase):
                 for line in output.read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual(rows[0]["M_Q"], 2)
+            self.assertEqual(rows[0]["M_MBR_Q"], 2)
+            self.assertEqual(rows[0]["MBR_false_positives"], 0)
             self.assertEqual(rows[0]["B_Q"], 1)
             self.assertEqual(rows[0]["C_Q"], 1)
             self.assertEqual(rows[0]["category_dimension"], "spatial")
@@ -172,6 +211,9 @@ class PolSpatialAnalysisTest(unittest.TestCase):
             self.assertEqual(breakdown_rows[0]["width_source"], "uniform")
             self.assertEqual(breakdown_rows[0]["center_source"], "live_row")
             self.assertEqual(breakdown_rows[0]["median_M_Q"], "2.0")
+            self.assertEqual(breakdown_rows[0]["sum_M_MBR_Q"], "2")
+            self.assertEqual(breakdown_rows[0]["sum_MBR_false_positives"], "0")
+            self.assertEqual(breakdown_rows[0]["MBR_precision_weighted"], "1.0")
             self.assertTrue(
                 payload["predicate_filter"]["default_segments_segment_geom_only"]
             )
@@ -323,6 +365,8 @@ class PolSpatialAnalysisTest(unittest.TestCase):
         self.assertIn("uniform", live_uniform)
         self.assertEqual(live_uniform["uniform"]["query_count"], 1)
         self.assertEqual(live_uniform["uniform"]["median_M_Q"], 3.0)
+        self.assertEqual(live_uniform["uniform"]["sum_M_MBR_Q"], 3)
+        self.assertAlmostEqual(live_uniform["uniform"]["MBR_precision_weighted"], 1.0)
 
 
 def _query(
@@ -334,6 +378,10 @@ def _query(
     center_source: str = "live_row",
     range_source: str | None = "uniform",
     mode: str = "spatial_intersects",
+    min_x: float = 0.0,
+    min_y: float = 0.0,
+    max_x: float = 2.0,
+    max_y: float = 2.0,
 ) -> SpatialRectangleQuery:
     return SpatialRectangleQuery(
         query_id=query_id,
@@ -346,10 +394,10 @@ def _query(
         category_relation=category_relation,
         center_source=center_source,
         range_source=range_source,
-        min_x=0.0,
-        min_y=0.0,
-        max_x=2.0,
-        max_y=2.0,
+        min_x=min_x,
+        min_y=min_y,
+        max_x=max_x,
+        max_y=max_y,
     )
 
 
