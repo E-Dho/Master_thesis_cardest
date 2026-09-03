@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import tempfile
 import unittest
@@ -10,23 +11,15 @@ import numpy as np
 from model.scripts.analyze_pol_spatial_intersections import (
     SpatialRectangleQuery,
     analyze_rectangle_query,
+    bounded_range_breakdown_rows,
     summarize_results,
+    _load_spatial_queries,
 )
 
 
 class PolSpatialAnalysisTest(unittest.TestCase):
     def test_classifies_endpoint_and_crossing_matches(self) -> None:
-        query = SpatialRectangleQuery(
-            query_id="q_crossing",
-            predicate_index=0,
-            table="segments",
-            attribute="segment_geom",
-            mode="spatial_intersects",
-            min_x=0.0,
-            min_y=0.0,
-            max_x=2.0,
-            max_y=2.0,
-        )
+        query = _query("q_crossing")
         stats = analyze_rectangle_query(
             query,
             sx=np.asarray([0.5, -1.0, -1.0, 3.0]),
@@ -52,17 +45,7 @@ class PolSpatialAnalysisTest(unittest.TestCase):
     def test_summary_reports_global_fractions_and_buckets(self) -> None:
         results = [
             analyze_rectangle_query(
-                SpatialRectangleQuery(
-                    query_id="q1",
-                    predicate_index=0,
-                    table="segments",
-                    attribute="segment_geom",
-                    mode="spatial_intersects",
-                    min_x=0.0,
-                    min_y=0.0,
-                    max_x=2.0,
-                    max_y=2.0,
-                ),
+                _query("q1"),
                 sx=np.asarray([0.5, -1.0]),
                 sy=np.asarray([0.5, 1.0]),
                 ex=np.asarray([1.5, 3.0]),
@@ -93,6 +76,13 @@ class PolSpatialAnalysisTest(unittest.TestCase):
             ]["count"],
             1,
         )
+        interval = summary["stratified_statistics"]["interval"]["range"]
+        self.assertEqual(interval["query_count"], 1)
+        self.assertEqual(interval["sum_M_Q"], 2)
+        self.assertAlmostEqual(
+            interval["cardinality_weighted_fractions"]["C_fraction"],
+            0.5,
+        )
 
     def test_cli_reads_spatial_workload_and_segments_tsv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -102,7 +92,12 @@ class PolSpatialAnalysisTest(unittest.TestCase):
                 json.dumps(
                     {
                         "query_id": "q1",
-                        "category": {"key": "spatial.range.single"},
+                        "category": {
+                            "key": "spatial.range.single",
+                            "dimension": "spatial",
+                            "interval": "range",
+                            "relation": "single",
+                        },
                         "predicates": [
                             {
                                 "table": "segments",
@@ -112,6 +107,8 @@ class PolSpatialAnalysisTest(unittest.TestCase):
                                 "min_y": 0.0,
                                 "max_x": 2.0,
                                 "max_y": 2.0,
+                                "center_source": "live_row",
+                                "range_source": "uniform",
                             }
                         ],
                     }
@@ -131,6 +128,7 @@ class PolSpatialAnalysisTest(unittest.TestCase):
                 encoding="utf-8",
             )
             output = root / "analysis.jsonl"
+            breakdown = root / "bounded_range_breakdown.csv"
             summary = root / "summary.json"
             from model.scripts.analyze_pol_spatial_intersections import main
             import sys
@@ -145,6 +143,8 @@ class PolSpatialAnalysisTest(unittest.TestCase):
                     str(segments),
                     "--output-jsonl",
                     str(output),
+                    "--bounded-range-breakdown-csv",
+                    str(breakdown),
                     "--summary",
                     str(summary),
                 ]
@@ -158,8 +158,199 @@ class PolSpatialAnalysisTest(unittest.TestCase):
             self.assertEqual(rows[0]["M_Q"], 2)
             self.assertEqual(rows[0]["B_Q"], 1)
             self.assertEqual(rows[0]["C_Q"], 1)
+            self.assertEqual(rows[0]["category_dimension"], "spatial")
+            self.assertEqual(rows[0]["category_interval"], "range")
+            self.assertEqual(rows[0]["category_relation"], "single")
+            self.assertEqual(rows[0]["center_source"], "live_row")
+            self.assertEqual(rows[0]["range_source"], "uniform")
             payload = json.loads(summary.read_text(encoding="utf-8"))
             self.assertEqual(payload["spatial_queries_analyzed"], 1)
+            with breakdown.open(encoding="utf-8") as handle:
+                breakdown_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(breakdown_rows), 1)
+            self.assertEqual(breakdown_rows[0]["interval"], "range")
+            self.assertEqual(breakdown_rows[0]["width_source"], "uniform")
+            self.assertEqual(breakdown_rows[0]["center_source"], "live_row")
+            self.assertEqual(breakdown_rows[0]["median_M_Q"], "2.0")
+            self.assertTrue(
+                payload["predicate_filter"]["default_segments_segment_geom_only"]
+            )
+            self.assertIn("interval", payload["stratified_statistics"])
+            self.assertIn(
+                "description",
+                payload["cardinality_weighted_global_fractions"],
+            )
+
+    def test_default_filter_keeps_only_segment_geometry_predicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "queries.jsonl"
+            record = {
+                "query_id": "q1",
+                "category": {
+                    "dimension": "spatio_temporal",
+                    "interval": "unbounded",
+                    "relation": "multi",
+                },
+                "predicates": [
+                    {
+                        "table": "trips",
+                        "attribute": "trip_geom",
+                        "mode": "spatial_intersects",
+                        "min_x": 0.0,
+                        "min_y": 0.0,
+                        "max_x": 1.0,
+                        "max_y": 1.0,
+                        "center_source": "domain",
+                        "range_source": "exponential",
+                    },
+                    {
+                        "table": "segments",
+                        "attribute": "segment_geom",
+                        "mode": "spatial_unbounded",
+                        "min_x": 0.0,
+                        "min_y": 0.0,
+                        "max_x": 1.0,
+                        "max_y": 1.0,
+                        "center_source": "live_row",
+                    },
+                ],
+            }
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+            default_queries = list(_load_spatial_queries([path]))
+            self.assertEqual(len(default_queries), 1)
+            self.assertEqual(default_queries[0].table, "segments")
+            self.assertEqual(default_queries[0].attribute, "segment_geom")
+            self.assertEqual(default_queries[0].category_dimension, "spatio_temporal")
+            self.assertEqual(default_queries[0].category_interval, "unbounded")
+            self.assertEqual(default_queries[0].category_relation, "multi")
+            self.assertEqual(default_queries[0].center_source, "live_row")
+            self.assertIsNone(default_queries[0].range_source)
+
+            all_queries = list(
+                _load_spatial_queries(
+                    [path],
+                    include_other_spatial_predicates=True,
+                )
+            )
+            self.assertEqual(len(all_queries), 2)
+
+    def test_grouping_reports_required_workload_generation_strata(self) -> None:
+        base = dict(
+            sx=np.asarray([0.5, -1.0, -1.0]),
+            sy=np.asarray([0.5, 1.0, -1.0]),
+            ex=np.asarray([1.5, 3.0, 3.0]),
+            ey=np.asarray([1.5, 1.0, 1.0]),
+            chunk_size=10,
+        )
+        results = [
+            analyze_rectangle_query(
+                _query(
+                    "range_live_uniform",
+                    category_interval="range",
+                    category_dimension="spatial",
+                    center_source="live_row",
+                    range_source="uniform",
+                    mode="spatial_intersects",
+                ),
+                **base,
+            ),
+            analyze_rectangle_query(
+                _query(
+                    "range_domain_exponential",
+                    category_interval="range",
+                    category_dimension="spatio_temporal",
+                    center_source="domain",
+                    range_source="exponential",
+                    mode="spatial_intersects",
+                ),
+                **base,
+            ),
+            analyze_rectangle_query(
+                _query(
+                    "unbounded",
+                    category_interval="unbounded",
+                    category_dimension="spatial",
+                    center_source="live_row",
+                    range_source=None,
+                    mode="spatial_unbounded",
+                ),
+                **base,
+            ),
+        ]
+        summary = summarize_results(results, bucket_edges=(0.0, 10.0, float("inf")))
+        self.assertEqual(
+            summary["stratified_statistics"]["interval"]["range"]["query_count"],
+            2,
+        )
+        self.assertEqual(
+            summary["stratified_statistics"]["interval"]["unbounded"]["query_count"],
+            1,
+        )
+        self.assertEqual(
+            summary["stratified_statistics"]["center_source"]["live_row"]["query_count"],
+            2,
+        )
+        self.assertEqual(
+            summary["stratified_statistics"]["center_source"]["domain"]["query_count"],
+            1,
+        )
+        self.assertIn("uniform", summary["stratified_statistics"]["range_source"])
+        self.assertIn("exponential", summary["stratified_statistics"]["range_source"])
+        interaction = summary["stratified_statistics"][
+            "bounded_range_interval_x_width_source_x_center_source"
+        ]
+        self.assertEqual(interaction["range x uniform x live_row"]["query_count"], 1)
+        self.assertEqual(interaction["range x exponential x domain"]["query_count"], 1)
+        self.assertNotIn("unbounded x missing x live_row", interaction)
+        self.assertEqual(
+            summary["stratified_statistics"]["category_dimension"]["spatial"][
+                "query_count"
+            ],
+            2,
+        )
+        self.assertEqual(
+            len(summary["normalized_window_size_buckets_for_range_queries"]),
+            2,
+        )
+        rows = bounded_range_breakdown_rows(results)
+        self.assertEqual(len(rows), 2)
+        live_uniform = {
+            row["width_source"]: row
+            for row in rows
+            if row["center_source"] == "live_row"
+        }
+        self.assertIn("uniform", live_uniform)
+        self.assertEqual(live_uniform["uniform"]["query_count"], 1)
+        self.assertEqual(live_uniform["uniform"]["median_M_Q"], 3.0)
+
+
+def _query(
+    query_id: str,
+    *,
+    category_dimension: str = "spatial",
+    category_interval: str = "range",
+    category_relation: str = "single",
+    center_source: str = "live_row",
+    range_source: str | None = "uniform",
+    mode: str = "spatial_intersects",
+) -> SpatialRectangleQuery:
+    return SpatialRectangleQuery(
+        query_id=query_id,
+        predicate_index=0,
+        table="segments",
+        attribute="segment_geom",
+        mode=mode,
+        category_dimension=category_dimension,
+        category_interval=category_interval,
+        category_relation=category_relation,
+        center_source=center_source,
+        range_source=range_source,
+        min_x=0.0,
+        min_y=0.0,
+        max_x=2.0,
+        max_y=2.0,
+    )
 
 
 if __name__ == "__main__":
