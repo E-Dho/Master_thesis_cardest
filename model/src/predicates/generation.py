@@ -59,7 +59,6 @@ class PredicateGenerationStats:
 @dataclass(frozen=True)
 class _ColumnPredicateCache:
     comparable_values: tuple[Any, ...]
-    comparable_set: frozenset[Any]
 
 
 _TOKEN_COVERAGE_KEYS = (
@@ -548,7 +547,6 @@ class PredicateTrainingContextGenerator:
         excluded_columns: frozenset[str] = frozenset(),
     ) -> dict[str, PredicateToken]:
         ordinary: dict[str, PredicateToken] = {}
-        caches = self._column_caches(metadata)
         for column_index, column in enumerate(metadata.columns):
             if column.kind != ColumnKind.DATA:
                 continue
@@ -557,7 +555,11 @@ class PredicateTrainingContextGenerator:
             if column.table is not None and column.table not in included_tables:
                 continue
             value = column.domain[int(encoded_row[column_index])]
-            token = self._sample_satisfied_predicate(caches[column_index], value, rng)
+            token = self._sample_satisfied_predicate(
+                self._column_cache(metadata, column_index),
+                value,
+                rng,
+            )
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
         return ordinary
@@ -617,21 +619,22 @@ class PredicateTrainingContextGenerator:
     ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
         from model.src.data.trajectory_distinct import SegmentTemporalPredicate
 
-        caches = self._column_caches(metadata)
         start_index = metadata.column_index("segments:t_s")
         end_index = metadata.column_index("segments:t_e")
         start_value = metadata.columns[start_index].domain[int(encoded_row[start_index])]
         end_value = metadata.columns[end_index].domain[int(encoded_row[end_index])]
-        start_cache = caches[start_index]
-        end_cache = caches[end_index]
+        start_cache = self._column_cache(metadata, start_index)
+        end_cache = self._column_cache(metadata, end_index)
         if start_cache is None or end_cache is None:
             return None
-        lower_candidates = [value for value in end_cache.comparable_values if value <= end_value]
-        upper_candidates = [value for value in start_cache.comparable_values if start_value < value]
-        if not lower_candidates or not upper_candidates:
+        lower_stop = bisect_right(end_cache.comparable_values, end_value)
+        upper_start = bisect_right(start_cache.comparable_values, start_value)
+        if lower_stop <= 0 or upper_start >= len(start_cache.comparable_values):
             return None
-        lower = lower_candidates[int(rng.integers(0, len(lower_candidates)))]
-        upper = upper_candidates[int(rng.integers(0, len(upper_candidates)))]
+        lower = end_cache.comparable_values[int(rng.integers(0, lower_stop))]
+        upper = start_cache.comparable_values[
+            int(rng.integers(upper_start, len(start_cache.comparable_values)))
+        ]
         scalar = [
             ("segments:t_s", PredicateToken(PredicateOp.LESS_THAN, value=upper)),
             ("segments:t_e", PredicateToken(PredicateOp.GREATER_EQUAL, value=lower)),
@@ -655,6 +658,7 @@ class PredicateTrainingContextGenerator:
         from model.src.data.trajectory_distinct import (
             SegmentMbrSpatialPredicate,
             SegmentSpatialPredicate,
+            canonicalize_segment_mbr_predicate,
         )
 
         if self.trajectory_spatial_enabled:
@@ -679,53 +683,78 @@ class PredicateTrainingContextGenerator:
                 )
                 for name in mbr_columns
             }
-            seg_min_x_domain = _numeric_values_for_columns(metadata, ("segments:seg_min_x",))
-            seg_max_x_domain = _numeric_values_for_columns(metadata, ("segments:seg_max_x",))
-            seg_min_y_domain = _numeric_values_for_columns(metadata, ("segments:seg_min_y",))
-            seg_max_y_domain = _numeric_values_for_columns(metadata, ("segments:seg_max_y",))
-            x_upper_candidates = [
-                value
-                for value in seg_min_x_domain
-                if value >= values["segments:seg_min_x"]
-            ]
-            x_lower_candidates = [
-                value
-                for value in seg_max_x_domain
-                if value <= values["segments:seg_max_x"]
-            ]
-            y_upper_candidates = [
-                value
-                for value in seg_min_y_domain
-                if value >= values["segments:seg_min_y"]
-            ]
-            y_lower_candidates = [
-                value
-                for value in seg_max_y_domain
-                if value <= values["segments:seg_max_y"]
-            ]
-            if not (
-                x_lower_candidates
-                and x_upper_candidates
-                and y_lower_candidates
-                and y_upper_candidates
+            cache_by_name = {
+                name: self._column_cache(metadata, metadata.column_index(name))
+                for name in mbr_columns
+            }
+            if any(cache is None for cache in cache_by_name.values()):
+                return None
+            seg_min_x_values = cache_by_name["segments:seg_min_x"].comparable_values  # type: ignore[union-attr]
+            seg_max_x_values = cache_by_name["segments:seg_max_x"].comparable_values  # type: ignore[union-attr]
+            seg_min_y_values = cache_by_name["segments:seg_min_y"].comparable_values  # type: ignore[union-attr]
+            seg_max_y_values = cache_by_name["segments:seg_max_y"].comparable_values  # type: ignore[union-attr]
+            x_upper_start = bisect_left(seg_min_x_values, values["segments:seg_min_x"])
+            x_lower_stop = bisect_right(seg_max_x_values, values["segments:seg_max_x"])
+            y_upper_start = bisect_left(seg_min_y_values, values["segments:seg_min_y"])
+            y_lower_stop = bisect_right(seg_max_y_values, values["segments:seg_max_y"])
+            if (
+                x_upper_start >= len(seg_min_x_values)
+                or x_lower_stop <= 0
+                or y_upper_start >= len(seg_min_y_values)
+                or y_lower_stop <= 0
             ):
                 return None
-            min_x = float(x_lower_candidates[int(rng.integers(0, len(x_lower_candidates)))])
-            max_x = float(x_upper_candidates[int(rng.integers(0, len(x_upper_candidates)))])
-            min_y = float(y_lower_candidates[int(rng.integers(0, len(y_lower_candidates)))])
-            max_y = float(y_upper_candidates[int(rng.integers(0, len(y_upper_candidates)))])
-            scalar = [
-                ("segments:seg_min_x", PredicateToken(PredicateOp.LESS_EQUAL, value=max_x)),
-                ("segments:seg_max_x", PredicateToken(PredicateOp.GREATER_EQUAL, value=min_x)),
-                ("segments:seg_min_y", PredicateToken(PredicateOp.LESS_EQUAL, value=max_y)),
-                ("segments:seg_max_y", PredicateToken(PredicateOp.GREATER_EQUAL, value=min_y)),
-            ]
-            return scalar, SegmentMbrSpatialPredicate(
+            raw_min_x = float(seg_max_x_values[int(rng.integers(0, x_lower_stop))])
+            raw_max_x = float(
+                seg_min_x_values[int(rng.integers(x_upper_start, len(seg_min_x_values)))]
+            )
+            raw_min_y = float(seg_max_y_values[int(rng.integers(0, y_lower_stop))])
+            raw_max_y = float(
+                seg_min_y_values[int(rng.integers(y_upper_start, len(seg_min_y_values)))]
+            )
+            min_x, max_x = sorted((raw_min_x, raw_max_x))
+            min_y, max_y = sorted((raw_min_y, raw_max_y))
+            canonical = canonicalize_segment_mbr_predicate(
+                metadata,
+                min_x_column="segments:seg_min_x",
+                max_x_column="segments:seg_max_x",
+                min_y_column="segments:seg_min_y",
+                max_y_column="segments:seg_max_y",
                 min_x=min_x,
                 min_y=min_y,
                 max_x=max_x,
                 max_y=max_y,
+            )
+            if canonical.zero_support:
+                return None
+            scalar = [
+                (
+                    "segments:seg_min_x",
+                    PredicateToken(PredicateOp.LESS_EQUAL, value=canonical.max_x_literal),
+                ),
+                (
+                    "segments:seg_max_x",
+                    PredicateToken(PredicateOp.GREATER_EQUAL, value=canonical.min_x_literal),
+                ),
+                (
+                    "segments:seg_min_y",
+                    PredicateToken(PredicateOp.LESS_EQUAL, value=canonical.max_y_literal),
+                ),
+                (
+                    "segments:seg_max_y",
+                    PredicateToken(PredicateOp.GREATER_EQUAL, value=canonical.min_y_literal),
+                ),
+            ]
+            return scalar, SegmentMbrSpatialPredicate(
+                min_x=canonical.min_x,
+                min_y=canonical.min_y,
+                max_x=canonical.max_x,
+                max_y=canonical.max_y,
                 srid=int(self.config.get("trajectory_srid", 26916)),
+                physical_min_x=canonical.physical_min_x,
+                physical_min_y=canonical.physical_min_y,
+                physical_max_x=canonical.physical_max_x,
+                physical_max_y=canonical.physical_max_y,
             )
 
         column_names = ("segments:s_x", "segments:s_y", "segments:e_x", "segments:e_y")
@@ -771,7 +800,7 @@ class PredicateTrainingContextGenerator:
     ) -> PredicateToken:
         if not self.enabled:
             return PredicateToken.wildcard()
-        if cache is None or value not in cache.comparable_set:
+        if cache is None or not _is_comparable_value(value):
             return PredicateToken.wildcard()
         comparable_values = cache.comparable_values
         roll = float(rng.random() * self._probability_total)
@@ -840,27 +869,34 @@ class PredicateTrainingContextGenerator:
         cached = self._cache_by_metadata_id.get(key)
         if cached is not None:
             return cached
-        caches = []
-        for column in metadata.columns:
-            if column.kind != ColumnKind.DATA:
-                caches.append(None)
-                continue
-            values = comparable_domain_values(column.domain)
-            try:
-                values = sorted(values)
-            except TypeError:
-                values = []
-            caches.append(
-                _ColumnPredicateCache(
-                    comparable_values=tuple(values),
-                    comparable_set=frozenset(values),
-                )
-                if values
-                else None
-            )
+        caches = [self._build_column_cache(column) for column in metadata.columns]
         result = tuple(caches)
         self._cache_by_metadata_id[key] = result
         return result
+
+    def _column_cache(
+        self,
+        metadata: ModelMetadata,
+        column_index: int,
+    ) -> _ColumnPredicateCache | None:
+        key = id(metadata)
+        cached = self._cache_by_metadata_id.get(key)
+        if cached is not None:
+            return cached[column_index]
+        single_cache = getattr(self, "_single_column_cache_by_metadata_id", None)
+        if single_cache is None:
+            single_cache = {}
+            self._single_column_cache_by_metadata_id = single_cache
+        column_key = (key, int(column_index))
+        if column_key not in single_cache:
+            single_cache[column_key] = self._build_column_cache(metadata.columns[column_index])
+        return single_cache[column_key]
+
+    def _build_column_cache(self, column: Any) -> _ColumnPredicateCache | None:
+        if column.kind != ColumnKind.DATA:
+            return None
+        values = _sorted_comparable_domain_values(column.domain)
+        return _ColumnPredicateCache(comparable_values=values) if values else None
 
 
 def tokens_for_query_tables(
@@ -1352,6 +1388,39 @@ def comparable_domain_values(domain: tuple[Any, ...]) -> list[Any]:
     return comparable
 
 
+def _is_comparable_value(value: Any) -> bool:
+    if isinstance(value, str) and value.startswith("__"):
+        return False
+    try:
+        _ = value <= value
+    except TypeError:
+        return False
+    return True
+
+
+def _sorted_comparable_domain_values(domain: tuple[Any, ...]) -> tuple[Any, ...]:
+    if _domain_is_already_sorted_comparable(domain):
+        return domain
+    values = comparable_domain_values(domain)
+    try:
+        return tuple(sorted(values))
+    except TypeError:
+        return ()
+
+
+def _domain_is_already_sorted_comparable(domain: tuple[Any, ...]) -> bool:
+    previous = None
+    has_value = False
+    for value in domain:
+        if not _is_comparable_value(value):
+            return False
+        if previous is not None and value < previous:
+            return False
+        previous = value
+        has_value = True
+    return has_value
+
+
 def _semantic_owned_column_names(trajectory_query: Any) -> frozenset[str]:
     owned: set[str] = set()
     for temporal in getattr(trajectory_query, "temporal_predicates", ()):
@@ -1374,6 +1443,10 @@ def _semantic_owned_column_names(trajectory_query: Any) -> frozenset[str]:
                     spatial.max_x_column,
                     spatial.min_y_column,
                     spatial.max_y_column,
+                    "segments:s_x",
+                    "segments:s_y",
+                    "segments:e_x",
+                    "segments:e_y",
                 )
             )
     return frozenset(owned)

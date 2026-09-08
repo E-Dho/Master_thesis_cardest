@@ -7,6 +7,7 @@ dataset:
   trajectory_ids_path: data/pol_prepared/pol_50m_mbr/sample_trajectory_ids.npy
   segment_ids_path: data/pol_prepared/pol_50m_mbr/sample_segment_ids.npy
   trajectory_index_path: data/pol_prepared/pol_50m_mbr/trajectory_segment_index
+  preload_trajectory_index: true
   num_workers: 0
 
 trajectory_spatial:

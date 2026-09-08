@@ -127,6 +127,7 @@ class NeuroCardFullJoinSampleSource:
         trajectory_ids_path: str | Path | None = None,
         segment_ids_path: str | Path | None = None,
         trajectory_index_path: str | Path | None = None,
+        preload_trajectory_index: bool = False,
     ) -> None:
         self.prepared_directory = Path(prepared_directory)
         self.sampling_mode = sampling_mode
@@ -173,7 +174,10 @@ class NeuroCardFullJoinSampleSource:
             index_path = Path(trajectory_index_path)
             try:
                 self._trajectory_multiplicity_provider = (
-                    CompactTrajectorySegmentIndex.from_directory(index_path)
+                    CompactTrajectorySegmentIndex.from_directory(
+                        index_path,
+                        preload=preload_trajectory_index,
+                    )
                     if index_path.is_dir()
                     else TrajectorySegmentIndex.from_npz(index_path)
                 )
@@ -290,14 +294,34 @@ class NeuroCardFullJoinSampleSource:
         column_index = int(stratum.column_index)
         column = self.metadata.columns[column_index]
         encoded_values = np.asarray(rows[:, column_index], dtype=np.int64)
-        decoded_values = np.asarray(
-            [column.domain[int(value)] for value in encoded_values],
-            dtype=object,
-        )
-        mask = _vectorized_root_stratum_mask(decoded_values, stratum)
+        encoded_ids = _encoded_domain_ids_for_stratum(column, stratum)
+        if encoded_ids is None:
+            decoded_values = np.asarray(
+                [column.domain[int(value)] for value in encoded_values],
+                dtype=object,
+            )
+            mask = _vectorized_root_stratum_mask(decoded_values, stratum)
+        elif encoded_ids.size == 0:
+            candidates = np.empty(0, dtype=int)
+            self._fixture_stratum_index_cache[stratum.stratum_id] = candidates
+            return candidates
+        else:
+            mask = np.isin(encoded_values, encoded_ids, assume_unique=False)
         candidates = np.flatnonzero(mask)
         self._fixture_stratum_index_cache[stratum.stratum_id] = candidates
         return candidates
+
+    def prepare_root_strata(self, strata: object) -> None:
+        """Precompute fixture row candidates for selected root strata."""
+
+        if self.sampling_mode == "live":
+            return
+        sample_path = self.prepared_directory / "sample_rows.npy"
+        if not sample_path.exists():
+            return
+        rows = np.load(sample_path, mmap_mode="r")
+        for stratum in tuple(strata):  # type: ignore[arg-type]
+            self._fixture_indices_for_stratum(rows, stratum)
 
     @property
     def trajectory_multiplicity_provider(self) -> object:
@@ -780,6 +804,30 @@ def _root_jct_mask_for_stratum(sampler: Any, root_jct: Any, stratum: Any) -> np.
         dtype=object,
     )
     return np.array([stratum.contains_value(value) for value in column_values], dtype=bool)
+
+
+def _encoded_domain_ids_for_stratum(
+    column: ColumnMetadata,
+    stratum: Any,
+) -> np.ndarray | None:
+    """Return encoded domain IDs satisfying a stratum without decoding rows.
+
+    Fixture conditional rare-row sampling may run over tens of millions of
+    rows.  Decoding the whole column into Python objects for each stratum is
+    prohibitively slow, while the stratum itself is defined over one complete
+    column domain.  Scanning the domain once and applying ``np.isin`` to the
+    encoded row IDs preserves exact semantics for ordinary domains.
+    """
+
+    matching_ids: list[int] = []
+    for encoded_id, value in enumerate(column.domain):
+        try:
+            matches = bool(stratum.contains_value(value))
+        except (TypeError, ValueError):
+            return None
+        if matches:
+            matching_ids.append(encoded_id)
+    return np.asarray(matching_ids, dtype=np.int64)
 
 
 def _vectorized_root_stratum_mask(values: np.ndarray, stratum: Any) -> np.ndarray:

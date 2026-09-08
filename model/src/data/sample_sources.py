@@ -56,6 +56,7 @@ def sample_source_from_config(
                 trajectory_ids_path=dataset.get("trajectory_ids_path"),
                 segment_ids_path=dataset.get("segment_ids_path"),
                 trajectory_index_path=dataset.get("trajectory_index_path"),
+                preload_trajectory_index=bool(dataset.get("preload_trajectory_index", False)),
             )
     elif dataset_type == "pol_trajectory_full_join":
         if str(dataset.get("sampling_mode", "fixture")) == "live":
@@ -69,6 +70,7 @@ def sample_source_from_config(
             trajectory_ids_path=dataset.get("trajectory_ids_path"),
             segment_ids_path=dataset.get("segment_ids_path"),
             trajectory_index_path=dataset.get("trajectory_index_path"),
+            preload_trajectory_index=bool(dataset.get("preload_trajectory_index", False)),
         )
     else:
         raise ValueError(f"unsupported dataset.type {dataset_type!r}")

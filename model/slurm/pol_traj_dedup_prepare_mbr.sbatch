@@ -16,6 +16,7 @@ CONFIG=${CONFIG:-model/configs/pol_50m_traj_dedup_single_anchor_mbr.yaml}
 STAGING_DIR=${STAGING_DIR:-$ROOT/mobilitydb/staging/pol_mobilitydb_50m_load_20260730T121326Z}
 SAMPLE_ROWS=${SAMPLE_ROWS:-0}
 FORCE_REBUILD_INDEX=${FORCE_REBUILD_INDEX:-0}
+SKIP_TRAJECTORY_INDEX=${SKIP_TRAJECTORY_INDEX:-0}
 
 cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
@@ -30,6 +31,7 @@ echo "config=$CONFIG"
 echo "staging_dir=$STAGING_DIR"
 echo "sample_rows=$SAMPLE_ROWS"
 echo "force_rebuild_index=$FORCE_REBUILD_INDEX"
+echo "skip_trajectory_index=$SKIP_TRAJECTORY_INDEX"
 echo "git_sha=$(git rev-parse HEAD)"
 
 ARGS=(
@@ -40,6 +42,9 @@ ARGS=(
 )
 if [[ "$FORCE_REBUILD_INDEX" == "1" ]]; then
   ARGS+=(--force-rebuild-index)
+fi
+if [[ "$SKIP_TRAJECTORY_INDEX" == "1" ]]; then
+  ARGS+=(--skip-trajectory-index)
 fi
 
 "$PYTHON" "${ARGS[@]}"

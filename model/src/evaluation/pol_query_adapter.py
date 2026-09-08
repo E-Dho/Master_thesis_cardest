@@ -13,7 +13,9 @@ from model.src.data.trajectory_distinct import (
     TrajectoryQuerySemantics,
     SegmentSpatialPredicate,
     SegmentTemporalPredicate,
+    canonicalize_segment_mbr_predicate,
     trajectory_base_measure_support,
+    trajectory_query_has_zero_support,
 )
 from model.src.evaluation.exact_evaluator import ExactOracle
 from model.src.inference.estimator import OnePassEstimator
@@ -178,21 +180,54 @@ def pol_workload_record_to_context(
                     table,
                     attribute,
                 )
-                ordinary[min_x_column] = PredicateToken(PredicateOp.LESS_EQUAL, value=max_x)
-                ordinary[max_x_column] = PredicateToken(PredicateOp.GREATER_EQUAL, value=min_x)
-                ordinary[min_y_column] = PredicateToken(PredicateOp.LESS_EQUAL, value=max_y)
-                ordinary[max_y_column] = PredicateToken(PredicateOp.GREATER_EQUAL, value=min_y)
+                canonical = canonicalize_segment_mbr_predicate(
+                    metadata,
+                    min_x_column=min_x_column,
+                    max_x_column=max_x_column,
+                    min_y_column=min_y_column,
+                    max_y_column=max_y_column,
+                    min_x=min_x,
+                    min_y=min_y,
+                    max_x=max_x,
+                    max_y=max_y,
+                )
+                if canonical.zero_support:
+                    if canonical.zero_support_column is None or canonical.zero_support_token is None:
+                        raise ValueError("zero-support MBR canonicalization did not provide a token")
+                    ordinary[canonical.zero_support_column] = canonical.zero_support_token
+                else:
+                    ordinary[min_x_column] = PredicateToken(
+                        PredicateOp.LESS_EQUAL,
+                        value=canonical.max_x_literal,
+                    )
+                    ordinary[max_x_column] = PredicateToken(
+                        PredicateOp.GREATER_EQUAL,
+                        value=canonical.min_x_literal,
+                    )
+                    ordinary[min_y_column] = PredicateToken(
+                        PredicateOp.LESS_EQUAL,
+                        value=canonical.max_y_literal,
+                    )
+                    ordinary[max_y_column] = PredicateToken(
+                        PredicateOp.GREATER_EQUAL,
+                        value=canonical.min_y_literal,
+                    )
                 spatial_predicates.append(
                     SegmentMbrSpatialPredicate(
-                        min_x,
-                        min_y,
-                        max_x,
-                        max_y,
+                        canonical.min_x,
+                        canonical.min_y,
+                        canonical.max_x,
+                        canonical.max_y,
                         srid=(srid if srid is not None else int(predicate.get("srid", 26916))),
                         min_x_column=min_x_column,
                         max_x_column=max_x_column,
                         min_y_column=min_y_column,
                         max_y_column=max_y_column,
+                        physical_min_x=canonical.physical_min_x,
+                        physical_min_y=canonical.physical_min_y,
+                        physical_max_x=canonical.physical_max_x,
+                        physical_max_y=canonical.physical_max_y,
+                        zero_support=canonical.zero_support,
                     )
                 )
             else:
@@ -324,9 +359,39 @@ def evaluate_pol_distinct_record(
     exact = None
     if _is_physical_segment_spatial_record(record) and _mbr_spatial_enabled(trajectory_spatial):
         common_truth = _truth_payload(database_truth, exact)
+        if trajectory_query_has_zero_support(context.trajectory_query):
+            matching_qerror = (
+                None
+                if not database_truth.available
+                else _q_error(0.0, database_truth.matching_segments_true)
+            )
+            return PolDistinctEvaluation(
+                query_id=record.get("query_id"),
+                distinct_estimate_status="unsupported_physical_spatial_distinct_mbr_approximation",
+                matching_segment_estimate=0.0,
+                matching_segment_qerror=matching_qerror,
+                model_forward_calls=0,
+                **common_truth,
+            )
+        estimate = estimator.estimate_distinct_trajectories(
+            list(context.tokens),
+            context=context,
+            trajectory_config=trajectory_config,
+        )
+        matching_qerror = (
+            None
+            if not database_truth.available
+            else _q_error(
+                estimate.matching_segment_estimate,
+                database_truth.matching_segments_true,
+            )
+        )
         return PolDistinctEvaluation(
             query_id=record.get("query_id"),
             distinct_estimate_status="unsupported_physical_spatial_distinct_mbr_approximation",
+            matching_segment_estimate=estimate.matching_segment_estimate,
+            matching_segment_qerror=matching_qerror,
+            model_forward_calls=estimate.model_forward_calls,
             **common_truth,
         )
     if support.eligible and oracle is not None and trajectory_ids is not None:

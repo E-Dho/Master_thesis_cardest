@@ -91,6 +91,14 @@ def main() -> None:
         action="store_true",
         help="Replace an existing compact trajectory index after writing a complete temporary replacement.",
     )
+    parser.add_argument(
+        "--skip-trajectory-index",
+        action="store_true",
+        help=(
+            "Only prepare metadata/sample rows/provenance. Training will require "
+            "dataset.trajectory_index_path to point at an existing compatible index."
+        ),
+    )
     args = parser.parse_args()
 
     started = time.perf_counter()
@@ -159,33 +167,31 @@ def main() -> None:
 
     trajectory_config = config.get("trajectory_distinct", {})
     index_dir = Path(config["dataset"].get("trajectory_index_path", prepared / "trajectory_segment_index"))
-    if not index_dir.is_absolute():
-        index_dir = prepared / index_dir.name if index_dir.parent == Path("data/pol_prepared/pol_50m") else index_dir
-    if str(index_dir).startswith("data/"):
-        index_dir = prepared / "trajectory_segment_index"
-    compact_manifest = _write_ordered_segments_index(
-        segments_path,
-        output_directory=index_dir,
-        metadata=metadata,
-        trajectory_key=str(trajectory_config.get("trajectory_key", "trip_id")),
-        entity_table=str(trajectory_config.get("entity_table", "trips")),
-        segment_table=str(trajectory_config.get("segment_table", "segments")),
-        segment_key=str(trajectory_config.get("segment_key", "trip_id,segment_idx")),
-        trajectory_static_columns=tuple(
-            str(value) for value in trajectory_config.get("trajectory_static_columns", ())
-        ),
-        segment_varying_columns=tuple(
-            str(value) for value in trajectory_config.get("segment_varying_columns", ())
-        ),
-        srid=(
-            None
-            if trajectory_config.get("srid") is None
-            else int(trajectory_config.get("srid"))
-        ),
-        source_segments_path=segments_path,
-        config_path=Path(args.config),
-        force_rebuild=bool(args.force_rebuild_index),
-    )
+    compact_manifest: dict[str, Any] = {"segment_count": None, "skipped": True}
+    if not bool(args.skip_trajectory_index):
+        compact_manifest = _write_ordered_segments_index(
+            segments_path,
+            output_directory=index_dir,
+            metadata=metadata,
+            trajectory_key=str(trajectory_config.get("trajectory_key", "trip_id")),
+            entity_table=str(trajectory_config.get("entity_table", "trips")),
+            segment_table=str(trajectory_config.get("segment_table", "segments")),
+            segment_key=str(trajectory_config.get("segment_key", "trip_id,segment_idx")),
+            trajectory_static_columns=tuple(
+                str(value) for value in trajectory_config.get("trajectory_static_columns", ())
+            ),
+            segment_varying_columns=tuple(
+                str(value) for value in trajectory_config.get("segment_varying_columns", ())
+            ),
+            srid=(
+                None
+                if trajectory_config.get("srid") is None
+                else int(trajectory_config.get("srid"))
+            ),
+            source_segments_path=segments_path,
+            config_path=Path(args.config),
+            force_rebuild=bool(args.force_rebuild_index),
+        )
 
     stats = preparation_stats(
         metadata=metadata,
@@ -197,6 +203,7 @@ def main() -> None:
             "staging_directory": str(staging),
             "trajectory_index_path": str(index_dir),
             "trajectory_index_segment_count": compact_manifest["segment_count"],
+            "trajectory_index_preparation_skipped": bool(args.skip_trajectory_index),
             "preparation_seconds": float(time.perf_counter() - started),
             "materialized_all_segment_rows": bool(int(args.sample_rows) <= 0),
         }
@@ -210,6 +217,7 @@ def main() -> None:
     print(f"join_cardinality={segment_count}")
     print(f"sample_rows={len(encoded_rows)}")
     print(f"trajectory_index_path={index_dir}")
+    print(f"trajectory_index_preparation_skipped={bool(args.skip_trajectory_index)}")
     print(f"preparation_seconds={time.perf_counter() - started:.3f}")
 
 

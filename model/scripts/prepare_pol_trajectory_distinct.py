@@ -156,6 +156,7 @@ def _write_ordered_segments_index(
     if not path.exists():
         raise SystemExit(f"missing POL segments TSV: {path}")
     started = time.perf_counter()
+    source_fingerprint = _source_fingerprint(path)
     compatibility_hash = trajectory_index_compatibility_hash(
         metadata,
         predicate_columns=(),
@@ -180,6 +181,14 @@ def _write_ordered_segments_index(
                     manifest = json.loads(
                         (output_directory / "manifest.json").read_text(encoding="utf-8")
                     )
+                    stored_fingerprint = manifest.get("source_fingerprint")
+                    if stored_fingerprint != source_fingerprint:
+                        raise SystemExit(
+                            "existing trajectory index source fingerprint does not "
+                            "match the requested segments.tsv. Rerun with "
+                            "--force-rebuild to replace it after confirming no "
+                            "training job is using the directory."
+                        )
                     manifest["reused_existing_index"] = True
                     return manifest
                 raise SystemExit(
@@ -307,6 +316,7 @@ def _write_ordered_segments_index(
         "ordered_input_required": True,
         "source_segments_path": str(source_segments_path or path),
         "source_segments_size_bytes": int(path.stat().st_size),
+        "source_fingerprint": source_fingerprint,
         "config_path": None if config_path is None else str(config_path),
         "schema_hash": metadata.schema_hash or metadata.stable_schema_hash(),
         "mbr_arrays_persisted": True,
@@ -320,6 +330,16 @@ def _write_ordered_segments_index(
         shutil.rmtree(output_directory)
     tmp_directory.rename(output_directory)
     return manifest
+
+
+def _source_fingerprint(path: Path) -> dict[str, int | str]:
+    resolved = path.resolve()
+    stat = resolved.stat()
+    return {
+        "resolved_path": str(resolved),
+        "size_bytes": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
 
 
 def _scan_ordered_segments(path: Path) -> dict[str, float | int]:

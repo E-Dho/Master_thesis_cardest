@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ TRAJECTORY_TARGET_SEMANTICS_VERSION = "single_anchor_query_only_v2"
 TEMPORAL_OVERLAP_SEMANTICS_VERSION = "pol_half_open_overlap_v1"
 SPATIAL_INTERSECTS_SEMANTICS_VERSION = "line_segment_aabb_intersects_v1"
 TRAJECTORY_INDEX_FORMAT_VERSION = 3
+_SORTED_NUMERIC_DOMAIN_CACHE: dict[int, bool] = {}
 
 
 class UnsupportedTrajectoryContext(ValueError):
@@ -120,6 +122,8 @@ class SegmentSpatialPredicate:
 class SegmentMbrSpatialPredicate:
     """Segment MBR/rectangle overlap approximation for POL spatial predicates."""
 
+    # These four bounds are the canonical encoded predicate thresholds, not
+    # necessarily the original continuous workload rectangle.
     min_x: float
     min_y: float
     max_x: float
@@ -130,6 +134,32 @@ class SegmentMbrSpatialPredicate:
     min_y_column: str = "segments:seg_min_y"
     max_y_column: str = "segments:seg_max_y"
     semantics: Literal["mbr_overlap"] = "mbr_overlap"
+    physical_min_x: float | None = None
+    physical_min_y: float | None = None
+    physical_max_x: float | None = None
+    physical_max_y: float | None = None
+    zero_support: bool = False
+
+
+@dataclass(frozen=True)
+class CanonicalSegmentMbrPredicate:
+    """Domain-literal MBR predicate thresholds for the four AR tokens."""
+
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+    min_x_literal: Any | None
+    min_y_literal: Any | None
+    max_x_literal: Any | None
+    max_y_literal: Any | None
+    physical_min_x: float
+    physical_min_y: float
+    physical_max_x: float
+    physical_max_y: float
+    zero_support: bool = False
+    zero_support_column: str | None = None
+    zero_support_token: PredicateToken | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +258,103 @@ def semantic_owned_columns(query: TrajectoryQuerySemantics | None) -> frozenset[
     return frozenset(owned)
 
 
+def canonicalize_segment_mbr_predicate(
+    metadata: ModelMetadata,
+    *,
+    min_x_column: str,
+    max_x_column: str,
+    min_y_column: str,
+    max_y_column: str,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+) -> CanonicalSegmentMbrPredicate:
+    """Snap a physical rectangle to exact MBR column-domain literals.
+
+    The AR encoding for MBR overlap is:
+
+    ``seg_min_x <= x_u'`` where ``x_u'`` is the greatest domain value no
+    larger than the physical upper x-bound, and ``seg_max_x >= x_l'`` where
+    ``x_l'`` is the smallest domain value no smaller than the physical lower
+    x-bound.  The y-dimension follows the same rule.
+    """
+
+    physical_min_x, physical_max_x = sorted((float(min_x), float(max_x)))
+    physical_min_y, physical_max_y = sorted((float(min_y), float(max_y)))
+    upper_x = _floor_domain_literal(metadata, min_x_column, physical_max_x)
+    lower_x = _ceil_domain_literal(metadata, max_x_column, physical_min_x)
+    upper_y = _floor_domain_literal(metadata, min_y_column, physical_max_y)
+    lower_y = _ceil_domain_literal(metadata, max_y_column, physical_min_y)
+    if upper_x is None:
+        return _zero_support_mbr_predicate(
+            metadata,
+            min_x_column,
+            PredicateOp.LESS_THAN,
+            physical_min_x,
+            physical_min_y,
+            physical_max_x,
+            physical_max_y,
+        )
+    if lower_x is None:
+        return _zero_support_mbr_predicate(
+            metadata,
+            max_x_column,
+            PredicateOp.GREATER_THAN,
+            physical_min_x,
+            physical_min_y,
+            physical_max_x,
+            physical_max_y,
+        )
+    if upper_y is None:
+        return _zero_support_mbr_predicate(
+            metadata,
+            min_y_column,
+            PredicateOp.LESS_THAN,
+            physical_min_x,
+            physical_min_y,
+            physical_max_x,
+            physical_max_y,
+        )
+    if lower_y is None:
+        return _zero_support_mbr_predicate(
+            metadata,
+            max_y_column,
+            PredicateOp.GREATER_THAN,
+            physical_min_x,
+            physical_min_y,
+            physical_max_x,
+            physical_max_y,
+        )
+    lower_x_value, lower_x_literal = lower_x
+    upper_x_value, upper_x_literal = upper_x
+    lower_y_value, lower_y_literal = lower_y
+    upper_y_value, upper_y_literal = upper_y
+    return CanonicalSegmentMbrPredicate(
+        min_x=lower_x_value,
+        min_y=lower_y_value,
+        max_x=upper_x_value,
+        max_y=upper_y_value,
+        min_x_literal=lower_x_literal,
+        min_y_literal=lower_y_literal,
+        max_x_literal=upper_x_literal,
+        max_y_literal=upper_y_literal,
+        physical_min_x=physical_min_x,
+        physical_min_y=physical_min_y,
+        physical_max_x=physical_max_x,
+        physical_max_y=physical_max_y,
+    )
+
+
+def trajectory_query_has_zero_support(query: TrajectoryQuerySemantics | None) -> bool:
+    if query is None:
+        return False
+    for spatial in query.spatial_predicates:
+        if isinstance(spatial, SegmentMbrSpatialPredicate) and spatial.zero_support:
+            return True
+    return False
+
+
 def context_satisfies_row_with_trajectory_semantics(
     context: GeneratedTrainingContext,
     encoded_row: np.ndarray,
@@ -293,6 +420,8 @@ def context_satisfies_row_with_trajectory_semantics(
             ):
                 return False
         elif isinstance(spatial, SegmentMbrSpatialPredicate):
+            if spatial.zero_support:
+                return False
             if not bool(
                 segment_mbr_rectangle_overlap_mask(
                     np.asarray([_decoded_row_value(metadata, encoded_row, spatial.min_x_column)], dtype=float),
@@ -309,6 +438,169 @@ def context_satisfies_row_with_trajectory_semantics(
         else:
             raise UnsupportedTrajectoryContext("unsupported_spatial_semantics")
     return True
+
+
+def _floor_domain_literal(
+    metadata: ModelMetadata,
+    column_name: str,
+    upper: float,
+) -> tuple[float, Any] | None:
+    column = metadata.columns[metadata.column_index(column_name)]
+    fast = _floor_sorted_numeric_domain_literal(column.domain, upper)
+    if fast is not None:
+        return fast
+    return _floor_domain_literal_by_scan(column.domain, upper)
+
+
+def _ceil_domain_literal(
+    metadata: ModelMetadata,
+    column_name: str,
+    lower: float,
+) -> tuple[float, Any] | None:
+    column = metadata.columns[metadata.column_index(column_name)]
+    fast = _ceil_sorted_numeric_domain_literal(column.domain, lower)
+    if fast is not None:
+        return fast
+    return _ceil_domain_literal_by_scan(column.domain, lower)
+
+
+def _floor_sorted_numeric_domain_literal(
+    domain: tuple[Any, ...],
+    upper: float,
+) -> tuple[float, Any] | None:
+    if not _is_sorted_numeric_domain(domain):
+        return None
+    try:
+        index = bisect_right(domain, upper) - 1
+    except TypeError:
+        return None
+    if index < 0:
+        return None
+    literal = domain[index]
+    try:
+        numeric = float(literal)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= upper:
+        return numeric, literal
+    return None
+
+
+def _ceil_sorted_numeric_domain_literal(
+    domain: tuple[Any, ...],
+    lower: float,
+) -> tuple[float, Any] | None:
+    if not _is_sorted_numeric_domain(domain):
+        return None
+    try:
+        index = bisect_left(domain, lower)
+    except TypeError:
+        return None
+    if index >= len(domain):
+        return None
+    literal = domain[index]
+    try:
+        numeric = float(literal)
+    except (TypeError, ValueError):
+        return None
+    if numeric >= lower:
+        return numeric, literal
+    return None
+
+
+def _is_sorted_numeric_domain(domain: tuple[Any, ...]) -> bool:
+    key = id(domain)
+    cached = _SORTED_NUMERIC_DOMAIN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    previous = None
+    result = bool(domain)
+    for value in domain:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            result = False
+            break
+        if previous is not None and numeric < previous:
+            result = False
+            break
+        previous = numeric
+    _SORTED_NUMERIC_DOMAIN_CACHE[key] = result
+    return result
+
+
+def _floor_domain_literal_by_scan(
+    domain: tuple[Any, ...],
+    upper: float,
+) -> tuple[float, Any] | None:
+    best: tuple[float, Any] | None = None
+    for numeric, literal in _numeric_domain_literals(domain):
+        if numeric <= upper and (best is None or numeric > best[0]):
+            best = (numeric, literal)
+    return best
+
+
+def _ceil_domain_literal_by_scan(
+    domain: tuple[Any, ...],
+    lower: float,
+) -> tuple[float, Any] | None:
+    best: tuple[float, Any] | None = None
+    for numeric, literal in _numeric_domain_literals(domain):
+        if numeric >= lower and (best is None or numeric < best[0]):
+            best = (numeric, literal)
+    return best
+
+
+def _numeric_domain_literals(domain: tuple[Any, ...]) -> tuple[tuple[float, Any], ...]:
+    values: list[tuple[float, Any]] = []
+    seen: set[float] = set()
+    for literal in domain:
+        if isinstance(literal, str) and literal.startswith("__"):
+            continue
+        try:
+            numeric = float(literal)
+        except (TypeError, ValueError):
+            continue
+        if numeric in seen:
+            continue
+        seen.add(numeric)
+        values.append((numeric, literal))
+    values.sort(key=lambda item: item[0])
+    return tuple(values)
+
+
+def _zero_support_mbr_predicate(
+    metadata: ModelMetadata,
+    column_name: str,
+    op: PredicateOp,
+    physical_min_x: float,
+    physical_min_y: float,
+    physical_max_x: float,
+    physical_max_y: float,
+) -> CanonicalSegmentMbrPredicate:
+    column = metadata.columns[metadata.column_index(column_name)]
+    candidates = _numeric_domain_literals(column.domain)
+    if not candidates:
+        raise ValueError(f"MBR column {column_name!r} has no numeric domain literals")
+    numeric, literal = candidates[0] if op == PredicateOp.LESS_THAN else candidates[-1]
+    token = PredicateToken(op, value=literal)
+    return CanonicalSegmentMbrPredicate(
+        min_x=physical_min_x,
+        min_y=physical_min_y,
+        max_x=physical_max_x,
+        max_y=physical_max_y,
+        min_x_literal=None,
+        min_y_literal=None,
+        max_x_literal=None,
+        max_y_literal=None,
+        physical_min_x=physical_min_x,
+        physical_min_y=physical_min_y,
+        physical_max_x=physical_max_x,
+        physical_max_y=physical_max_y,
+        zero_support=True,
+        zero_support_column=column_name,
+        zero_support_token=token,
+    )
 
 
 def _decoded_row_value(metadata: ModelMetadata, encoded_row: np.ndarray, column_name: str) -> Any:
@@ -655,6 +947,9 @@ class TrajectorySegmentIndex:
                         spatial.max_y,
                     )
                 elif isinstance(spatial, SegmentMbrSpatialPredicate):
+                    if spatial.zero_support:
+                        mask &= np.zeros(encoded_rows.shape[0], dtype=bool)
+                        continue
                     mask &= segment_mbr_rectangle_overlap_mask(
                         self._decoded_column(encoded_rows, spatial.min_x_column).astype(float),
                         self._decoded_column(encoded_rows, spatial.max_x_column).astype(float),
@@ -804,9 +1099,46 @@ class CompactTrajectorySegmentIndex:
     )
     srid: int | None = None
     format_version: int = TRAJECTORY_INDEX_FORMAT_VERSION
+    preloaded: bool = False
+    _segment_arrays_by_name: Mapping[str, np.ndarray] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_segment_arrays_by_name",
+            {
+                "segments:segment_idx": self.segment_idx,
+                "segments:t_s": self.t_s,
+                "segments:t_e": self.t_e,
+                "segments:s_x": self.s_x,
+                "segments:s_y": self.s_y,
+                "segments:e_x": self.e_x,
+                "segments:e_y": self.e_y,
+                "segments:seg_min_x": self.seg_min_x,
+                "segments:seg_max_x": self.seg_max_x,
+                "segments:seg_min_y": self.seg_min_y,
+                "segments:seg_max_y": self.seg_max_y,
+                "segment_idx": self.segment_idx,
+                "t_s": self.t_s,
+                "t_e": self.t_e,
+                "s_x": self.s_x,
+                "s_y": self.s_y,
+                "e_x": self.e_x,
+                "e_y": self.e_y,
+                "seg_min_x": self.seg_min_x,
+                "seg_max_x": self.seg_max_x,
+                "seg_min_y": self.seg_min_y,
+                "seg_max_y": self.seg_max_y,
+            },
+        )
 
     @classmethod
-    def from_directory(cls, directory: str | Path) -> "CompactTrajectorySegmentIndex":
+    def from_directory(
+        cls,
+        directory: str | Path,
+        *,
+        preload: bool = False,
+    ) -> "CompactTrajectorySegmentIndex":
         root = Path(directory)
         manifest_path = root / "manifest.json"
         if not manifest_path.exists():
@@ -856,21 +1188,22 @@ class CompactTrajectorySegmentIndex:
             trajectory_static_columns + segment_varying_columns,
         )
         arrays = manifest.get("arrays", {})
+        mmap_mode = None if preload else "r"
         return cls(
             metadata=metadata,
-            trajectory_ids=np.load(root / arrays.get("trajectory_ids", "trajectory_ids.npy"), mmap_mode="r"),
-            offsets=np.load(root / arrays.get("offsets", "offsets.npy"), mmap_mode="r"),
-            segment_idx=np.load(root / arrays.get("segment_idx", "segment_idx.npy"), mmap_mode="r"),
-            t_s=np.load(root / arrays.get("t_s", "t_s.npy"), mmap_mode="r"),
-            t_e=np.load(root / arrays.get("t_e", "t_e.npy"), mmap_mode="r"),
-            s_x=np.load(root / arrays.get("s_x", "s_x.npy"), mmap_mode="r"),
-            s_y=np.load(root / arrays.get("s_y", "s_y.npy"), mmap_mode="r"),
-            e_x=np.load(root / arrays.get("e_x", "e_x.npy"), mmap_mode="r"),
-            e_y=np.load(root / arrays.get("e_y", "e_y.npy"), mmap_mode="r"),
-            seg_min_x=np.load(root / arrays.get("seg_min_x", "seg_min_x.npy"), mmap_mode="r"),
-            seg_max_x=np.load(root / arrays.get("seg_max_x", "seg_max_x.npy"), mmap_mode="r"),
-            seg_min_y=np.load(root / arrays.get("seg_min_y", "seg_min_y.npy"), mmap_mode="r"),
-            seg_max_y=np.load(root / arrays.get("seg_max_y", "seg_max_y.npy"), mmap_mode="r"),
+            trajectory_ids=np.load(root / arrays.get("trajectory_ids", "trajectory_ids.npy"), mmap_mode=mmap_mode),
+            offsets=np.load(root / arrays.get("offsets", "offsets.npy"), mmap_mode=mmap_mode),
+            segment_idx=np.load(root / arrays.get("segment_idx", "segment_idx.npy"), mmap_mode=mmap_mode),
+            t_s=np.load(root / arrays.get("t_s", "t_s.npy"), mmap_mode=mmap_mode),
+            t_e=np.load(root / arrays.get("t_e", "t_e.npy"), mmap_mode=mmap_mode),
+            s_x=np.load(root / arrays.get("s_x", "s_x.npy"), mmap_mode=mmap_mode),
+            s_y=np.load(root / arrays.get("s_y", "s_y.npy"), mmap_mode=mmap_mode),
+            e_x=np.load(root / arrays.get("e_x", "e_x.npy"), mmap_mode=mmap_mode),
+            e_y=np.load(root / arrays.get("e_y", "e_y.npy"), mmap_mode=mmap_mode),
+            seg_min_x=np.load(root / arrays.get("seg_min_x", "seg_min_x.npy"), mmap_mode=mmap_mode),
+            seg_max_x=np.load(root / arrays.get("seg_max_x", "seg_max_x.npy"), mmap_mode=mmap_mode),
+            seg_min_y=np.load(root / arrays.get("seg_min_y", "seg_min_y.npy"), mmap_mode=mmap_mode),
+            seg_max_y=np.load(root / arrays.get("seg_max_y", "seg_max_y.npy"), mmap_mode=mmap_mode),
             trajectory_key=trajectory_key,
             compatibility_hash=stored_hash,
             entity_table=entity_table,
@@ -880,6 +1213,7 @@ class CompactTrajectorySegmentIndex:
             segment_varying_columns=segment_varying_columns,
             srid=srid,
             format_version=format_version,
+            preloaded=preload,
         )
 
     @property
@@ -1112,6 +1446,9 @@ class CompactTrajectorySegmentIndex:
                         spatial.max_y,
                     )
                 elif isinstance(spatial, SegmentMbrSpatialPredicate):
+                    if spatial.zero_support:
+                        mask &= np.zeros(stop - start, dtype=bool)
+                        continue
                     mask &= segment_mbr_rectangle_overlap_mask(
                         self._required_segment_values(spatial.min_x_column, start, stop),
                         self._required_segment_values(spatial.max_x_column, start, stop),
@@ -1133,31 +1470,7 @@ class CompactTrajectorySegmentIndex:
         return values
 
     def _segment_values(self, column_name: str, start: int, stop: int) -> np.ndarray | None:
-        by_column: Mapping[str, np.ndarray] = {
-            "segments:segment_idx": self.segment_idx,
-            "segments:t_s": self.t_s,
-            "segments:t_e": self.t_e,
-            "segments:s_x": self.s_x,
-            "segments:s_y": self.s_y,
-            "segments:e_x": self.e_x,
-            "segments:e_y": self.e_y,
-            "segments:seg_min_x": self.seg_min_x,
-            "segments:seg_max_x": self.seg_max_x,
-            "segments:seg_min_y": self.seg_min_y,
-            "segments:seg_max_y": self.seg_max_y,
-            "segment_idx": self.segment_idx,
-            "t_s": self.t_s,
-            "t_e": self.t_e,
-            "s_x": self.s_x,
-            "s_y": self.s_y,
-            "e_x": self.e_x,
-            "e_y": self.e_y,
-            "seg_min_x": self.seg_min_x,
-            "seg_max_x": self.seg_max_x,
-            "seg_min_y": self.seg_min_y,
-            "seg_max_y": self.seg_max_y,
-        }
-        array = by_column.get(column_name)
+        array = self._segment_arrays_by_name.get(column_name)
         if array is None:
             return None
         return np.asarray(array[start:stop])
@@ -1471,8 +1784,10 @@ def segment_mbr_rectangle_overlap_mask(
     seg_max_x = np.asarray(seg_max_x, dtype=float)
     seg_min_y = np.asarray(seg_min_y, dtype=float)
     seg_max_y = np.asarray(seg_max_y, dtype=float)
-    min_x, max_x = sorted((float(min_x), float(max_x)))
-    min_y, max_y = sorted((float(min_y), float(max_y)))
+    min_x = float(min_x)
+    min_y = float(min_y)
+    max_x = float(max_x)
+    max_y = float(max_y)
     return (
         (seg_min_x <= max_x)
         & (seg_max_x >= min_x)
