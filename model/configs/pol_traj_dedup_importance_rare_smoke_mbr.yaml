@@ -188,3 +188,4 @@ validation:
 
 logging:
   output_directory: model/runs/pol_traj_dedup_importance_rare_smoke_mbr
+  progress_interval_steps: 1

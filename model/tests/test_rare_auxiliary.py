@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import importlib.util
+from unittest import mock
 
 import numpy as np
 
@@ -30,6 +31,7 @@ if importlib.util.find_spec("torch") is not None:
         train_resmade_sample_source,
     )
     from model.src.training.torch_losses import torch_weighted_per_head_cross_entropy
+    from model.src.model.resmade import PredicateResMADE
 else:
     torch = None
     auxiliary_eligibility_mask = None
@@ -38,6 +40,7 @@ else:
     rare_row_rng_seed = None
     train_resmade_sample_source = None
     torch_weighted_per_head_cross_entropy = None
+    PredicateResMADE = None
 
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
@@ -159,6 +162,11 @@ class RareAuxiliaryTest(unittest.TestCase):
             source = sample_source_from_config(config)
             result = train_resmade_sample_source(source, config)
             summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+            metrics = [
+                json.loads(line)
+                for line in result.metrics_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
         self.assertIn("rare_auxiliary", summary)
         self.assertIn(
             "whole_run_auxiliary_column_diagnostics",
@@ -169,7 +177,49 @@ class RareAuxiliaryTest(unittest.TestCase):
             summary["rare_auxiliary"],
         )
         self.assertIn("total_rare_context_count", summary["rare_auxiliary"])
+        self.assertIn("phase_timing_summary", summary)
+        self.assertIn("predicate_context_generation", summary["phase_timing_summary"])
+        self.assertTrue(metrics)
+        self.assertIn("phase_timings", metrics[-1])
+        self.assertIn("main_forward", metrics[-1]["phase_timings"])
         self.assertGreater(result.total_sampled_tuples, 0)
+
+    def test_main_and_rare_paths_share_one_forward_per_optimizer_step(self) -> None:
+        config = self._config()
+        config["training"]["steps_per_epoch"] = 1
+        config["training"]["validation_interval_steps"] = 1
+        config["training"]["checkpoint_interval_steps"] = 0
+        config["validation"] = {"enabled": False}
+        call_count = 0
+        original_forward = PredicateResMADE.forward_with_auxiliary
+
+        def counted_forward(model, token_ids):
+            nonlocal call_count
+            call_count += 1
+            return original_forward(model, token_ids)
+
+        with tempfile.TemporaryDirectory() as output_directory:
+            config["logging"]["output_directory"] = output_directory
+            source = sample_source_from_config(config)
+            with mock.patch.object(
+                PredicateResMADE,
+                "forward_with_auxiliary",
+                counted_forward,
+            ):
+                result = train_resmade_sample_source(source, config)
+            metrics = [
+                json.loads(line)
+                for line in result.metrics_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertEqual(call_count, 1)
+        self.assertEqual(len(metrics), 1)
+        self.assertAlmostEqual(
+            metrics[0]["loss"],
+            metrics[0]["uniform_loss"] + metrics[0]["auxiliary_loss_scaled"],
+            places=5,
+        )
 
     def test_beta_zero_skips_rare_sampling_and_preserves_no_rho_main_path(self) -> None:
         config = self._config()

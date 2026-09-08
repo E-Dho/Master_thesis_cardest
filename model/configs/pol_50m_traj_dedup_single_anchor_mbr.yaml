@@ -174,3 +174,4 @@ validation:
 
 logging:
   output_directory: model/runs/pol_50m_traj_dedup_single_anchor_mbr
+  progress_interval_steps: 25

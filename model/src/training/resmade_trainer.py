@@ -101,6 +101,7 @@ class TrainingStepResult:
     predicate_context_diagnostics: dict[str, Any]
     rare_auxiliary: dict[str, Any] | None = None
     trajectory_distinct: dict[str, Any] | None = None
+    phase_timings: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -409,6 +410,58 @@ def rare_predicate_rng_seed(generator_seed: int, global_step: int) -> int:
     return int(generator_seed) + 2_000_000 + int(global_step)
 
 
+class _PhaseTimer:
+    def __init__(self) -> None:
+        self.timings: dict[str, float] = {}
+
+    def add(self, name: str, seconds: float) -> None:
+        self.timings[name] = float(self.timings.get(name, 0.0) + seconds)
+
+    def run(self, name: str, fn: object, *args: object, **kwargs: object) -> object:
+        started = perf_counter()
+        try:
+            return fn(*args, **kwargs)  # type: ignore[misc]
+        finally:
+            self.add(name, perf_counter() - started)
+
+
+def _phase_summary(values: list[dict[str, float]]) -> dict[str, dict[str, float]]:
+    keys = sorted({key for timings in values for key in timings})
+    summary: dict[str, dict[str, float]] = {}
+    for key in keys:
+        series = [float(timing.get(key, 0.0)) for timing in values]
+        summary[key] = {
+            "last": float(series[-1]),
+            "mean": float(np.mean(series)),
+            "min": float(np.min(series)),
+            "max": float(np.max(series)),
+            "sum": float(np.sum(series)),
+        }
+    return summary
+
+
+def _format_phase_timings(timings: dict[str, float]) -> str:
+    preferred = (
+        "batch_sampling",
+        "predicate_context_generation",
+        "token_encoding",
+        "main_forward",
+        "main_factorized_anpm_loss",
+        "trajectory_target_generation",
+        "rare_sampling_context_generation",
+        "rare_forward_loss",
+        "backward",
+        "diagnostics",
+        "optimizer_step",
+    )
+    parts = [f"{key}={timings[key]:.3f}s" for key in preferred if key in timings]
+    parts.extend(
+        f"{key}={timings[key]:.3f}s"
+        for key in sorted(set(timings) - set(preferred))
+    )
+    return ", ".join(parts)
+
+
 def build_resmade_from_config(metadata: object, config: dict[str, Any]) -> PredicateResMADE:
     model_config = config["model"]
     predicate_encoding = config.get("predicate_encoding", {})
@@ -683,6 +736,13 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     validation_history: list[dict[str, Any]] = []
     validation_fresh_sampler_rows = 0
     validation_fixture_rows_reused = 0
+    phase_timing_history: list[dict[str, float]] = []
+    progress_interval = int(
+        logging.get("progress_interval_steps", training.get("progress_interval_steps", 25))
+        or 0
+    )
+    predicate_config = _predicate_generation_config(config)
+    context_generator = PredicateTrainingContextGenerator(predicate_config)
     if validation_enabled:
         if validation_interval <= 0:
             raise ValueError("validation.enabled=true requires validation.interval_steps > 0")
@@ -693,9 +753,13 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         torch.cuda.reset_peak_memory_stats()
     for epoch in range(int(training["epochs"])):
         for step_in_epoch in range(int(training["steps_per_epoch"])):
+            batch_started = perf_counter()
             batch = sample_source.batches(batch_size, seed=seed + global_step)
+            batch_sampling_seconds = perf_counter() - batch_started
             fresh_sampler_rows += int(getattr(batch, "fresh_rows_drawn", 0))
             fixture_rows_reused += int(getattr(batch, "fixture_rows_reused", 0))
+            next_step = global_step + 1
+            diagnostic_step = bool(metrics_interval and next_step % metrics_interval == 0)
             step_result = _train_one_batch(
                 model,
                 optimizer,
@@ -706,6 +770,9 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 device,
                 sample_source=sample_source,
                 global_step=global_step,
+                context_generator=context_generator,
+                compute_expensive_diagnostics=diagnostic_step,
+                batch_sampling_seconds=batch_sampling_seconds,
             )
             loss = step_result.loss
             last_loss = loss
@@ -718,6 +785,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 first_auxiliary_loss_unscaled = step_result.auxiliary_loss_unscaled
                 first_auxiliary_loss_scaled = step_result.auxiliary_loss_scaled
             global_step += 1
+            phase_timing_history.append(step_result.phase_timings)
             for fanout_name, fanout_ess in step_result.fanout_effective_sample_size.items():
                 fanout_ess_values[fanout_name].append(float(fanout_ess))
             for fanout_name, fanout_ess in step_result.fanout_inv_only_effective_sample_size.items():
@@ -729,8 +797,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             total_indicator_contradictions += step_result.included_indicator_contradictions
             _merge_coverage(aggregate_token_coverage, step_result.predicate_token_coverage)
             _merge_literal_occurrences(aggregate_literal_occurrences, step_result.literal_token_occurrences)
-            last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
-            last_context_diagnostics = step_result.predicate_context_diagnostics
+            if step_result.predicate_embedding_gradient_coverage:
+                last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
+            if step_result.predicate_context_diagnostics:
+                last_context_diagnostics = step_result.predicate_context_diagnostics
             last_rare_auxiliary_stats = step_result.rare_auxiliary or {"enabled": False}
             last_trajectory_distinct_stats = (
                 step_result.trajectory_distinct or {"enabled": False}
@@ -785,6 +855,17 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         "common_auxiliary_fanout_token_signatures", {}
                     ),
                 )
+            if progress_interval and global_step % progress_interval == 0:
+                print(
+                    "[train_progress] "
+                    f"step={global_step} loss={loss:.6f} "
+                    f"uniform_loss={step_result.uniform_loss:.6f} "
+                    f"auxiliary_loss_scaled={step_result.auxiliary_loss_scaled:.6f} "
+                    f"rejected={step_result.rejected_unsatisfied_contexts} "
+                    f"indicator_contradictions={step_result.included_indicator_contradictions} "
+                    f"{_format_phase_timings(step_result.phase_timings)}",
+                    flush=True,
+                )
             interval = int(training.get("checkpoint_interval_steps", 0) or 0)
             if interval and global_step % interval == 0:
                 _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config)
@@ -820,6 +901,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     "predicate_embedding_gradient_coverage": last_gradient_coverage,
                     "rare_auxiliary": last_rare_auxiliary_stats,
                     "trajectory_distinct": last_trajectory_distinct_stats,
+                    "phase_timings": step_result.phase_timings,
+                    "phase_timing_summary": _phase_summary(phase_timing_history),
                 }
                 early_stopping_monitor_value: float | None = None
                 if validation_enabled and global_step % validation_interval == 0:
@@ -1083,6 +1166,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "last_predicate_embedding_gradient_coverage": last_gradient_coverage,
         "columns_with_unseen_evaluation_token_types": [],
         "training_seconds": training_seconds,
+        "phase_timing_summary": _phase_summary(phase_timing_history),
         "fanout_effective_sample_size": fanout_ess_summary,
         "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
         "importance_sampling": importance_summary,
@@ -1282,14 +1366,22 @@ def _train_one_batch(
     *,
     sample_source: object | None = None,
     global_step: int,
+    context_generator: PredicateTrainingContextGenerator | None = None,
+    compute_expensive_diagnostics: bool = True,
+    batch_sampling_seconds: float = 0.0,
 ) -> TrainingStepResult:
     import torch
 
+    timer = _PhaseTimer()
+    timer.add("batch_sampling", batch_sampling_seconds)
     predicate_config = _predicate_generation_config(config)
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
     rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
-    context_generator = PredicateTrainingContextGenerator(predicate_config)
-    contexts, target_rows, generation_stats = context_generator.generate_batch(
+    if context_generator is None:
+        context_generator = PredicateTrainingContextGenerator(predicate_config)
+    contexts, target_rows, generation_stats = timer.run(
+        "predicate_context_generation",
+        context_generator.generate_batch,
         encoded_rows=batch.encoded_values,
         metadata=metadata,
         rng=rng,
@@ -1299,25 +1391,30 @@ def _train_one_batch(
         [context.tokens for context in contexts],
         metadata,
     )
-    literal_occurrences = literal_token_occurrences(
-        [context.tokens for context in contexts],
-        metadata,
-    )
-    context_diagnostics = predicate_context_diagnostics(contexts, metadata)
-    context_diagnostics["predicate_probability_configuration"] = (
-        context_generator.probability_diagnostics()
-    )
-    context_diagnostics["table_subset_sampling_mode"] = (
-        context_generator.table_subset_sampling
-    )
-    context_diagnostics["upstream_neurocard_table_dropout_probability_law"] = (
-        "num_dropped_tables ~ Uniform{1,...,num_tables-1}; "
-        "P(drop table | num_dropped_tables)=num_dropped_tables/num_tables; "
-        "primary/root table forced included"
-    )
-    context_diagnostics["rooted_adjustment_applied"] = (
-        context_generator.table_subset_sampling == "neurocard_table_dropout_rooted"
-    )
+    literal_occurrences: dict[str, dict[str, dict[str, int]]] = {}
+    context_diagnostics: dict[str, Any] = {}
+    if compute_expensive_diagnostics:
+        diag_started = perf_counter()
+        literal_occurrences = literal_token_occurrences(
+            [context.tokens for context in contexts],
+            metadata,
+        )
+        context_diagnostics = predicate_context_diagnostics(contexts, metadata)
+        context_diagnostics["predicate_probability_configuration"] = (
+            context_generator.probability_diagnostics()
+        )
+        context_diagnostics["table_subset_sampling_mode"] = (
+            context_generator.table_subset_sampling
+        )
+        context_diagnostics["upstream_neurocard_table_dropout_probability_law"] = (
+            "num_dropped_tables ~ Uniform{1,...,num_tables-1}; "
+            "P(drop table | num_dropped_tables)=num_dropped_tables/num_tables; "
+            "primary/root table forced included"
+        )
+        context_diagnostics["rooted_adjustment_applied"] = (
+            context_generator.table_subset_sampling == "neurocard_table_dropout_rooted"
+        )
+        timer.add("diagnostics", perf_counter() - diag_started)
     inv_only_weights = cumulative_inverse_fanout_weights(
         target_rows,
         token_rows,
@@ -1365,62 +1462,22 @@ def _train_one_batch(
                 rho=rho,
                 batch_metadata=batch.importance_metadata,
             )
-    token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)
-    targets = torch.tensor(target_rows, dtype=torch.long, device=device)
-    head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
-    optimizer.zero_grad(set_to_none=True)
-    model_outputs = model.forward_with_auxiliary(token_ids)
-    logits = model_outputs.ar_outputs
-    split_head_outputs = model.split_head_outputs(logits)
-    output_embeddings = (
-        [embedding.weight for embedding in model.output_embeddings]
-        if getattr(model.config, "output_encoding", "one_hot") == "embed"
-        else None
-    )
-    breakdown = torch_weighted_per_head_cross_entropy(
-        logits,
-        targets,
-        head_weights,
-        metadata,
-        anpm_decoders=getattr(model, "anpm_decoders", None),
-        split_head_outputs=split_head_outputs,
-        output_embeddings=output_embeddings,
-        head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
-        mask_invalid_factor_combinations=bool(
-            config.get("anpm", {}).get("mask_invalid_combinations", True)
-        )
-    )
-    total_loss = breakdown.total_loss
-    trajectory_distinct_stats: dict[str, Any] = {"enabled": False}
-    trajectory_config = TrajectoryDistinctConfig.from_dict(
-        config.get("trajectory_distinct", {})
-    )
-    if trajectory_config.enabled and trajectory_config.loss_weight > 0.0:
-        if model_outputs.traj_dedup_factor is None:
-            raise ValueError("trajectory_distinct.enabled requires model trajectory head")
-        (
-            traj_loss,
-            trajectory_distinct_stats,
-        ) = trajectory_dedup_loss_for_batch(
-            predictions=model_outputs.traj_dedup_factor,
-            batch=batch,
-            contexts=contexts,
-            target_rows=target_rows,
-            token_rows=token_rows,
-            generation_stats=generation_stats,
-            metadata=metadata,
-            config=config,
-            sample_source=sample_source,
-            device=device,
-        )
-        total_loss = total_loss + trajectory_config.loss_weight * traj_loss
     rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
     rare_token_rows: list[list[PredicateToken]] = []
-    rare_token_ids = None
+    rare_batch: FullJoinBatch | None = None
+    rare_contexts: list[GeneratedTrainingContext] = []
+    rare_target_rows: np.ndarray | None = None
+    rare_generation_stats: object | None = None
+    selected_strata: tuple[object, ...] = ()
+    rare_selected_column_indices: np.ndarray | None = None
+    eligibility: np.ndarray | None = None
+    rare_inv_only_weights: np.ndarray | None = None
+    rare_weights: np.ndarray | None = None
     rare_config = dict(config.get("rare_auxiliary", {}))
     rare_enabled = bool(rare_config.get("enabled", False))
     rare_beta = float(rare_config.get("beta", 0.0) or 0.0)
     if rare_enabled and rare_beta > 0.0:
+        rare_started = perf_counter()
         rare_batch_size = int(rare_config.get("batch_size", 0) or 0)
         if rare_batch_size <= 0:
             raise ValueError("rare_auxiliary.batch_size must be positive when enabled")
@@ -1465,10 +1522,96 @@ def _train_one_batch(
             row_count=rare_target_rows.shape[0],
         )
         rare_weights = rare_inv_only_weights * eligibility.astype(float)
-        rare_token_ids = encode_tokens_tensor(rare_token_rows, vocabularies, device=device)
-        rare_targets = torch.tensor(rare_target_rows, dtype=torch.long, device=device)
-        rare_head_weights = torch.tensor(rare_weights, dtype=torch.float32, device=device)
-        rare_logits = model(rare_token_ids)
+        timer.add("rare_sampling_context_generation", perf_counter() - rare_started)
+
+    token_encode_started = perf_counter()
+    all_token_rows = token_rows + rare_token_rows
+    all_token_ids = encode_tokens_tensor(all_token_rows, vocabularies, device=device)
+    main_count = len(token_rows)
+    token_ids = all_token_ids[:main_count]
+    rare_token_ids = all_token_ids[main_count:] if rare_token_rows else None
+    targets = torch.tensor(target_rows, dtype=torch.long, device=device)
+    head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
+    rare_targets = (
+        torch.tensor(rare_target_rows, dtype=torch.long, device=device)
+        if rare_target_rows is not None
+        else None
+    )
+    rare_head_weights = (
+        torch.tensor(rare_weights, dtype=torch.float32, device=device)
+        if rare_weights is not None
+        else None
+    )
+    timer.add("token_encoding", perf_counter() - token_encode_started)
+
+    optimizer.zero_grad(set_to_none=True)
+    forward_started = perf_counter()
+    model_outputs = model.forward_with_auxiliary(all_token_ids)
+    timer.add("main_forward", perf_counter() - forward_started)
+    logits = model_outputs.ar_outputs[:main_count]
+    split_head_outputs = model.split_head_outputs(logits)
+    output_embeddings = (
+        [embedding.weight for embedding in model.output_embeddings]
+        if getattr(model.config, "output_encoding", "one_hot") == "embed"
+        else None
+    )
+    main_loss_started = perf_counter()
+    breakdown = torch_weighted_per_head_cross_entropy(
+        logits,
+        targets,
+        head_weights,
+        metadata,
+        anpm_decoders=getattr(model, "anpm_decoders", None),
+        split_head_outputs=split_head_outputs,
+        output_embeddings=output_embeddings,
+        head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
+        mask_invalid_factor_combinations=bool(
+            config.get("anpm", {}).get("mask_invalid_combinations", True)
+        )
+    )
+    total_loss = breakdown.total_loss
+    timer.add("main_factorized_anpm_loss", perf_counter() - main_loss_started)
+
+    trajectory_distinct_stats: dict[str, Any] = {"enabled": False}
+    trajectory_config = TrajectoryDistinctConfig.from_dict(
+        config.get("trajectory_distinct", {})
+    )
+    if trajectory_config.enabled and trajectory_config.loss_weight > 0.0:
+        if model_outputs.traj_dedup_factor is None:
+            raise ValueError("trajectory_distinct.enabled requires model trajectory head")
+        traj_started = perf_counter()
+        (
+            traj_loss,
+            trajectory_distinct_stats,
+        ) = trajectory_dedup_loss_for_batch(
+            predictions=model_outputs.traj_dedup_factor[:main_count],
+            batch=batch,
+            contexts=contexts,
+            target_rows=target_rows,
+            token_rows=token_rows,
+            generation_stats=generation_stats,
+            metadata=metadata,
+            config=config,
+            sample_source=sample_source,
+            device=device,
+        )
+        total_loss = total_loss + trajectory_config.loss_weight * traj_loss
+        timer.add("trajectory_target_generation", perf_counter() - traj_started)
+
+    if rare_token_ids is not None:
+        if (
+            rare_batch is None
+            or rare_generation_stats is None
+            or rare_target_rows is None
+            or rare_targets is None
+            or rare_head_weights is None
+            or rare_selected_column_indices is None
+            or eligibility is None
+            or rare_inv_only_weights is None
+        ):
+            raise ValueError("rare auxiliary state is incomplete")
+        rare_loss_started = perf_counter()
+        rare_logits = model_outputs.ar_outputs[main_count:]
         rare_split_head_outputs = model.split_head_outputs(rare_logits)
         rare_breakdown = torch_weighted_per_head_cross_entropy(
             rare_logits,
@@ -1484,6 +1627,7 @@ def _train_one_batch(
             )
         )
         total_loss = total_loss + rare_beta * rare_breakdown.total_loss
+        timer.add("rare_forward_loss", perf_counter() - rare_loss_started)
         rare_auxiliary_stats = rare_auxiliary_diagnostics(
             metadata=metadata,
             beta=rare_beta,
@@ -1496,23 +1640,25 @@ def _train_one_batch(
             inv_only_weights=rare_inv_only_weights,
             rare_breakdown=rare_breakdown,
         )
+    backward_started = perf_counter()
     total_loss.backward()
-    all_token_rows = token_rows + rare_token_rows
-    all_token_ids = (
-        torch.cat([token_ids, rare_token_ids], dim=0)
-        if rare_token_ids is not None
-        else token_ids
-    )
-    gradient_coverage = _predicate_embedding_gradient_coverage(
-        model,
-        all_token_rows,
-        all_token_ids,
-        metadata,
-    )
+    timer.add("backward", perf_counter() - backward_started)
+    gradient_coverage: dict[str, Any] = {}
+    if compute_expensive_diagnostics:
+        diag_started = perf_counter()
+        gradient_coverage = _predicate_embedding_gradient_coverage(
+            model,
+            all_token_rows,
+            all_token_ids,
+            metadata,
+        )
+        timer.add("diagnostics", perf_counter() - diag_started)
     clip_norm = config["training"].get("gradient_clip_norm")
+    optimizer_started = perf_counter()
     if clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_norm))
     optimizer.step()
+    timer.add("optimizer_step", perf_counter() - optimizer_started)
     if not torch.isfinite(total_loss):
         raise ValueError("training loss became non-finite")
     fanout_effective_sample_sizes = {}
@@ -1548,6 +1694,7 @@ def _train_one_batch(
         predicate_embedding_gradient_coverage=gradient_coverage,
         rare_auxiliary=rare_auxiliary_stats,
         trajectory_distinct=trajectory_distinct_stats,
+        phase_timings=timer.timings,
     )
 
 

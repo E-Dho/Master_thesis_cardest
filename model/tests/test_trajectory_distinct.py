@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -15,6 +16,7 @@ if HAS_TORCH:
     import torch
 
 from model.src.config import load_simple_yaml
+from model.src.data import full_join_sampler as full_join_sampler_module
 from model.src.data.full_join_sampler import FullJoinBatch, NeuroCardFullJoinSampleSource
 from model.src.data.full_join_sampler import _encoded_domain_ids_for_stratum
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
@@ -2120,6 +2122,48 @@ trajectory_distinct:
                     root,
                     trajectory_index_path=root / "missing_index",
                 )
+
+    def test_sample_source_reuses_sample_rows_mmap_across_batches(self) -> None:
+        metadata = _pol_segment_metadata()
+        rows = _encode_pol_segments(
+            metadata,
+            (
+                (0, 0.0, 10.0, 0.0, 0.0, 1.0, 1.0, 1, 1),
+                (1, 10.0, 20.0, 3.0, 3.0, 1.0, 1.0, 1, 1),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prepared = Path(tmpdir)
+            _write_prepared_pol_fixture(
+                prepared,
+                metadata=metadata,
+                rows=rows,
+                trajectory_ids=(10, 20),
+                segment_ids=((10, 0), (20, 1)),
+            )
+            real_np_load = np.load
+            sample_rows_loads = 0
+
+            def counting_load(path, *args, **kwargs):
+                nonlocal sample_rows_loads
+                if Path(path).name == "sample_rows.npy":
+                    sample_rows_loads += 1
+                return real_np_load(path, *args, **kwargs)
+
+            with mock.patch.object(
+                full_join_sampler_module.np,
+                "load",
+                side_effect=counting_load,
+            ):
+                source = full_join_sampler_module.NeuroCardFullJoinSampleSource(prepared)
+                startup_loads = sample_rows_loads
+                first = source.batches(2, seed=0)
+                second = source.batches(2, seed=1)
+
+            self.assertEqual(first.encoded_values.shape, (2, rows.shape[1]))
+            self.assertEqual(second.encoded_values.shape, (2, rows.shape[1]))
+            self.assertGreaterEqual(startup_loads, 1)
+            self.assertEqual(sample_rows_loads, startup_loads)
 
     def test_exact_oracle_uses_trajectory_semantics(self) -> None:
         metadata = _pol_segment_metadata()

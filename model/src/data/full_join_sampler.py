@@ -148,6 +148,7 @@ class NeuroCardFullJoinSampleSource:
         self._sample_trajectory_ids: np.ndarray | None = None
         self._sample_segment_ids: np.ndarray | None = None
         self._fixture_stratum_index_cache: dict[str, np.ndarray] = {}
+        self._sample_rows_mmap: np.ndarray | None = None
         if trajectory_ids_path is not None:
             self._sample_trajectory_ids = np.load(Path(trajectory_ids_path), allow_pickle=True)
         elif (self.prepared_directory / "sample_trajectory_ids.npy").exists():
@@ -191,7 +192,7 @@ class NeuroCardFullJoinSampleSource:
                 ) from exc
         sample_path = self.prepared_directory / "sample_rows.npy"
         if sample_path.exists():
-            sample_rows = np.load(sample_path, mmap_mode="r")
+            sample_rows = self._sample_rows()
             if self._sample_trajectory_ids is not None and len(self._sample_trajectory_ids) != len(sample_rows):
                 raise ValueError(
                     "sample_trajectory_ids row count does not match sample_rows.npy"
@@ -210,7 +211,6 @@ class NeuroCardFullJoinSampleSource:
         return self._metadata
 
     def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
-        sample_path = self.prepared_directory / "sample_rows.npy"
         if self.sampling_mode == "live":
             raise NotImplementedError(
                 "dataset.sampling_mode=live requires wiring NeuroCard's "
@@ -219,8 +219,8 @@ class NeuroCardFullJoinSampleSource:
             )
         if self.sampling_mode not in {"fixture", "materialized_large_sample"}:
             raise ValueError(f"unsupported NeuroCard sampling mode {self.sampling_mode!r}")
-        if sample_path.exists():
-            rows = np.load(sample_path, mmap_mode="r")
+        rows = self._sample_rows()
+        if rows is not None:
             rng = np.random.default_rng(seed)
             indices = rng.integers(0, len(rows), size=batch_size)
             trajectory_ids = None
@@ -255,10 +255,9 @@ class NeuroCardFullJoinSampleSource:
 
         if self.sampling_mode == "live":
             raise NotImplementedError("live conditional sampling is implemented in the live subclass")
-        sample_path = self.prepared_directory / "sample_rows.npy"
-        if not sample_path.exists():
+        rows = self._sample_rows()
+        if rows is None:
             raise NotImplementedError("fixture conditional sampling requires sample_rows.npy")
-        rows = np.load(sample_path, mmap_mode="r")
         strata_tuple = tuple(strata)  # type: ignore[arg-type]
         selected_indices = np.empty(len(strata_tuple), dtype=int)
         for output_index, stratum in enumerate(strata_tuple):
@@ -316,12 +315,20 @@ class NeuroCardFullJoinSampleSource:
 
         if self.sampling_mode == "live":
             return
-        sample_path = self.prepared_directory / "sample_rows.npy"
-        if not sample_path.exists():
+        rows = self._sample_rows()
+        if rows is None:
             return
-        rows = np.load(sample_path, mmap_mode="r")
         for stratum in tuple(strata):  # type: ignore[arg-type]
             self._fixture_indices_for_stratum(rows, stratum)
+
+    def _sample_rows(self) -> np.ndarray | None:
+        if self._sample_rows_mmap is not None:
+            return self._sample_rows_mmap
+        sample_path = self.prepared_directory / "sample_rows.npy"
+        if not sample_path.exists():
+            return None
+        self._sample_rows_mmap = np.load(sample_path, mmap_mode="r")
+        return self._sample_rows_mmap
 
     @property
     def trajectory_multiplicity_provider(self) -> object:
