@@ -55,7 +55,15 @@ class PolDistinctEvaluation:
         return dict(self.__dict__)
 
 
-_COMPARABLE_DOMAIN_CACHE: dict[int, tuple[tuple[Any, ...], bool]] = {}
+@dataclass(frozen=True)
+class _DomainInfo:
+    values: tuple[Any, ...]
+    start: int
+    end: int
+    sorted_state: bool
+
+
+_COMPARABLE_DOMAIN_CACHE: dict[int, _DomainInfo] = {}
 
 
 @dataclass(frozen=True)
@@ -549,8 +557,8 @@ def _canonical_data_token(
         return token
     if column.kind != ColumnKind.DATA:
         return token
-    domain = _comparable_domain(column.domain)
-    if not domain:
+    domain = column.domain
+    if _domain_length(domain) == 0:
         return token
     if token.op == PredicateOp.WILDCARD:
         return token
@@ -603,45 +611,70 @@ def _canonical_data_token(
 
 
 def _comparable_domain(domain: tuple[Any, ...]) -> tuple[Any, ...]:
-    return _domain_values_and_sort_state(domain)[0]
+    info = _domain_info(domain)
+    return info.values[info.start : info.end]
 
 
-def _domain_values_and_sort_state(domain: tuple[Any, ...]) -> tuple[tuple[Any, ...], bool]:
+def _domain_info(domain: tuple[Any, ...]) -> _DomainInfo:
     key = id(domain)
     cached = _COMPARABLE_DOMAIN_CACHE.get(key)
     if cached is not None:
         return cached
-    values = tuple(
-        value
-        for value in domain
-        if not (isinstance(value, str) and value.startswith("__"))
+    start = 0
+    end = len(domain)
+    while start < end and _is_sentinel_literal(domain[start]):
+        start += 1
+    while end > start and _is_sentinel_literal(domain[end - 1]):
+        end -= 1
+    cached = _DomainInfo(
+        values=domain,
+        start=start,
+        end=end,
+        sorted_state=_looks_sorted_domain(domain, start, end),
     )
-    sorted_state = _is_sorted_domain(values)
-    cached = (values, sorted_state)
     _COMPARABLE_DOMAIN_CACHE[key] = cached
     return cached
 
 
+def _domain_length(domain: tuple[Any, ...]) -> int:
+    info = _domain_info(domain)
+    return info.end - info.start
+
+
+def _is_sentinel_literal(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("__")
+
+
 def _contains_literal(domain: tuple[Any, ...], literal: Any) -> bool:
-    values, sorted_state = _domain_values_and_sort_state(domain)
-    if sorted_state:
+    info = _domain_info(domain)
+    if info.sorted_state:
         try:
-            index = bisect_left(values, literal)
+            index = bisect_left(info.values, literal, info.start, info.end)
         except TypeError:
             return False
-        return index < len(values) and values[index] == literal
-    return any(value == literal for value in values)
+        return index < info.end and info.values[index] == literal
+    return any(info.values[index] == literal for index in range(info.start, info.end))
 
 
-def _is_sorted_domain(domain: tuple[Any, ...]) -> bool:
-    previous = None
-    for value in domain:
-        if previous is not None:
-            try:
-                if value < previous:
-                    return False
-            except TypeError:
+def _looks_sorted_domain(domain: tuple[Any, ...], start: int, end: int) -> bool:
+    if end - start <= 1:
+        return True
+    probes = {
+        start,
+        min(start + 1, end - 1),
+        start + (end - start) // 2,
+        max(end - 2, start),
+        end - 1,
+    }
+    ordered = sorted(probes)
+    previous = domain[ordered[0]]
+    for position in ordered[1:]:
+        value = domain[position]
+        try:
+            if value < previous:
                 return False
+        except TypeError:
+            return False
         previous = value
     return True
 
@@ -651,22 +684,23 @@ def _min_satisfying(
     threshold: Any,
     op: PredicateOp,
 ) -> Any | None:
-    values, sorted_state = _domain_values_and_sort_state(domain)
-    if not values:
+    info = _domain_info(domain)
+    if info.end <= info.start:
         return None
-    if sorted_state:
+    if info.sorted_state:
         try:
             if op == PredicateOp.GREATER_EQUAL:
-                index = bisect_left(values, threshold)
+                index = bisect_left(info.values, threshold, info.start, info.end)
             elif op == PredicateOp.GREATER_THAN:
-                index = bisect_right(values, threshold)
+                index = bisect_right(info.values, threshold, info.start, info.end)
             else:
-                index = 0
+                index = info.start
         except TypeError:
             return None
-        return values[index] if index < len(values) else None
+        return info.values[index] if index < info.end else None
     best = None
-    for value in values:
+    for index in range(info.start, info.end):
+        value = info.values[index]
         if _satisfies_op(value, threshold, op) and (best is None or _lt(value, best)):
             best = value
     return best
@@ -677,22 +711,23 @@ def _max_satisfying(
     threshold: Any,
     op: PredicateOp,
 ) -> Any | None:
-    values, sorted_state = _domain_values_and_sort_state(domain)
-    if not values:
+    info = _domain_info(domain)
+    if info.end <= info.start:
         return None
-    if sorted_state:
+    if info.sorted_state:
         try:
             if op == PredicateOp.LESS_EQUAL:
-                index = bisect_right(values, threshold) - 1
+                index = bisect_right(info.values, threshold, info.start, info.end) - 1
             elif op == PredicateOp.LESS_THAN:
-                index = bisect_left(values, threshold) - 1
+                index = bisect_left(info.values, threshold, info.start, info.end) - 1
             else:
-                index = len(values) - 1
+                index = info.end - 1
         except TypeError:
             return None
-        return values[index] if index >= 0 else None
+        return info.values[index] if index >= info.start else None
     best = None
-    for value in values:
+    for index in range(info.start, info.end):
+        value = info.values[index]
         if _satisfies_op(value, threshold, op) and (best is None or _lt(best, value)):
             best = value
     return best
@@ -728,16 +763,16 @@ def _lt(left: Any, right: Any) -> bool:
 
 
 def _zero_support_data_token(domain: tuple[Any, ...]) -> PredicateToken:
-    values, sorted_state = _domain_values_and_sort_state(domain)
-    if not values:
+    info = _domain_info(domain)
+    if info.end <= info.start:
         raise ValueError("cannot construct zero-support token for empty domain")
-    if sorted_state:
-        maximum = values[-1]
+    if info.sorted_state:
+        maximum = info.values[info.end - 1]
     else:
         try:
-            maximum = max(values)
+            maximum = max(info.values[index] for index in range(info.start, info.end))
         except TypeError:
-            maximum = values[-1]
+            maximum = info.values[info.end - 1]
     return PredicateToken(PredicateOp.GREATER_THAN, value=maximum)
 
 
