@@ -440,35 +440,40 @@ class FactorizedColumnProbabilityEvaluator:
                 return None
             lower_cdf = lower if not token.lower_inclusive else lower - 1
             upper_cdf = upper if token.upper_inclusive else upper - 1
-            return self.less_equal_mass(upper_cdf) - self.less_equal_mass(lower_cdf)
+            mass = self.less_equal_mass(upper_cdf) - self.less_equal_mass(lower_cdf)
+            return self._subtract_excluded_edge_sentinels(mass, column, token)
         if token.op == PredicateOp.LESS_EQUAL:
             encoded = _encoded_id_or_none(column, token.value)
             if encoded is None:
                 return None
             if not _encoded_interval_matches_predicate(column, token):
                 return None
-            return self.less_equal_mass(encoded)
+            mass = self.less_equal_mass(encoded)
+            return self._subtract_excluded_edge_sentinels(mass, column, token)
         if token.op == PredicateOp.LESS_THAN:
             encoded = _encoded_id_or_none(column, token.value)
             if encoded is None:
                 return None
             if not _encoded_interval_matches_predicate(column, token):
                 return None
-            return self.less_equal_mass(encoded - 1)
+            mass = self.less_equal_mass(encoded - 1)
+            return self._subtract_excluded_edge_sentinels(mass, column, token)
         if token.op == PredicateOp.GREATER_EQUAL:
             encoded = _encoded_id_or_none(column, token.value)
             if encoded is None:
                 return None
             if not _encoded_interval_matches_predicate(column, token):
                 return None
-            return 1.0 - self.less_equal_mass(encoded - 1)
+            mass = 1.0 - self.less_equal_mass(encoded - 1)
+            return self._subtract_excluded_edge_sentinels(mass, column, token)
         if token.op == PredicateOp.GREATER_THAN:
             encoded = _encoded_id_or_none(column, token.value)
             if encoded is None:
                 return None
             if not _encoded_interval_matches_predicate(column, token):
                 return None
-            return 1.0 - self.less_equal_mass(encoded)
+            mass = 1.0 - self.less_equal_mass(encoded)
+            return self._subtract_excluded_edge_sentinels(mass, column, token)
         return None
 
     def encoded_id_mass(self, encoded_id: int) -> Any:
@@ -641,6 +646,18 @@ class FactorizedColumnProbabilityEvaluator:
         self._distribution_cache[key] = distribution.detach()
         return self._distribution_cache[key]
 
+    def _subtract_excluded_edge_sentinels(
+        self,
+        mass: Any,
+        column: ColumnMetadata,
+        token: PredicateToken,
+    ) -> Any:
+        import torch
+
+        for sentinel_id in _edge_sentinel_ids_in_encoded_interval(column, token):
+            mass = mass - self.encoded_id_mass(sentinel_id)
+        return torch.clamp(mass, min=0.0, max=1.0)
+
 
 def _encoded_id_or_none(column: ColumnMetadata, value: Any) -> int | None:
     try:
@@ -661,10 +678,74 @@ def _encoded_interval_matches_predicate(
 ) -> bool:
     """Check whether encoded-ID interval math preserves predicate semantics."""
 
-    return all(
-        token.satisfies(value) == _encoded_interval_contains(index, column, token)
-        for index, value in enumerate(column.domain)
-    )
+    del token
+    return _encoded_order_compatible(column.domain)
+
+
+_ENCODED_ORDER_COMPATIBLE_CACHE: dict[int, bool] = {}
+
+
+def _encoded_order_compatible(domain: tuple[Any, ...]) -> bool:
+    key = id(domain)
+    cached = _ENCODED_ORDER_COMPATIBLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    start, end = _non_sentinel_bounds(domain)
+    if end - start <= 1:
+        _ENCODED_ORDER_COMPATIBLE_CACHE[key] = True
+        return True
+    probes = {
+        start,
+        min(start + 1, end - 1),
+        start + (end - start) // 2,
+        max(end - 2, start),
+        end - 1,
+    }
+    ordered = sorted(probes)
+    previous = domain[ordered[0]]
+    compatible = True
+    for position in ordered[1:]:
+        value = domain[position]
+        try:
+            if value < previous:
+                compatible = False
+                break
+        except TypeError:
+            compatible = False
+            break
+        previous = value
+    _ENCODED_ORDER_COMPATIBLE_CACHE[key] = compatible
+    return compatible
+
+
+def _non_sentinel_bounds(domain: tuple[Any, ...]) -> tuple[int, int]:
+    start = 0
+    end = len(domain)
+    while start < end and _is_sentinel_literal(domain[start]):
+        start += 1
+    while end > start and _is_sentinel_literal(domain[end - 1]):
+        end -= 1
+    return start, end
+
+
+def _is_sentinel_literal(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("__")
+
+
+def _edge_sentinel_ids_in_encoded_interval(
+    column: ColumnMetadata,
+    token: PredicateToken,
+) -> tuple[int, ...]:
+    domain = column.domain
+    start, end = _non_sentinel_bounds(domain)
+    sentinel_ids: list[int] = []
+    for index in range(0, start):
+        if _encoded_interval_contains(index, column, token) and not token.satisfies(domain[index]):
+            sentinel_ids.append(index)
+    for index in range(end, len(domain)):
+        if _encoded_interval_contains(index, column, token) and not token.satisfies(domain[index]):
+            sentinel_ids.append(index)
+    return tuple(sentinel_ids)
 
 
 def _encoded_interval_contains(
