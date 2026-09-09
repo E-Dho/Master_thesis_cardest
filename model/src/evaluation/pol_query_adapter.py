@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from model.src.data.schema import ColumnKind, ModelMetadata
@@ -184,8 +185,8 @@ def pol_workload_record_to_context(
         elif mode in {"temporal_overlap", "temporal_unbounded"}:
             start_column, end_column = _temporal_columns(table, attribute)
             if mode == "temporal_overlap":
-                lower = predicate["lower"]
-                upper = predicate["upper"]
+                lower = _temporal_literal_to_epoch_seconds(predicate["lower"])
+                upper = _temporal_literal_to_epoch_seconds(predicate["upper"])
                 ordinary[start_column] = _canonical_data_token(
                     metadata,
                     start_column,
@@ -201,7 +202,7 @@ def pol_workload_record_to_context(
                 )
             else:
                 op = str(predicate["operator"])
-                value = predicate["value"]
+                value = _temporal_literal_to_epoch_seconds(predicate["value"])
                 column_name = start_column if op in {"<", "<="} else end_column
                 ordinary[column_name] = _canonical_data_token(
                     metadata,
@@ -542,6 +543,28 @@ def _operator_token(operator: str, value: Any) -> PredicateToken:
     if operator not in op_map:
         raise ValueError(f"unsupported operator {operator!r}")
     return PredicateToken(op_map[operator], value=value)
+
+
+def _temporal_literal_to_epoch_seconds(value: Any) -> Any:
+    """Convert POL workload timestamp strings to the numeric epoch domain."""
+
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped:
+        return value
+    try:
+        return float(stripped)
+    except ValueError:
+        pass
+    iso_value = stripped[:-1] + "+00:00" if stripped.endswith("Z") else stripped
+    try:
+        parsed = datetime.fromisoformat(iso_value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _canonical_data_token(
