@@ -144,25 +144,46 @@ def pol_workload_record_to_context(
         table = str(predicate["table"])
         attribute = str(predicate["attribute"])
         mode = str(predicate["mode"])
+        column_name = f"{table}:{attribute}"
         if mode == "nominal_eq":
-            ordinary[f"{table}:{attribute}"] = PredicateToken.equal(predicate["value"])
+            ordinary[column_name] = _canonical_data_token(
+                metadata,
+                column_name,
+                PredicateToken.equal(predicate["value"]),
+            )
         elif mode == "range":
-            ordinary[f"{table}:{attribute}"] = PredicateToken.range(
-                predicate["lower"],
-                predicate["upper"],
+            ordinary[column_name] = _canonical_data_token(
+                metadata,
+                column_name,
+                PredicateToken.range(
+                    predicate["lower"],
+                    predicate["upper"],
+                ),
             )
         elif mode == "unbounded":
-            ordinary[f"{table}:{attribute}"] = _operator_token(
-                str(predicate["operator"]),
-                predicate["value"],
+            ordinary[column_name] = _canonical_data_token(
+                metadata,
+                column_name,
+                _operator_token(
+                    str(predicate["operator"]),
+                    predicate["value"],
+                ),
             )
         elif mode in {"temporal_overlap", "temporal_unbounded"}:
             start_column, end_column = _temporal_columns(table, attribute)
             if mode == "temporal_overlap":
                 lower = predicate["lower"]
                 upper = predicate["upper"]
-                ordinary[start_column] = PredicateToken(PredicateOp.LESS_THAN, value=upper)
-                ordinary[end_column] = PredicateToken(PredicateOp.GREATER_EQUAL, value=lower)
+                ordinary[start_column] = _canonical_data_token(
+                    metadata,
+                    start_column,
+                    PredicateToken(PredicateOp.LESS_THAN, value=upper),
+                )
+                ordinary[end_column] = _canonical_data_token(
+                    metadata,
+                    end_column,
+                    PredicateToken(PredicateOp.GREATER_EQUAL, value=lower),
+                )
                 temporal_predicates.append(
                     SegmentTemporalPredicate(start_column, end_column, lower=lower, upper=upper)
                 )
@@ -170,7 +191,11 @@ def pol_workload_record_to_context(
                 op = str(predicate["operator"])
                 value = predicate["value"]
                 column_name = start_column if op in {"<", "<="} else end_column
-                ordinary[column_name] = _operator_token(op, value)
+                ordinary[column_name] = _canonical_data_token(
+                    metadata,
+                    column_name,
+                    _operator_token(op, value),
+                )
         elif mode in {"spatial_intersects", "spatial_unbounded"}:
             min_x = float(predicate["min_x"])
             min_y = float(predicate["min_y"])
@@ -237,9 +262,17 @@ def pol_workload_record_to_context(
                 if has_endpoint_columns:
                     for column_name in columns:
                         if column_name.endswith(":s_x") or column_name.endswith(":e_x"):
-                            ordinary[column_name] = PredicateToken.range(min_x, max_x)
+                            ordinary[column_name] = _canonical_data_token(
+                                metadata,
+                                column_name,
+                                PredicateToken.range(min_x, max_x),
+                            )
                         else:
-                            ordinary[column_name] = PredicateToken.range(min_y, max_y)
+                            ordinary[column_name] = _canonical_data_token(
+                                metadata,
+                                column_name,
+                                PredicateToken.range(min_y, max_y),
+                            )
                     spatial_predicates.append(
                         SegmentSpatialPredicate(
                             min_x,
@@ -497,6 +530,142 @@ def _operator_token(operator: str, value: Any) -> PredicateToken:
     if operator not in op_map:
         raise ValueError(f"unsupported operator {operator!r}")
     return PredicateToken(op_map[operator], value=value)
+
+
+def _canonical_data_token(
+    metadata: ModelMetadata,
+    column_name: str,
+    token: PredicateToken,
+) -> PredicateToken:
+    """Map workload thresholds onto exact literals from the encoded column domain."""
+
+    try:
+        column = metadata.columns[metadata.column_index(column_name)]
+    except KeyError:
+        return token
+    if column.kind != ColumnKind.DATA:
+        return token
+    domain = _comparable_domain(column.domain)
+    if not domain:
+        return token
+    if token.op == PredicateOp.WILDCARD:
+        return token
+    if token.op == PredicateOp.EQUAL:
+        for literal in domain:
+            if literal == token.value:
+                return PredicateToken.equal(literal)
+        return _zero_support_data_token(domain)
+    if token.op == PredicateOp.RANGE:
+        if _contains_literal(domain, token.value) and _contains_literal(domain, token.upper):
+            return token if _leq(token.value, token.upper) else _zero_support_data_token(domain)
+        lower = _min_satisfying(domain, token.value, PredicateOp.GREATER_EQUAL)
+        upper = _max_satisfying(domain, token.upper, PredicateOp.LESS_EQUAL)
+        if lower is None or upper is None or not _leq(lower, upper):
+            return _zero_support_data_token(domain)
+        return PredicateToken.range(lower, upper)
+    if token.op == PredicateOp.GREATER_THAN:
+        if _contains_literal(domain, token.value):
+            return token
+        literal = _min_satisfying(domain, token.value, PredicateOp.GREATER_THAN)
+        return _zero_support_data_token(domain) if literal is None else PredicateToken(
+            PredicateOp.GREATER_EQUAL,
+            value=literal,
+        )
+    if token.op == PredicateOp.GREATER_EQUAL:
+        if _contains_literal(domain, token.value):
+            return token
+        literal = _min_satisfying(domain, token.value, PredicateOp.GREATER_EQUAL)
+        return _zero_support_data_token(domain) if literal is None else PredicateToken(
+            PredicateOp.GREATER_EQUAL,
+            value=literal,
+        )
+    if token.op == PredicateOp.LESS_THAN:
+        if _contains_literal(domain, token.value):
+            return token
+        literal = _max_satisfying(domain, token.value, PredicateOp.LESS_THAN)
+        return _zero_support_data_token(domain) if literal is None else PredicateToken(
+            PredicateOp.LESS_EQUAL,
+            value=literal,
+        )
+    if token.op == PredicateOp.LESS_EQUAL:
+        if _contains_literal(domain, token.value):
+            return token
+        literal = _max_satisfying(domain, token.value, PredicateOp.LESS_EQUAL)
+        return _zero_support_data_token(domain) if literal is None else PredicateToken(
+            PredicateOp.LESS_EQUAL,
+            value=literal,
+        )
+    return token
+
+
+def _comparable_domain(domain: tuple[Any, ...]) -> tuple[Any, ...]:
+    return tuple(
+        value
+        for value in domain
+        if not (isinstance(value, str) and value.startswith("__"))
+    )
+
+
+def _contains_literal(domain: tuple[Any, ...], literal: Any) -> bool:
+    return any(value == literal for value in domain)
+
+
+def _min_satisfying(
+    domain: tuple[Any, ...],
+    threshold: Any,
+    op: PredicateOp,
+) -> Any | None:
+    candidates = [value for value in domain if _satisfies_op(value, threshold, op)]
+    if not candidates:
+        return None
+    try:
+        return min(candidates)
+    except TypeError:
+        return candidates[0]
+
+
+def _max_satisfying(
+    domain: tuple[Any, ...],
+    threshold: Any,
+    op: PredicateOp,
+) -> Any | None:
+    candidates = [value for value in domain if _satisfies_op(value, threshold, op)]
+    if not candidates:
+        return None
+    try:
+        return max(candidates)
+    except TypeError:
+        return candidates[-1]
+
+
+def _satisfies_op(value: Any, threshold: Any, op: PredicateOp) -> bool:
+    try:
+        if op == PredicateOp.GREATER_THAN:
+            return value > threshold
+        if op == PredicateOp.GREATER_EQUAL:
+            return value >= threshold
+        if op == PredicateOp.LESS_THAN:
+            return value < threshold
+        if op == PredicateOp.LESS_EQUAL:
+            return value <= threshold
+    except TypeError:
+        return False
+    return False
+
+
+def _leq(left: Any, right: Any) -> bool:
+    try:
+        return left <= right
+    except TypeError:
+        return False
+
+
+def _zero_support_data_token(domain: tuple[Any, ...]) -> PredicateToken:
+    try:
+        maximum = max(domain)
+    except TypeError:
+        maximum = domain[-1]
+    return PredicateToken(PredicateOp.GREATER_THAN, value=maximum)
 
 
 def _temporal_columns(table: str, attribute: str) -> tuple[str, str]:
