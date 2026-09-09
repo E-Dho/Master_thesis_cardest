@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
@@ -660,10 +661,32 @@ class FactorizedColumnProbabilityEvaluator:
 
 
 def _encoded_id_or_none(column: ColumnMetadata, value: Any) -> int | None:
+    fast = _ordered_domain_encoded_id_or_none(column.domain, value)
+    if fast is not None:
+        return fast
     try:
         return column.encode_value(value)
     except ValueError:
         return None
+
+
+def _ordered_domain_encoded_id_or_none(domain: tuple[Any, ...], value: Any) -> int | None:
+    if not _encoded_order_compatible(domain):
+        return None
+    start, end = _non_sentinel_bounds(domain)
+    try:
+        index = bisect_left(domain, value, start, end)
+    except TypeError:
+        return None
+    if index < end and domain[index] == value:
+        return index
+    for sentinel_index in range(0, start):
+        if domain[sentinel_index] == value:
+            return sentinel_index
+    for sentinel_index in range(end, len(domain)):
+        if domain[sentinel_index] == value:
+            return sentinel_index
+    return None
 
 
 def _project_head_output(head_output: Any, output_embedding: Any | None) -> Any:
@@ -694,6 +717,21 @@ def _encoded_order_compatible(domain: tuple[Any, ...]) -> bool:
     if end - start <= 1:
         _ENCODED_ORDER_COMPATIBLE_CACHE[key] = True
         return True
+    if end - start <= 10000:
+        compatible = True
+        previous = domain[start]
+        for position in range(start + 1, end):
+            value = domain[position]
+            try:
+                if value < previous:
+                    compatible = False
+                    break
+            except TypeError:
+                compatible = False
+                break
+            previous = value
+        _ENCODED_ORDER_COMPATIBLE_CACHE[key] = compatible
+        return compatible
     probes = {
         start,
         min(start + 1, end - 1),
