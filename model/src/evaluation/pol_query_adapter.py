@@ -41,6 +41,7 @@ class PolDistinctEvaluation:
     a_hat: float | None = None
     a_abs_error: float | None = None
     model_forward_calls: int | None = None
+    latency_seconds: float | None = None
     database_matching_segments_true: int | None = None
     database_distinct_trajectories_true: int | None = None
     database_a_true: float | None = None
@@ -371,13 +372,21 @@ def evaluate_pol_distinct_record(
                 matching_segment_estimate=0.0,
                 matching_segment_qerror=matching_qerror,
                 model_forward_calls=0,
+                latency_seconds=0.0,
                 **common_truth,
             )
-        estimate = estimator.estimate_distinct_trajectories(
-            list(context.tokens),
-            context=context,
-            trajectory_config=trajectory_config,
-        )
+        try:
+            estimate = estimator.estimate_distinct_trajectories(
+                list(context.tokens),
+                context=context,
+                trajectory_config=trajectory_config,
+            )
+        except TrajectoryDistinctNotApplicable as exc:
+            return PolDistinctEvaluation(
+                query_id=record.get("query_id"),
+                distinct_estimate_status=str(exc),
+                **common_truth,
+            )
         matching_qerror = (
             None
             if not database_truth.available
@@ -392,6 +401,7 @@ def evaluate_pol_distinct_record(
             matching_segment_estimate=estimate.matching_segment_estimate,
             matching_segment_qerror=matching_qerror,
             model_forward_calls=estimate.model_forward_calls,
+            latency_seconds=estimate.latency_seconds,
             **common_truth,
         )
     if support.eligible and oracle is not None and trajectory_ids is not None:
@@ -450,6 +460,7 @@ def evaluate_pol_distinct_record(
         a_hat=estimate.traj_dedup_factor,
         a_abs_error=a_abs_error,
         model_forward_calls=estimate.model_forward_calls,
+        latency_seconds=estimate.latency_seconds,
         **common_truth,
     )
 
