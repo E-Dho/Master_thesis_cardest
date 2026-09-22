@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from model.src.data.null_sentinel import null_sentinel_index
 from model.src.data.schema import ColumnKind, ColumnMetadata
 from model.src.predicates.operators import PredicateOp, PredicateToken
 
@@ -11,7 +12,13 @@ def predicate_mask(column: ColumnMetadata, token: PredicateToken) -> np.ndarray:
 
     if token.op == PredicateOp.INV_FANOUT:
         raise ValueError("use reciprocal_fanout_mask for INV_FANOUT tokens")
-    return np.array([token.satisfies(value) for value in column.domain], dtype=float)
+    mask = np.array([token.satisfies(value) for value in column.domain], dtype=float)
+    sentinel = null_sentinel_index(column)
+    if sentinel is not None:
+        # The void sentinel stands for "no such row"; it satisfies nothing, not
+        # even a wildcard, so it can never contribute to a column factor.
+        mask[sentinel] = 0.0
+    return mask
 
 
 def reciprocal_fanout_mask(column: ColumnMetadata) -> np.ndarray:
@@ -42,7 +49,13 @@ def column_factor(
 
     distribution = np.asarray(distribution, dtype=float)
     if token.op == PredicateOp.WILDCARD:
-        return 1.0
+        sentinel = null_sentinel_index(column)
+        if sentinel is None:
+            return 1.0
+        # An unpredicated column still excludes the void sentinel, so a context
+        # the model believes is impossible keeps collapsing the product past the
+        # bottleneck head instead of being rescued by a wildcard factor of one.
+        return float(1.0 - distribution[sentinel])
     if token.op == PredicateOp.INV_FANOUT:
         mask = reciprocal_fanout_mask(column)
     else:

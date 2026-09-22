@@ -1,0 +1,76 @@
+dataset:
+  type: synthetic_full_join
+  name: synthetic_null_sentinel_smoke
+  csv_directory: datasets/example
+  prepared_directory: data/neurocard_prepared/example
+  sample_batch_size: 256
+  num_workers: 0
+
+schema:
+  join_type: acyclic
+  column_order: data_indicators_fanouts
+
+model:
+  type: predicate_resmade
+  hidden_sizes: [128, 128]
+  residual_connections: true
+  direct_io_connections: true
+  activation: relu
+  input_encoding: embed
+  output_encoding: one_hot
+  embedding_size: 16
+  residual_dropout: 0.0
+  fixed_ordering: true
+
+factorization:
+  enabled: false
+  strategy: none
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  compute_weights_in_log_space: true
+  weight_normalization: batch_sum
+  weight_clipping: null
+
+predicate_generation:
+  enabled: true
+  wildcard_probability: 0.3
+  table_subset_sampling: connected
+  seed: 0
+
+# Null-token zero-cardinality training. The synthetic fixture is tiny, so the
+# marginal-support floor is lowered to 1; production runs should keep it high
+# enough that an absent pair really means "impossible" rather than "rare".
+null_sentinel:
+  enabled: true
+  void_probability: 0.2
+  chain_extension_probability: 0.2
+  max_chain_extensions: 5
+  max_catalog_domain_size: 512
+  max_catalog_columns: 16
+  min_marginal_count: 1
+  min_anchor_partners: 2
+  cascade: true
+
+training:
+  seed: 0
+  device: auto
+  batch_size: 128
+  learning_rate: 0.0003
+  optimizer: adam
+  epochs: 1
+  steps_per_epoch: 3000
+  gradient_clip_norm: 5.0
+  checkpoint_interval_steps: 1500
+  validation_interval_steps: 1500
+  head_loss_reduction: mean
+  mixed_precision: false
+
+inference:
+  progressive_sampling: false
+  use_log_space_product: true
+
+logging:
+  output_directory: model/runs/resmade_null_sentinel_smoke
+  tensorboard: false

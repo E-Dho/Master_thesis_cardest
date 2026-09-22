@@ -7,6 +7,12 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from model.src.data.null_sentinel import (
+    NullSentinelConfig,
+    VoidPairCatalog,
+    null_sentinel_indices,
+    sample_chain_extension_count,
+)
 from model.src.data.schema import ColumnKind, ModelMetadata
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.vocabulary import TWO_SLOT_EMPTY_OPERATOR_ID, TWO_SLOT_OP_TO_ID
@@ -31,6 +37,11 @@ class GeneratedTrainingContext:
     ordinary_predicates: Mapping[str, PredicateToken]
     trajectory_query: Any | None = None
     encoded_two_slot_row: tuple[tuple[int, int, int, int], ...] | None = None
+    # Index of the column at which this context becomes provably unsatisfiable,
+    # or None for an ordinary row-satisfied context.  Set only by null-token
+    # void injection; row-satisfaction validation is skipped for such contexts
+    # because being unsatisfied by the source row is the whole point.
+    void_column_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +213,31 @@ class PredicateTrainingContextGenerator:
         )
         self._cache_by_metadata_id: dict[int, tuple[_ColumnPredicateCache | None, ...]] = {}
         self._compiled_by_metadata_id: dict[int, _CompiledGenerationMetadata] = {}
+        self.null_sentinel = NullSentinelConfig()
+        self.void_catalog: VoidPairCatalog | None = None
+        self._void_contexts_generated = 0
+        self._void_attempts_failed = 0
+
+    def attach_void_catalog(
+        self,
+        catalog: "VoidPairCatalog | None",
+        config: NullSentinelConfig,
+    ) -> None:
+        """Enable null-token void injection with a prebuilt co-occurrence catalog."""
+
+        config.validate()
+        self.null_sentinel = config
+        self.void_catalog = catalog if config.enabled else None
+
+    def void_injection_diagnostics(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "enabled": bool(self.null_sentinel.enabled and self.void_catalog is not None),
+            "void_contexts_generated": int(self._void_contexts_generated),
+            "void_attempts_failed": int(self._void_attempts_failed),
+        }
+        if self.void_catalog is not None:
+            summary.update(self.void_catalog.summary())
+        return summary
 
     def probability_diagnostics(self) -> dict[str, float | bool]:
         return {
@@ -273,11 +309,21 @@ class PredicateTrainingContextGenerator:
                 if self._requires_root(metadata, compiled) and not context.included_tables:
                     rejected += 1
                     continue
+                context = self._maybe_void_context(row, metadata, rng, compiled, context)
                 if not context_satisfies_row(context, row, metadata):
                     rejected += 1
                     continue
                 contexts.append(context)
-                repeated_rows.append(row)
+                repeated_rows.append(
+                    row
+                    if context.void_column_index is None
+                    else void_target_row(
+                        row,
+                        metadata,
+                        context.void_column_index,
+                        cascade=self.null_sentinel.cascade,
+                    )
+                )
                 source_row_indices.append(row_index)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
@@ -438,6 +484,7 @@ class PredicateTrainingContextGenerator:
                 if self._requires_root(metadata, compiled) and not context.included_tables:
                     rejected += 1
                     continue
+                context = self._maybe_void_context(row, metadata, rng, compiled, context)
                 if validate_contexts:
                     contradictions += included_indicator_contradictions(
                         context,
@@ -448,7 +495,16 @@ class PredicateTrainingContextGenerator:
                         rejected += 1
                         continue
                 contexts.append(context)
-                repeated_rows.append(row)
+                repeated_rows.append(
+                    row
+                    if context.void_column_index is None
+                    else void_target_row(
+                        row,
+                        metadata,
+                        context.void_column_index,
+                        cascade=self.null_sentinel.cascade,
+                    )
+                )
                 source_row_indices.append(row_index)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
@@ -506,6 +562,119 @@ class PredicateTrainingContextGenerator:
             trajectory_query=query.trajectory_query,
             encoded_two_slot_row=encoded_two_slot_row,
         )
+
+    def _generate_void_context(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata,
+        base_context: GeneratedTrainingContext,
+    ) -> GeneratedTrainingContext | None:
+        """Turn a row-satisfied context into a provably empty conjunction.
+
+        The void is anchored on a value the sampled row actually carries, so
+        every column before the void column keeps a genuine prefix.  The void
+        column then receives an equality predicate on a value that the catalog
+        proves never co-occurs with that anchor, which makes the conjunction
+        empty no matter how many further row-satisfied conjuncts are added.
+
+        Returns None when no void could be constructed for this row, in which
+        case the caller keeps the ordinary context.
+        """
+
+        catalog = self.void_catalog
+        if catalog is None:
+            return None
+        pair = catalog.sample_void_pair(encoded_row, rng)
+        if pair is None:
+            return None
+        anchor_column = metadata.columns[pair.anchor_column_index]
+        void_column = metadata.columns[pair.void_column_index]
+        anchor_token = PredicateToken.equal(anchor_column.domain[pair.anchor_value_id])
+        void_token = PredicateToken.equal(void_column.domain[pair.void_value_id])
+
+        # Start from the two conjuncts that carry the proof, then re-admit a
+        # geometrically sampled number of the row-satisfied predicates the base
+        # context already sampled.  Extra row-satisfied conjuncts can only
+        # shrink an already-empty result, so provability is preserved while the
+        # predicate count matches what real zero-cardinality queries look like.
+        predicates: dict[str, PredicateToken] = {
+            anchor_column.name: anchor_token,
+            void_column.name: void_token,
+        }
+        spare = [
+            (name, token)
+            for name, token in base_context.ordinary_predicates.items()
+            if name not in predicates
+        ]
+        extensions = sample_chain_extension_count(rng, self.null_sentinel)
+        if extensions and spare:
+            order = rng.permutation(len(spare))
+            for position in order[:extensions]:
+                name, token = spare[int(position)]
+                predicates[name] = token
+
+        included_tables = set(base_context.included_tables)
+        for column in (anchor_column, void_column):
+            if column.table is not None:
+                included_tables.add(column.table)
+        if self._requires_root(metadata, compiled) and not included_tables:
+            return None
+        # Predicates on columns whose table dropped out would never reach the
+        # token row, so keep only those the included subset actually carries.
+        present_tables = self._present_tables_for_row(encoded_row, metadata, compiled)
+        if not included_tables.issubset(present_tables):
+            included_tables &= set(present_tables)
+            for column in (anchor_column, void_column):
+                if column.table is not None and column.table not in included_tables:
+                    return None
+
+        tokens, encoded_two_slot_row = self._tokens_and_two_slot_for_query_tables(
+            metadata,
+            compiled,
+            included_tables,
+            set(base_context.inverse_fanout_columns),
+            predicates,
+        )
+        return GeneratedTrainingContext(
+            tokens=tokens,
+            included_tables=frozenset(included_tables),
+            inverse_fanout_columns=base_context.inverse_fanout_columns,
+            ordinary_predicates=predicates,
+            # A void context has no physical trajectory query; the spatial and
+            # temporal machinery assumes a satisfying segment exists.
+            trajectory_query=None,
+            encoded_two_slot_row=encoded_two_slot_row,
+            void_column_index=pair.void_column_index,
+        )
+
+    def _maybe_void_context(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata,
+        base_context: GeneratedTrainingContext,
+    ) -> GeneratedTrainingContext:
+        """Replace a context with a void one at the configured rate."""
+
+        if self.void_catalog is None or not self.null_sentinel.enabled:
+            return base_context
+        if rng.random() >= self.null_sentinel.void_probability:
+            return base_context
+        void_context = self._generate_void_context(
+            encoded_row,
+            metadata,
+            rng,
+            compiled,
+            base_context,
+        )
+        if void_context is None:
+            self._void_attempts_failed += 1
+            return base_context
+        self._void_contexts_generated += 1
+        return void_context
 
     def _generate_physical_query(
         self,
@@ -1987,6 +2156,10 @@ def context_satisfies_row(
 ) -> bool:
     """Validate that a generated training context is true for its target row."""
 
+    if context.void_column_index is not None:
+        # Void contexts are deliberately unsatisfied by their source row; the
+        # sentinel target, not the row value, is what they teach.
+        return True
     for column_index, (column, token) in enumerate(zip(metadata.columns, context.tokens)):
         value = column.domain[int(encoded_row[column_index])]
         if column.kind == ColumnKind.DATA and not token.satisfies(value):
@@ -1995,6 +2168,44 @@ def context_satisfies_row(
             return False
     present = present_tables_for_row(encoded_row, metadata)
     return set(context.included_tables).issubset(present)
+
+
+def void_target_row(
+    encoded_row: np.ndarray,
+    metadata: ModelMetadata,
+    void_column_index: int,
+    *,
+    cascade: bool = True,
+) -> np.ndarray:
+    """Return the target row for a void context: sentinel at and after the break.
+
+    The void column's head is supervised toward the sentinel because no row with
+    this prefix can satisfy the void predicate.  With ``cascade`` the sentinel
+    also propagates to every later DATA column, which keeps the chain dead: a
+    single near-zero factor already zeroes the product, but supervising the tail
+    stops later heads from learning an arbitrary distribution over a context
+    they never otherwise see, and it makes several factors collapse together
+    rather than relying on one.
+
+    Columns that carry no sentinel -- indicators and fanouts -- keep their real
+    values, since their heads feed table-presence semantics and the inverse
+    fanout weights, neither of which has a meaningful void state.
+    """
+
+    targets = np.array(encoded_row, dtype=int, copy=True)
+    sentinels = null_sentinel_indices(metadata)
+    sentinel = sentinels[void_column_index]
+    if sentinel is None:
+        raise ValueError(
+            f"column {metadata.columns[void_column_index].name!r} has no void sentinel"
+        )
+    targets[void_column_index] = sentinel
+    if cascade:
+        for column_index in range(void_column_index + 1, len(metadata.columns)):
+            later = sentinels[column_index]
+            if later is not None:
+                targets[column_index] = later
+    return targets
 
 
 def forced_predicate_for_stratum(

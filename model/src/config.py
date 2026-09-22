@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from model.src.model.anpm import ANPMConfig
+from model.src.data.null_sentinel import NullSentinelConfig
 from model.src.model.factorization import FactorizationConfig
 
 
@@ -388,6 +389,16 @@ def validate_config(config: dict[str, Any]) -> None:
         allocation = str(rare_support.get("allocation", {}).get("strategy", "support_deficit"))
         if allocation != "support_deficit":
             raise ValueError("rare_support.allocation.strategy must be support_deficit")
+    null_sentinel_config = NullSentinelConfig.from_dict(config.get("null_sentinel", {}))
+    null_sentinel_config.validate()
+    if null_sentinel_config.enabled and bool(
+        config.get("predicate_generation", {}).get("legacy_fixed_context", False)
+    ):
+        raise ValueError(
+            "null_sentinel.enabled=true is incompatible with "
+            "predicate_generation.legacy_fixed_context=true because a fixed "
+            "context carries no per-row anchor value to build a void from"
+        )
 
 
 def resolve_device(config: dict[str, Any]) -> str:

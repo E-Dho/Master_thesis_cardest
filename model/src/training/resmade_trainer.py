@@ -12,6 +12,7 @@ import numpy as np
 
 from model.src.config import resolve_device
 from model.src.data.full_join_sampler import FullJoinBatch
+from model.src.data.null_sentinel import NullSentinelConfig
 from model.src.data.schema import ColumnKind
 from model.src.data.trajectory_distinct import (
     TRAJECTORY_TARGET_SEMANTICS_VERSION,
@@ -756,6 +757,9 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     )
     predicate_config = _predicate_generation_config(config)
     context_generator = PredicateTrainingContextGenerator(predicate_config)
+    null_sentinel_summary = _attach_void_catalog(context_generator, sample_source, config)
+    if null_sentinel_summary.get("enabled"):
+        print(f"null_sentinel={json.dumps(null_sentinel_summary, sort_keys=True)}", flush=True)
     if validation_enabled:
         if validation_interval <= 0:
             raise ValueError("validation.enabled=true requires validation.interval_steps > 0")
@@ -1359,6 +1363,69 @@ def _validation_sample_source_from_config(
     if validation_config.get("trajectory_index_path") is not None:
         dataset["trajectory_index_path"] = str(validation_config["trajectory_index_path"])
     return sample_source_from_config(validation_source_config)
+
+
+def _void_pair_catalog_for_source(sample_source: object) -> object | None:
+    """Find the null-sentinel catalog through any stack of source wrappers."""
+
+    seen: set[int] = set()
+    current = sample_source
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        provider = getattr(current, "void_pair_catalog", None)
+        if callable(provider):
+            return provider()
+        current = getattr(current, "base_source", None)
+    return None
+
+
+def _attach_void_catalog(
+    context_generator: PredicateTrainingContextGenerator,
+    sample_source: object,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Wire null-token void injection into a generator and report what happened."""
+
+    null_sentinel = NullSentinelConfig.from_dict(config.get("null_sentinel", {}))
+    if not null_sentinel.enabled:
+        context_generator.attach_void_catalog(None, null_sentinel)
+        return {"enabled": False}
+    catalog = _void_pair_catalog_for_source(sample_source)
+    context_generator.attach_void_catalog(catalog, null_sentinel)
+    widened = _null_sentinel_width_changes(sample_source)
+    if catalog is None:
+        # Deliberately not fatal: a schema with no small categorical columns, or
+        # a source that cannot expose a complete row set, simply yields no
+        # provable voids. Training proceeds exactly as before, and the run log
+        # records why the feature stayed inert.
+        return {
+            "enabled": True,
+            "catalog_available": False,
+            "width_changed_columns": widened,
+        }
+    summary = dict(catalog.summary())
+    summary.update(
+        {
+            "enabled": True,
+            "catalog_available": True,
+            "width_changed_columns": widened,
+        }
+    )
+    return summary
+
+
+def _null_sentinel_width_changes(sample_source: object) -> list[str]:
+    """Report columns whose head width grew because the sentinel added a bit."""
+
+    seen: set[int] = set()
+    current = sample_source
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        changed = getattr(current, "width_changed_columns", None)
+        if changed is not None:
+            return list(changed)
+        current = getattr(current, "base_source", None)
+    return []
 
 
 def _predicate_generation_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -2198,6 +2265,9 @@ def _run_validation(
     predicate_config = _predicate_generation_config(config)
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
     context_generator = PredicateTrainingContextGenerator(predicate_config)
+    # Validation must see voids at the same rate as training, otherwise the
+    # selection metric rewards models that ignore the void objective entirely.
+    _attach_void_catalog(context_generator, sample_source, config)
     discard_buffer = getattr(sample_source, "discard_buffer", None)
     if discard_buffer is not None:
         discard_buffer()
