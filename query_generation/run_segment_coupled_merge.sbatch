@@ -22,11 +22,9 @@ SUMMARY_JSON=${SUMMARY_JSON:?SUMMARY_JSON is required}
 corrected_args=()
 for chunk in 00 01 02 03 04 05 06 07; do
   shard="$CORRECTED_RUN_ROOT/qeval_pol_50m_segment_coupled_v1_chunk_$chunk/queries.jsonl"
-  if [ "$chunk" = "05" ]; then
-    shard="$CORRECTED_RUN_ROOT/qeval_pol_50m_segment_coupled_v1_chunk_05_recovery/queries.jsonl"
-  fi
   corrected_args+=(--corrected "$shard")
 done
+corrected_args+=(--corrected "$CORRECTED_RUN_ROOT/qeval_pol_50m_segment_coupled_v1_chunk_05_recovery/queries.jsonl")
 
 cd "$REPO_ROOT"
 python3 query_generation/merge_segment_coupled_benchmark.py \
