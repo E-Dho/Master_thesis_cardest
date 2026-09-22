@@ -1,0 +1,45 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: foj_sampling
+  variant_id: n7168000
+  display_name: Unbiased FOJ sampling N=7,168,000
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/neurocard/neurocard.git
+  revision: a98f509e8d3c522d52ce4b4db47b894b7fafc153
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv
+    expected_query_count: 70
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: high_memory_cpu
+  cpu_threads: 1
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+  reservoir_root: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/foj_reservoirs
+adapter:
+  type: foj_sampling
+  neurocard_path: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard
+  csv_directory: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  use_cols: content
+  require_prepared_sampler_cache: true
+  sampler_batch_size: 16384
+  max_sample_size: 7168000
+  sample_size: 7168000
+  sample_sizes: [1000, 10000, 100000, 1000000, 7168000]
+  reservoir_path: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/foj_reservoirs/seed_{seed}.npy
+  metadata_path: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/foj_reservoirs/seed_{seed}.json

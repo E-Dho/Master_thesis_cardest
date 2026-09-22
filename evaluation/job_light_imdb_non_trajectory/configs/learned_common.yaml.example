@@ -1,0 +1,42 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: replace_method
+  variant_id: replace_variant
+  display_name: Replace display name
+  seeds: [0, 1, 2]
+source:
+  url: https://example.invalid/upstream.git
+  revision: replace_with_sources_lock_sha
+  checkout_path: /path/to/pinned/checkout
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /path/to/job-light.csv
+    expected_query_count: 70
+  job_light_ranges:
+    queries_csv: /path/to/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: method_specific_training_cpu_inference
+  cpu_threads: 1
+artifacts:
+  dataset_root: /path/to/checksummed/imdb-csv
+  checkpoint_root: /path/to/checkpoints
+adapter:
+  type: external
+  working_directory: /path/to/pinned/checkout
+  require_smoke_before_build: true
+  prepare_command: /path/to/env/python /path/to/prepare_bridge.py --seed {seed}
+  smoke_command: /path/to/env/python /path/to/smoke_bridge.py --query-limit 2 --seed {seed}
+  build_command: /path/to/env/python /path/to/build_bridge.py --seed {seed}
+  evaluate_command: /path/to/env/python /path/to/evaluate_bridge.py --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --seed {seed}
+

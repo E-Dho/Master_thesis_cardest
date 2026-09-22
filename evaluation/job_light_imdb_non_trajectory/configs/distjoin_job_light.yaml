@@ -1,0 +1,47 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: distjoin
+  variant_id: published_imdb_dynamic_sampler
+  display_name: DistJoin published IMDB dynamic sampler
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/GIS-PuppetMaster/DistJoin.git
+  revision: 09908b91e9a42f29e2168a47831319d3236da022
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light.csv
+    expected_query_count: 70
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: gpu_training_cpu_inference
+  cpu_threads: 4
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+adapter:
+  type: distjoin
+  working_directory: ../../..
+  environment:
+    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/distjoin_packages
+  require_smoke_before_build: true
+  recipe:
+    sampler: upstream_dynamic_sampler
+    anpm: upstream_distjoin
+    join_mode: equality
+  prepare_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py prepare --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --output-directory {exchange_directory} --python /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python --seed {seed}
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py smoke --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --output-directory {exchange_directory}/distjoin_smoke --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --seed {seed}
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py train --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --output-directory {exchange_directory} --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --seed {seed}
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --output-directory {exchange_directory} --queries {queries_csv} --base-cardinalities /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/distjoin_base_cardinalities.json --predictions {predictions_csv} --latencies {latency_csv} --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --warmup-passes 1 --repetitions 10

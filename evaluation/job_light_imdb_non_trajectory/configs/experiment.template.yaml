@@ -1,0 +1,40 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: method
+  variant_id: variant
+  display_name: Adjustable display name
+  seeds: [0, 1, 2]
+source:
+  url: https://example.invalid/source.git
+  revision: 0000000000000000000000000000000000000000
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /path/to/job-light.csv
+  job_light_ranges:
+    queries_csv: /path/to/job-light-ranges.csv
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: cpu_primary
+  cpu_threads: 1
+  accelerator_native_timing_is_additional: true
+artifacts:
+  dataset_root: /path/to/checksummed/imdb-csv
+  checkpoint: /path/to/checkpoint
+adapter:
+  type: external
+  working_directory: /path/to/source
+  require_smoke_before_build: true
+  prepare_command: /path/to/environment/python prepare.py --seed {seed}
+  smoke_command: /path/to/environment/python smoke.py --queries 2 --seed {seed}
+  build_command: /path/to/environment/python train.py --seed {seed}
+  evaluate_command: /path/to/environment/python evaluate.py --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --seed {seed}
+

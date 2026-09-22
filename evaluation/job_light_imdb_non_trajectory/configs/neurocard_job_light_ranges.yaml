@@ -1,0 +1,44 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: neurocard
+  variant_id: native_resmade_job_light_ranges_8000psamples
+  display_name: NeuroCard native ResMADE JOB-light-ranges 8,000 progressive samples
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/neurocard/neurocard.git
+  revision: a98f509e8d3c522d52ce4b4db47b894b7fafc153
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard
+paths:
+  results_root: ../results
+workloads:
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: gpu_training_cpu_inference
+  cpu_threads: 1
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+adapter:
+  type: neurocard
+  working_directory: ../../..
+  environment:
+    PYTHONPATH: null
+    WANDB_MODE: disabled
+  require_smoke_before_build: true
+  recipe:
+    sampler: native_factorized_sampler
+    progressive_samples: 8000
+  prepare_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py prepare --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cpu --cpu-threads 1 --revision a98f509e8d3c522d52ce4b4db47b894b7fafc153 --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/models/job-light-ranges-pretrained.pt --output {exchange_directory}/prepare_manifest.json
+  smoke_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cpu --cpu-threads 1 --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/models/job-light-ranges-pretrained.pt --queries /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light-ranges.csv --predictions {exchange_directory}/smoke_predictions.csv --latency {exchange_directory}/smoke_latency.csv --psamples 8000 --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --smoke
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py train --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cuda --cpu-threads 4 --checkpoint-output {exchange_directory}/model.pt --artifact-manifest {exchange_directory}/artifact_manifest.json --training-metrics {exchange_directory}/build_stage_metrics.json
+  evaluate_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cpu --cpu-threads 1 --checkpoint {exchange_directory}/model.pt --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --psamples 8000

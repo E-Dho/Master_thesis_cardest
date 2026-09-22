@@ -17,6 +17,9 @@ model = [
   "torch>=2.0",
 ]
 
+[project.scripts]
+joblight-eval = "evaluation.job_light_imdb_non_trajectory.joblight_eval.cli:main"
+
 [tool.pytest.ini_options]
-testpaths = ["query_generation", "model/tests"]
+testpaths = ["query_generation", "model/tests", "evaluation/job_light_imdb_non_trajectory/tests"]
 python_files = ["test_*.py"]

@@ -1,0 +1,18 @@
+schema_version: 1
+sources:
+  mscn:
+    url: https://github.com/andreaskipf/learnedcardinalities.git
+    commit: 50073283eacdea300d1dcd815c720f64e3d2d400
+  deepdb:
+    url: https://github.com/DataManagementLab/deepdb-public.git
+    commit: 655ada13a043a4226a239b0c0a65bcdefef87a02
+  neurocard:
+    url: https://github.com/neurocard/neurocard.git
+    commit: a98f509e8d3c522d52ce4b4db47b894b7fafc153
+  distjoin:
+    url: https://github.com/GIS-PuppetMaster/DistJoin.git
+    commit: 09908b91e9a42f29e2168a47831319d3236da022
+  naru_reference:
+    url: https://github.com/naru-project/naru.git
+    commit: 264cf4e9c96c9e34422f9eebc455a714aeef0b57
+

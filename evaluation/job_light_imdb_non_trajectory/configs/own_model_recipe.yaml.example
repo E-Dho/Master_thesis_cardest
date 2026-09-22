@@ -1,0 +1,35 @@
+extends: learned_common.yaml.example
+experiment:
+  method_id: own_model
+  variant_id: named_ablation
+  display_name: Own model named ablation
+source:
+  url: https://github.com/E-Dho/Master_thesis_cardest.git
+  revision: replace_with_checkpoint_git_sha
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv
+    expected_query_count: 70
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+adapter:
+  type: own_model
+  working_directory: ../../..
+  model_config: /path/to/model-config.yaml
+  checkpoint: /path/to/checkpoint.pt
+  require_smoke_before_build: true
+  prepare_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory}
+  smoke_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv --query-limit {query_limit} --warmup-passes 1 --repetitions 2
+  build_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py build --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory}
+  evaluate_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10

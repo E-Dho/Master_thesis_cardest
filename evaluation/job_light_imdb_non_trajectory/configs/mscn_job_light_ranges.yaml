@@ -1,0 +1,49 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: mscn
+  variant_id: mscn_job_light_ranges_adapted
+  display_name: MSCN JOB-light-ranges adapted
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/andreaskipf/learnedcardinalities.git
+  revision: 50073283eacdea300d1dcd815c720f64e3d2d400
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/mscn
+paths:
+  results_root: ../results
+workloads:
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/workloads/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: gpu_training_cpu_inference
+  cpu_threads: 1
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+adapter:
+  type: mscn
+  working_directory: ../../..
+  environment:
+    PYTHONPATH: null
+  require_smoke_before_build: true
+  recipe:
+    training_queries: 100000
+    epochs: 100
+    sample_bits: 1000
+    batch_size: 1024
+    hidden_size: 256
+    operators: ["=", "<", ">", "<=", ">="]
+    string_encoding: complete_domain_rank
+    test_disjoint: true
+  prepare_command: test -f /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/manifest.json
+  smoke_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py smoke --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cpu --cpu-threads 4 --output-directory {exchange_directory}/mscn_smoke --queries-prefix /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/workloads/job-light-ranges --query-limit {query_limit}
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py train --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cuda --cpu-threads 4 --checkpoint-output {exchange_directory}/model.pt --metadata-output {exchange_directory}/model_metadata.json --artifact-manifest {exchange_directory}/artifact_manifest.json --training-metrics {exchange_directory}/build_stage_metrics.json --queries 100000 --epochs 100 --batch-size 1024 --hidden-size 256
+  evaluate_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cpu --cpu-threads 1 --checkpoint {exchange_directory}/model.pt --metadata {exchange_directory}/model_metadata.json --queries-prefix /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/workloads/job-light-ranges --predictions {predictions_csv} --latency {latency_csv}

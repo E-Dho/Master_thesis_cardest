@@ -39,6 +39,13 @@ query_generation/visualizations/
 model/examples/*.json
 model/runs/
 
+# JOB-light baseline evaluation runtime artifacts
+evaluation/job_light_imdb_non_trajectory/results/
+evaluation/job_light_imdb_non_trajectory/external/
+evaluation/job_light_imdb_non_trajectory/environments/
+evaluation/job_light_imdb_non_trajectory/checkpoints/
+evaluation/job_light_imdb_non_trajectory/datasets/
+
 # POL source is intentionally not vendored in this repo.
 generate-mobility-dataset/
 remote_pol_src/

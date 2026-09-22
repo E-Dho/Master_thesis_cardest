@@ -1,0 +1,19 @@
+extends: foj_sampling_7m.yaml
+experiment:
+  variant_id: n1000_end_to_end_smoke
+  display_name: Unbiased FOJ sampling N=1,000 end-to-end smoke
+  seeds: [0]
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 2
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+adapter:
+  max_sample_size: 1000
+  sample_size: 1000
+  sample_sizes: [1000]
+  smoke_sample_size: 256
+  reservoir_path: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/foj_smoke_complete_projection/seed_{seed}.npy
+  metadata_path: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/foj_smoke_complete_projection/seed_{seed}.json

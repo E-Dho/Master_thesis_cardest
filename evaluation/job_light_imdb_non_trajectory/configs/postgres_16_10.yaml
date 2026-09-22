@@ -1,0 +1,45 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: postgresql
+  variant_id: pg16_10_default_stats100
+  display_name: PostgreSQL 16.10 default statistics
+  seeds: [0]
+source:
+  url: https://github.com/postgres/postgres.git
+  installed_version: "16.10"
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv
+    expected_query_count: 70
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: cpu_primary
+  cpu_threads: 1
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+  pgdata: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/pgdata
+adapter:
+  type: postgres
+  environment:
+    PYTHONPATH: null
+  working_directory: ../../..
+  dsn: dbname=imdb_joblight host=/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/socket port=55432
+  manifest_path: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_manifest.json
+  postgres_version: "16.10"
+  default_statistics_target: 100
+  extended_statistics: false
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin/python3.11 evaluation/job_light_imdb_non_trajectory/scripts/postgres_admin.py initialize --pg-bin /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin --pgdata /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/pgdata --socket-dir /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/socket --port 55432 --database imdb_joblight --manifest /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_manifest.json --csv-directory /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --schema /work_beegfs/sunip956/master_thesis_trajectories/datasets/job/schematext.sql --indexes evaluation/job_light_imdb_non_trajectory/scripts/postgres_indexes.sql
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin/python3.11 evaluation/job_light_imdb_non_trajectory/scripts/postgres_admin.py analyze --pg-bin /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin --pgdata /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/pgdata --socket-dir /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/socket --port 55432 --database imdb_joblight --manifest /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_manifest.json

@@ -1,0 +1,14 @@
+extends: learned_common.yaml.example
+experiment:
+  method_id: neurocard
+  variant_id: native_resmade_8000psamples
+  display_name: NeuroCard native ResMADE 8,000 progressive samples
+source:
+  url: https://github.com/neurocard/neurocard.git
+  revision: a98f509e8d3c522d52ce4b4db47b894b7fafc153
+adapter:
+  type: neurocard
+  recipe:
+    sampler: native_factorized_sampler
+    progressive_samples: 8000
+

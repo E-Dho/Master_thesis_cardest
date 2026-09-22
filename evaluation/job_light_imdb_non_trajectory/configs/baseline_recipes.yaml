@@ -1,0 +1,38 @@
+schema_version: 1
+postgresql:
+  installed_version: "16.10"
+  default_statistics_target: 100
+  extended_statistics: false
+  estimate_source: top_level_plan_rows_after_count_rewrite
+mscn:
+  training_queries: 100000
+  epochs: 100
+  sample_bits: 1000
+  batch_size: 1024
+  hidden_size: 256
+mscn_job_light_ranges_adapted:
+  training_queries: 100000
+  epochs: 100
+  sample_bits: 1000
+  batch_size: 1024
+  hidden_size: 256
+  operators: [=, <, >, <=, >=]
+  string_encoding: complete_domain_rank
+  test_disjoint: true
+deepdb:
+  sample_sizes: [10000000, 10000000, 1000000, 1000000, 1000000]
+  budget_factor: 5
+  max_tables_per_ensemble: 3
+neurocard:
+  sampler: native_factorized_sampler
+  progressive_samples: 8000
+  train_separate_range_model: true
+distjoin:
+  sampler: upstream_dynamic_sampler
+  anpm: upstream_distjoin
+  join_mode: equality
+foj_sampling:
+  sample_sizes: [1000, 10000, 100000, 1000000, 7168000]
+  seeds: [0, 1, 2]
+own_model:
+  arbitrary_named_config_and_checkpoint: true

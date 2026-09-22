@@ -1,0 +1,47 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: deepdb
+  variant_id: imdb_light_rdc_published
+  display_name: DeepDB IMDB-light RDC
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/DataManagementLab/deepdb-public.git
+  revision: 655ada13a043a4226a239b0c0a65bcdefef87a02
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light.csv
+    expected_query_count: 70
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cpu
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+resources:
+  profile: cpu_build_cpu_inference
+  cpu_threads: 4
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+adapter:
+  type: deepdb
+  working_directory: ../../..
+  environment:
+    PYTHONPATH: null
+  require_smoke_before_build: true
+  recipe:
+    sample_sizes: [10000000, 10000000, 1000000, 1000000, 1000000]
+    budget_factor: 5
+    max_tables_per_ensemble: 3
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_bridge.py prepare --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --output-directory {exchange_directory}
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_bridge.py smoke --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --output-directory {exchange_directory}/deepdb_smoke
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_bridge.py build --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/deepdb_shared --output-directory {exchange_directory} --database imdb_joblight --pg-host /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/socket --pg-port 55432 --seed {seed}
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/deepdb_shared --checkpoint {exchange_directory}/ensemble/ensemble_join_3_budget_5_10000000.pkl --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv}
