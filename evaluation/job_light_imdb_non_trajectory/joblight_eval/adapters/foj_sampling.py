@@ -158,7 +158,12 @@ class FojSamplingAdapter(Adapter):
         all_rows = np.load(self._reservoir_path(), mmap_mode="r")
         if sample_size > len(all_rows):
             raise ValueError(f"sample_size {sample_size} exceeds reservoir size {len(all_rows)}")
-        rows = all_rows[:sample_size]
+        # Use a seeded random subsample rather than a positional head-slice so
+        # that sub-max sample sizes are unbiased random subsets of the reservoir
+        # instead of biased prefixes of the sampling order.
+        rng = np.random.default_rng(self.seed)
+        indices = rng.choice(len(all_rows), size=sample_size, replace=False)
+        rows = all_rows[indices]
         warmup_passes = int(self.config.timing.get("warmup_passes", 1))
         repetitions = int(self.config.timing.get("repetitions", 10))
         predictions: list[PredictionRecord] = []

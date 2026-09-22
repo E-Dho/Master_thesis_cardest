@@ -24,7 +24,7 @@ from .workloads import load_workload, sha256_file, workload_statistics
 
 
 REQUIRED_ARTIFACTS = (
-    "resolved_config.yaml",
+    "resolved_config.json",
     "run_manifest.json",
     "smoke_metrics.json",
     "predictions.csv",
@@ -45,7 +45,7 @@ def run_seed(
     manifest = run_manifest(config, seed, run_directory)
     manifest["command"] = "run"
     manifest["status"] = "running"
-    write_resolved_config(run_directory / "resolved_config.yaml", config)
+    write_resolved_config(run_directory / "resolved_config.json", config)
     write_json(run_directory / "run_manifest.json", manifest)
 
     adapter = create_adapter(config, seed, run_directory)
@@ -131,7 +131,7 @@ def initialize_staged_run(
     config: ExperimentConfig, seed: int, run_id: str | None = None
 ) -> Path:
     run_directory = create_run_directory(config, seed, run_id)
-    write_resolved_config(run_directory / "resolved_config.yaml", config)
+    write_resolved_config(run_directory / "resolved_config.json", config)
     manifest = run_manifest(config, seed, run_directory)
     manifest.update({"command": "staged", "status": "initialized"})
     write_json(run_directory / "run_manifest.json", manifest)
@@ -304,7 +304,7 @@ def _validate_complete_run(run_directory: Path, summary: dict[str, Any]) -> None
         accuracy = workload["accuracy"]
         if accuracy["query_count"] != workload["workload"]["query_count"]:
             raise ValueError(f"{workload_id} prediction row count is incomplete")
-        for metric_family in ("raw_q_error", "smoothed_q_error"):
+        for metric_family in ("raw_q_error", "raw_q_error_true_positive", "smoothed_q_error_true_zero", "smoothed_q_error"):
             for value in accuracy[metric_family].values():
                 if value is not None and not math.isfinite(float(value)):
                     raise ValueError(f"{workload_id} contains non-finite {metric_family}")

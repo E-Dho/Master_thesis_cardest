@@ -114,7 +114,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         raise ValueError("source.revision or source.installed_version is required")
     artifacts = _mapping(raw, "artifacts")
     canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
-    config_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    config_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return ExperimentConfig(
         source_path=source_path,
         experiment_id=experiment_id,
@@ -161,6 +161,14 @@ def _resolve_path(config_path: Path, value: Any) -> Path:
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *override* on top of *base*.
+
+    Mappings are merged recursively; all other types — including **lists** — are
+    replaced entirely by the override value.  This means that a list in a child
+    config (e.g. ``seeds``, ``sample_sizes``) replaces the base list rather than
+    extending it.  When writing child configs, always specify the complete list
+    even if only one element differs from the base.
+    """
     result = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):

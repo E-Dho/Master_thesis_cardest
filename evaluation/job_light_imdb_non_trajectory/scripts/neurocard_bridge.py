@@ -447,6 +447,8 @@ class _NativeRuntime:
             }
         )
         self.torch.set_num_threads(max(1, int(cpu_threads)))
+        import random as _random
+        _random.seed(int(seed))
         self.torch.manual_seed(int(seed))
         self.modules["np"].random.seed(int(seed))
         if self.device.type == "cuda":
@@ -644,6 +646,14 @@ def _load_checkpoint(torch: Any, model: Any, path: Path) -> None:
         modules = list(model.net.children())
         if len(modules) < 2 or modules[-2].__class__.__name__ != "ReLU":
             raise original_error
+        import warnings
+        warnings.warn(
+            f"Checkpoint at {path} used an older architecture (trailing ReLU + "
+            "'embedding_networks' key names).  Applying compatibility patch: "
+            "removing the trailing ReLU and renaming embedding keys.  "
+            "Re-save the checkpoint with the current architecture to silence this.",
+            stacklevel=2,
+        )
         modules.pop(-2)
         model.net = torch.nn.Sequential(*modules)
         model.load_state_dict(renamed)

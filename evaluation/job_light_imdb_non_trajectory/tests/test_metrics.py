@@ -40,6 +40,11 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(summary["zero_estimate_count"], 1)
         self.assertTrue(math.isfinite(summary["raw_q_error"]["p99"]))
         self.assertEqual(summary["smoothed_q_error"]["max"], 10.0)
+        # All four scored records have truth=10 (non-zero), so none are true-zero
+        self.assertEqual(summary["true_zero_matching_count"], 0)
+        self.assertIsNone(summary["smoothed_q_error_true_zero"]["p50"])
+        # raw_q_error_true_positive should match raw_q_error since all truth > 0
+        self.assertEqual(summary["raw_q_error_true_positive"]["max"], summary["raw_q_error"]["max"])
 
     def test_latency_and_throughput(self) -> None:
         records = [LatencyRecord("w", index, 0, 100.0) for index in range(10)]

@@ -16,6 +16,16 @@ HEADLINE_METRICS = (
     "raw_q_error.p95",
     "raw_q_error.p99",
     "raw_q_error.max",
+    "raw_q_error_true_positive.p50",
+    "raw_q_error_true_positive.p90",
+    "raw_q_error_true_positive.p95",
+    "raw_q_error_true_positive.p99",
+    "raw_q_error_true_positive.max",
+    "smoothed_q_error_true_zero.p50",
+    "smoothed_q_error_true_zero.p90",
+    "smoothed_q_error_true_zero.p95",
+    "smoothed_q_error_true_zero.p99",
+    "smoothed_q_error_true_zero.max",
     "smoothed_q_error.p50",
     "smoothed_q_error.p90",
     "smoothed_q_error.p95",
@@ -74,6 +84,7 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
             ]
             workload_result["metrics"][path] = _mean_std(values)
         for name in (
+            "true_zero_matching_count",
             "estimate_lt_1_count",
             "estimate_lt_0_1_count",
             "estimate_lt_0_01_count",
@@ -197,6 +208,9 @@ def _mean_std(values: list[float | int | None]) -> dict[str, float | None]:
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()

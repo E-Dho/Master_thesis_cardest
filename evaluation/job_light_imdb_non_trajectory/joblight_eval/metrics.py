@@ -11,6 +11,36 @@ from .records import LatencyRecord, PredictionRecord
 EPSILON = 1.0e-12
 PERCENTILES = (50, 90, 95, 99)
 
+# ---------------------------------------------------------------------------
+# Q-error flavours
+# ---------------------------------------------------------------------------
+# Two q-error variants are tracked because zero-truth queries cause a blow-up
+# in raw q-error: raw_q_error(est, 0) ≈ est / EPSILON, which dominates every
+# aggregate metric and makes models with many empty-result queries incomparable.
+#
+# Convention used throughout this module:
+#   raw_q_error          — max(est, ε) / max(truth, ε) or its reciprocal;
+#                          reliable only when truth > 0.  Use this as the
+#                          primary accuracy metric for **true-positive queries**
+#                          (i.e. queries whose actual result set is non-empty).
+#
+#   smoothed_q_error     — max(est, 1.0) / max(truth, 1.0) or its reciprocal;
+#                          treats both sides as "at least 1 row", so a zero-
+#                          truth query with a zero estimate scores 1.0 (perfect)
+#                          instead of 1/ε (catastrophic).  Use this as the
+#                          primary accuracy metric for **true-zero queries**
+#                          (queries whose actual result set is empty) and as a
+#                          secondary overall metric that is comparable across
+#                          workloads with varying fractions of empty results.
+#
+# The summary produced by summarize_predictions() therefore contains four
+# separate q-error blocks:
+#   raw_q_error                — all scored queries   (primary: compare true-positives)
+#   raw_q_error_true_positive  — truth > 0 only       (isolated true-positive view)
+#   smoothed_q_error_true_zero — truth == 0 only      (isolated empty-result view)
+#   smoothed_q_error           — all scored queries   (cross-workload comparable)
+# ---------------------------------------------------------------------------
+
 
 def raw_q_error(estimate: float, truth: float) -> float:
     estimate = max(float(estimate), EPSILON)
@@ -56,6 +86,12 @@ def percentile_summary(values: Iterable[float]) -> dict[str, float | None]:
 def summarize_predictions(records: list[PredictionRecord]) -> dict[str, Any]:
     completed = [attach_q_errors(record) for record in records]
     scored = [record for record in completed if record.status == "ok"]
+
+    # Split scored records by whether the ground-truth cardinality is zero.
+    # See module-level docstring for the rationale.
+    true_positive = [r for r in scored if r.true_cardinality > 0]
+    true_zero = [r for r in scored if r.true_cardinality == 0]
+
     estimates = [float(record.estimated_cardinality) for record in scored]
     statuses: dict[str, int] = defaultdict(int)
     for record in completed:
@@ -64,16 +100,29 @@ def summarize_predictions(records: list[PredictionRecord]) -> dict[str, Any]:
     return {
         "query_count": len(completed),
         "scored_query_count": len(scored),
+        "true_zero_matching_count": len(true_zero),
         "coverage_fraction": len(scored) / max(len(completed), 1),
         "status_counts": dict(sorted(statuses.items())),
+        # --- q-error metrics (see module-level note for which to use when) ---
         "raw_q_error": percentile_summary(
             float(record.raw_q_error) for record in scored if record.raw_q_error is not None
+        ),
+        "raw_q_error_true_positive": percentile_summary(
+            float(record.raw_q_error)
+            for record in true_positive
+            if record.raw_q_error is not None
+        ),
+        "smoothed_q_error_true_zero": percentile_summary(
+            float(record.smoothed_q_error)
+            for record in true_zero
+            if record.smoothed_q_error is not None
         ),
         "smoothed_q_error": percentile_summary(
             float(record.smoothed_q_error)
             for record in scored
             if record.smoothed_q_error is not None
         ),
+        # --- estimate sanity counters ---
         "estimate_lt_1_count": sum(value < 1.0 for value in estimates),
         "estimate_lt_1_fraction": sum(value < 1.0 for value in estimates) / denominator,
         "estimate_lt_0_1_count": sum(value < 0.1 for value in estimates),
@@ -106,17 +155,26 @@ def summarize_latency(records: list[LatencyRecord]) -> dict[str, Any]:
     }
 
 
+# Metric families surfaced per seed and aggregated across seeds.
+# Each entry is (summary_key, metric_name) where summary_key is the top-level
+# key inside the per-workload accuracy dict.
+_Q_ERROR_AGGREGATE_PATHS = [
+    (section, metric)
+    for section in (
+        "raw_q_error",
+        "raw_q_error_true_positive",
+        "smoothed_q_error_true_zero",
+        "smoothed_q_error",
+    )
+    for metric in ("p50", "p90", "p95", "p99", "max")
+]
+
+
 def aggregate_seed_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     if not summaries:
         raise ValueError("at least one seed summary is required")
     result: dict[str, Any] = {"seed_count": len(summaries), "metrics": {}}
-    paths = [
-        ("raw_q_error", metric) for metric in ("p50", "p90", "p95", "p99", "max")
-    ] + [
-        ("smoothed_q_error", metric)
-        for metric in ("p50", "p90", "p95", "p99", "max")
-    ]
-    for section, metric in paths:
+    for section, metric in _Q_ERROR_AGGREGATE_PATHS:
         values = [summary[section][metric] for summary in summaries]
         if any(value is None for value in values):
             result["metrics"][f"{section}.{metric}"] = {"mean": None, "std": None}
@@ -127,4 +185,3 @@ def aggregate_seed_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
             "std": float(np.std(data, ddof=1)) if len(data) > 1 else 0.0,
         }
     return result
-

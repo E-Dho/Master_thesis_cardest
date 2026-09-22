@@ -201,12 +201,15 @@ def _write_complete_run(path: Path, seed: int, config_hash: str) -> Path:
     accuracy = {
         "query_count": 1,
         "scored_query_count": 1,
+        "true_zero_matching_count": 0,
         "coverage_fraction": 1.0,
         "estimate_lt_1_count": 0,
         "estimate_lt_0_1_count": 0,
         "estimate_lt_0_01_count": 0,
         "zero_estimate_count": 0,
         "raw_q_error": {"p50": 2.0, "p90": 2.0, "p95": 2.0, "p99": 2.0, "max": 2.0},
+        "raw_q_error_true_positive": {"p50": 2.0, "p90": 2.0, "p95": 2.0, "p99": 2.0, "max": 2.0},
+        "smoothed_q_error_true_zero": {"p50": None, "p90": None, "p95": None, "p99": None, "max": None},
         "smoothed_q_error": {"p50": 2.0, "p90": 2.0, "p95": 2.0, "p99": 2.0, "max": 2.0},
     }
     inference = {

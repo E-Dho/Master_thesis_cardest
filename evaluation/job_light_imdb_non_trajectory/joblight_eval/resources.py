@@ -35,6 +35,10 @@ def run_logged_command(
             merged_env.pop(str(key), None)
         else:
             merged_env[str(key)] = str(value)
+    # Snapshot RUSAGE_CHILDREN before the subprocess so we capture only this
+    # command's contribution.  ru_maxrss is a session-cumulative high-water mark,
+    # not a per-process value, so we compute a delta.
+    before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     start = time.perf_counter()
     with stdout_path.open("a", encoding="utf-8") as stdout, stderr_path.open(
         "a", encoding="utf-8"
@@ -50,7 +54,11 @@ def run_logged_command(
     elapsed = time.perf_counter() - start
     after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     # macOS reports bytes; Linux reports KiB.
-    peak = int(after if os.uname().sysname == "Darwin" else after * 1024)
+    is_darwin = os.uname().sysname == "Darwin"
+    scale = 1 if is_darwin else 1024
+    # Delta gives a per-command approximation; may undercount if the session-
+    # wide high-water mark was already set by an earlier, larger subprocess.
+    peak = int(max(after - before, 0) * scale) or None
     if completed.returncode:
         raise RuntimeError(
             f"command failed with exit code {completed.returncode}; see {stderr_path}"

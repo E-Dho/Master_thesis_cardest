@@ -187,8 +187,17 @@ def _train(args: argparse.Namespace) -> None:
         "full_checkpoint_mb": sum(path.stat().st_size for path in checkpoints) / 1_000_000,
         "upstream_config": config,
     }
+    # Count total trainable parameters across all per-table checkpoint files.
+    try:
+        import torch as _torch
+        parameter_count = sum(
+            sum(p.numel() for p in _torch.load(ckpt, map_location="cpu", weights_only=True).values())
+            for ckpt in checkpoints
+        )
+    except Exception:
+        parameter_count = None
     artifact = {
-        "parameter_count": None,
+        "parameter_count": parameter_count,
         "serialized_model_mb": metrics["full_checkpoint_mb"],
         "full_checkpoint_mb": metrics["full_checkpoint_mb"],
         "checkpoint_directory": str(checkpoints[0].parent),
