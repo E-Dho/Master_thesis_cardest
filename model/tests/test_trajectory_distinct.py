@@ -254,12 +254,21 @@ class _TrajectorySource:
 
 
 class _FakeDistinctEstimator:
-    def __init__(self, *, matching: float = 80.0, dedup: float = 0.5) -> None:
+    def __init__(
+        self,
+        *,
+        matching: float = 80.0,
+        dedup: float = 0.5,
+        raises: str | None = None,
+    ) -> None:
         self.matching = matching
         self.dedup = dedup
+        self.raises = raises
 
     def estimate_distinct_trajectories(self, *args, **kwargs):
         del args, kwargs
+        if self.raises is not None:
+            raise TrajectoryDistinctNotApplicable(self.raises)
         return type(
             "FakeDistinctEstimate",
             (),
@@ -268,6 +277,7 @@ class _FakeDistinctEstimator:
                 "traj_dedup_factor": self.dedup,
                 "distinct_trajectory_estimate": self.matching * self.dedup,
                 "model_forward_calls": 1,
+                "latency_seconds": 0.25,
             },
         )()
 
@@ -887,6 +897,67 @@ class TrajectoryDistinctTest(unittest.TestCase):
             result = provider.evaluate_batch(anchor_trajectory_ids=(10,), contexts=(context,))
         self.assertTrue(bool(result.eligible_mask[0]))
         self.assertEqual(int(result.multiplicities[0]), 2)
+
+    def test_pol_query_adapter_timestamp_strings_snap_to_epoch_domain(self) -> None:
+        metadata = ModelMetadata(
+            columns=(
+                ColumnMetadata(
+                    "segments:t_s",
+                    ColumnKind.DATA,
+                    (
+                        1591204200.0,
+                        1591204500.0,
+                        1591204800.0,
+                        1591205100.0,
+                    ),
+                    table="segments",
+                ),
+                ColumnMetadata(
+                    "segments:t_e",
+                    ColumnKind.DATA,
+                    (
+                        1591204500.0,
+                        1591204800.0,
+                        1591205100.0,
+                        1591205400.0,
+                    ),
+                    table="segments",
+                ),
+                ColumnMetadata("I_trips", ColumnKind.INDICATOR, (0, 1), table="trips"),
+                ColumnMetadata("I_segments", ColumnKind.INDICATOR, (0, 1), table="segments"),
+            ),
+            full_join_cardinality=1,
+            join_root="trips",
+            join_tables=("trips", "segments"),
+            join_edges=(("trips", "segments"),),
+        )
+        record = {
+            "query_id": "temporal_strings",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_time",
+                    "dimension": "temporal",
+                    "type": "temporal_interval",
+                    "mode": "temporal_overlap",
+                    "lower": "2020-06-03 17:15:14.209500",
+                    "upper": "2020-06-03 17:20:14.209500",
+                }
+            ],
+        }
+        context = pol_workload_record_to_context(record, metadata)
+        self.assertEqual(
+            context.ordinary_predicates["segments:t_s"],
+            PredicateToken(PredicateOp.LESS_EQUAL, value=1591204800.0),
+        )
+        self.assertEqual(
+            context.ordinary_predicates["segments:t_e"],
+            PredicateToken(PredicateOp.GREATER_EQUAL, value=1591204800.0),
+        )
+        temporal = context.trajectory_query.temporal_predicates[0]  # type: ignore[union-attr]
+        self.assertAlmostEqual(temporal.lower, 1591204514.2095)
+        self.assertAlmostEqual(temporal.upper, 1591204814.2095)
 
     def test_pol_query_adapter_spatial_returns_unsupported_distinct_status(self) -> None:
         metadata = _pol_segment_metadata()
@@ -1707,6 +1778,88 @@ trajectory_distinct:
         self.assertIsNone(result.distinct_trajectory_estimate)
         self.assertIsNone(result.distinct_trajectory_qerror)
 
+    def test_pol_mbr_unsupported_physical_spatial_predicate_does_not_crash(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        record = {
+            "query_id": "mixed_spatial_mbr_unsupported",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "segment_geom",
+                    "dimension": "spatial",
+                    "type": "geometry",
+                    "mode": "spatial_intersects",
+                    "min_x": 0.0,
+                    "min_y": 0.0,
+                    "max_x": 2.0,
+                    "max_y": 2.0,
+                    "srid": 26916,
+                },
+                {
+                    "table": "trips",
+                    "attribute": "trip_geom",
+                    "dimension": "spatial",
+                    "type": "geometry",
+                    "mode": "spatial_intersects",
+                    "min_x": 0.0,
+                    "min_y": 0.0,
+                    "max_x": 2.0,
+                    "max_y": 2.0,
+                    "srid": 26916,
+                },
+            ],
+            "join_cardinality": 20,
+            "entity_cardinality": 4,
+        }
+        result = evaluate_pol_distinct_record(
+            record,
+            metadata=metadata,
+            estimator=_FakeDistinctEstimator(raises="unsupported_base_segment_spatial_measure"),
+            trajectory_spatial={"enabled": True, "representation": "segment_mbr"},
+        )
+        self.assertEqual(result.query_id, "mixed_spatial_mbr_unsupported")
+        self.assertEqual(
+            result.distinct_estimate_status,
+            "unsupported_base_segment_spatial_measure",
+        )
+        self.assertEqual(result.matching_segments_true, 20)
+        self.assertIsNone(result.matching_segment_estimate)
+        self.assertIsNone(result.distinct_trajectory_estimate)
+
+    def test_pol_workload_continuous_scalar_bounds_snap_to_domain_literals(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        record = {
+            "query_id": "continuous_scalar_bounds",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments",
+                    "attribute": "s_x",
+                    "dimension": "standard",
+                    "type": "numeric",
+                    "mode": "range",
+                    "lower": 0.3727581101429032,
+                    "upper": 2.9,
+                }
+            ],
+            "join_cardinality": 1,
+            "entity_cardinality": 1,
+        }
+        context = pol_workload_record_to_context(record, metadata)
+        token = context.ordinary_predicates["segments:s_x"]
+        self.assertEqual(token.op, PredicateOp.RANGE)
+        self.assertIn(token.value, metadata.columns[3].domain)
+        self.assertIn(token.upper, metadata.columns[3].domain)
+        self.assertEqual(token.value, 1.0)
+        self.assertEqual(token.upper, 1.0)
+
+        vocabularies = PredicateVocabularies.from_metadata(
+            metadata,
+            encoding_mode="two_slot_binary_duet",
+        )
+        vocabularies.encode_rows([list(context.tokens)])
+
     def test_mbr_generator_sorts_initially_inverted_bounds(self) -> None:
         metadata = _pol_segment_mbr_metadata()
         row = _encode_pol_segments(
@@ -1801,6 +1954,40 @@ trajectory_distinct:
             if column_name.startswith("segments:seg_"):
                 domain = metadata.columns[metadata.column_index(column_name)].domain
                 self.assertIn(token.value, domain)
+
+    def test_cached_mbr_canonicalization_matches_public_helper(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "trajectory_query_semantics": "pol_segments",
+                "trajectory_spatial": {"enabled": True, "representation": "segment_mbr"},
+            }
+        )
+        compiled = generator._compiled(metadata)  # type: ignore[attr-defined]
+        cached = generator._canonicalize_segment_mbr_predicate_cached(  # type: ignore[attr-defined]
+            compiled,
+            min_x_column="segments:seg_min_x",
+            max_x_column="segments:seg_max_x",
+            min_y_column="segments:seg_min_y",
+            max_y_column="segments:seg_max_y",
+            min_x=0.4,
+            min_y=0.2,
+            max_x=2.6,
+            max_y=2.8,
+        )
+        public = canonicalize_segment_mbr_predicate(
+            metadata,
+            min_x_column="segments:seg_min_x",
+            max_x_column="segments:seg_max_x",
+            min_y_column="segments:seg_min_y",
+            max_y_column="segments:seg_max_y",
+            min_x=0.4,
+            min_y=0.2,
+            max_x=2.6,
+            max_y=2.8,
+        )
+        self.assertEqual(cached, public)
 
     def test_pol_mbr_encoded_mask_matches_unsnapped_physical_mbr_on_fixture_rows(self) -> None:
         metadata = _pol_segment_mbr_metadata()

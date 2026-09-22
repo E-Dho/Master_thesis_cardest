@@ -9,6 +9,7 @@ import numpy as np
 
 from model.src.data.schema import ColumnKind, ModelMetadata
 from model.src.predicates.operators import PredicateOp, PredicateToken
+from model.src.predicates.vocabulary import TWO_SLOT_EMPTY_OPERATOR_ID, TWO_SLOT_OP_TO_ID
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class GeneratedTrainingContext:
     inverse_fanout_columns: frozenset[str]
     ordinary_predicates: Mapping[str, PredicateToken]
     trajectory_query: Any | None = None
+    encoded_two_slot_row: tuple[tuple[int, int, int, int], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,43 @@ class PredicateGenerationStats:
 @dataclass(frozen=True)
 class _ColumnPredicateCache:
     comparable_values: tuple[Any, ...]
+    domain_id_to_left_rank: tuple[int, ...]
+    domain_id_to_right_rank: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _NumericLiteralCache:
+    values: tuple[float, ...]
+    literals: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class _CompiledGenerationMetadata:
+    column_name_to_index: dict[str, int]
+    data_indices: tuple[int, ...]
+    indicator_indices: tuple[int, ...]
+    fanout_indices: tuple[int, ...]
+    table_indicator_indices: dict[str, int]
+    graph: JoinGraphMetadata
+    fanout_child_by_name: dict[str, str | None]
+    column_caches: tuple[_ColumnPredicateCache | None, ...]
+    pol_required_available: bool
+    temporal_start_index: int | None
+    temporal_end_index: int | None
+    endpoint_spatial_indices: dict[str, int]
+    mbr_spatial_indices: dict[str, int]
+    endpoint_x_domain: tuple[float, ...]
+    endpoint_y_domain: tuple[float, ...]
+    numeric_literals_by_column: tuple[_NumericLiteralCache | None, ...]
+    table_to_bit: dict[str, int]
+    bit_to_table: tuple[str, ...]
+    data_table_bits: tuple[int, ...]
+    fanout_child_bits: tuple[int, ...]
+
+
+_WILDCARD_TOKEN = PredicateToken.wildcard()
+_INDICATOR_INCLUDED_TOKEN = PredicateToken.equal(1)
+_INV_FANOUT_TOKEN = PredicateToken.inv_fanout()
 
 
 _TOKEN_COVERAGE_KEYS = (
@@ -160,8 +199,9 @@ class PredicateTrainingContextGenerator:
             raise ValueError(
                 "predicate_generation.trajectory_spatial.representation must be "
                 "segment_mbr when enabled"
-            )
+        )
         self._cache_by_metadata_id: dict[int, tuple[_ColumnPredicateCache | None, ...]] = {}
+        self._compiled_by_metadata_id: dict[int, _CompiledGenerationMetadata] = {}
 
     def probability_diagnostics(self) -> dict[str, float | bool]:
         return {
@@ -180,10 +220,13 @@ class PredicateTrainingContextGenerator:
         encoded_rows: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        validate_contexts: bool = True,
+        validation_sample_size: int | None = None,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
         """Generate contexts and row targets, repeating rows per context."""
 
         encoded_rows = np.asarray(encoded_rows, dtype=int)
+        compiled = self._compiled(metadata)
         if self.strategy == "duet_batch_bounds" and not self.legacy_fixed_context:
             # IMPORTANT:
             # `duet_batch_bounds` is intentionally ROW-SPECIFIC in this project.
@@ -205,6 +248,9 @@ class PredicateTrainingContextGenerator:
                 encoded_rows=encoded_rows,
                 metadata=metadata,
                 rng=rng,
+                compiled=compiled,
+                validate_contexts=validate_contexts,
+                validation_sample_size=validation_sample_size,
             )
         contexts: list[GeneratedTrainingContext] = []
         repeated_rows: list[np.ndarray] = []
@@ -216,7 +262,7 @@ class PredicateTrainingContextGenerator:
                 context = (
                     self._generate_legacy_fixed_context(metadata)
                     if self.legacy_fixed_context
-                    else self._generate_one(row, metadata, rng)
+                    else self._generate_one(row, metadata, rng, compiled)
                 )
                 if self.legacy_fixed_context:
                     contradictions += included_indicator_contradictions(context, row, metadata)
@@ -224,7 +270,7 @@ class PredicateTrainingContextGenerator:
                     repeated_rows.append(row)
                     source_row_indices.append(row_index)
                     continue
-                if self._requires_root(metadata) and not context.included_tables:
+                if self._requires_root(metadata, compiled) and not context.included_tables:
                     rejected += 1
                     continue
                 if not context_satisfies_row(context, row, metadata):
@@ -264,6 +310,7 @@ class PredicateTrainingContextGenerator:
 
         encoded_rows = np.asarray(encoded_rows, dtype=int)
         strata = tuple(strata)
+        compiled = self._compiled(metadata)
         if encoded_rows.shape[0] != len(strata):
             raise ValueError("forced stratum generation requires one stratum per row")
         contexts: list[GeneratedTrainingContext] = []
@@ -277,6 +324,7 @@ class PredicateTrainingContextGenerator:
                 metadata,
                 stratum,
                 rng,
+                compiled,
                 debug_allow_row_dependent_native_range_tail=(
                     debug_allow_row_dependent_native_range_tail
                 ),
@@ -307,35 +355,40 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         stratum: Any,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
         *,
         debug_allow_row_dependent_native_range_tail: bool = False,
     ) -> GeneratedTrainingContext:
-        included_tables = set(self._sample_included_tables(encoded_row, metadata, rng))
+        compiled = compiled or self._compiled(metadata)
+        included_tables = set(self._sample_included_tables(encoded_row, metadata, rng, compiled))
         column = metadata.columns[int(stratum.column_index)]
         if column.table is not None:
-            present = present_tables_for_row(encoded_row, metadata)
+            present = self._present_tables_for_row(encoded_row, metadata, compiled)
             if column.table not in present:
+                tokens = tuple([_WILDCARD_TOKEN] * len(metadata.columns))
                 return GeneratedTrainingContext(
-                    tokens=tuple([PredicateToken.wildcard()] * len(metadata.columns)),
+                    tokens=tokens,
                     included_tables=frozenset(),
                     inverse_fanout_columns=frozenset(),
                     ordinary_predicates={},
+                    encoded_two_slot_row=_wildcard_two_slot_row(metadata),
                 )
             included_tables.add(column.table)
             if self.table_subset_sampling == "neurocard_table_dropout_rooted":
-                graph = infer_join_graph(metadata)
+                graph = compiled.graph
                 included_tables = _root_connected_component(
                     included_tables,
                     graph.root_table,
                     graph.edges,
                 )
                 included_tables.add(column.table)
-        inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
+        inverse_fanouts = self._inverse_fanouts_for_table_subset(compiled, included_tables)
         ordinary = self._ordinary_predicates(
             encoded_row,
             metadata,
             rng,
             frozenset(included_tables),
+            compiled=compiled,
         )
         ordinary[column.name] = forced_predicate_for_stratum(
             stratum,
@@ -345,19 +398,19 @@ class PredicateTrainingContextGenerator:
                 debug_allow_row_dependent_native_range_tail
             ),
         )
-        tokens = tuple(
-            tokens_for_query_tables(
-                metadata,
-                set(included_tables),
-                set(inverse_fanouts),
-                dict(ordinary),
-            )
+        tokens, encoded_two_slot_row = self._tokens_and_two_slot_for_query_tables(
+            metadata,
+            compiled,
+            set(included_tables),
+            set(inverse_fanouts),
+            dict(ordinary),
         )
         return GeneratedTrainingContext(
             tokens=tokens,
             included_tables=frozenset(included_tables),
             inverse_fanout_columns=frozenset(inverse_fanouts),
             ordinary_predicates=ordinary,
+            encoded_two_slot_row=encoded_two_slot_row,
         )
 
     def _generate_duet_row_specific(
@@ -366,9 +419,13 @@ class PredicateTrainingContextGenerator:
         encoded_rows: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
+        validate_contexts: bool = True,
+        validation_sample_size: int | None = None,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
         """Generate independent Duet-style query contexts for each sampled row."""
 
+        compiled = compiled or self._compiled(metadata)
         contexts: list[GeneratedTrainingContext] = []
         repeated_rows: list[np.ndarray] = []
         source_row_indices: list[int] = []
@@ -377,19 +434,43 @@ class PredicateTrainingContextGenerator:
         repeats = self.per_row_contexts if self.enabled else 1
         for row_index, row in enumerate(encoded_rows):
             for _ in range(repeats):
-                context = self._generate_one(row, metadata, rng)
-                if self._requires_root(metadata) and not context.included_tables:
+                context = self._generate_one(row, metadata, rng, compiled)
+                if self._requires_root(metadata, compiled) and not context.included_tables:
                     rejected += 1
                     continue
-                contradictions += included_indicator_contradictions(context, row, metadata)
-                if not context_satisfies_row(context, row, metadata):
-                    rejected += 1
-                    continue
+                if validate_contexts:
+                    contradictions += included_indicator_contradictions(
+                        context,
+                        row,
+                        metadata,
+                    )
+                    if not context_satisfies_row(context, row, metadata):
+                        rejected += 1
+                        continue
                 contexts.append(context)
                 repeated_rows.append(row)
                 source_row_indices.append(row_index)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
+        if not validate_contexts and validation_sample_size:
+            sample_count = min(int(validation_sample_size), len(contexts))
+            for validation_index in _deterministic_validation_indices(
+                len(contexts),
+                sample_count,
+            ):
+                context = contexts[validation_index]
+                row = repeated_rows[validation_index]
+                contradiction_count = included_indicator_contradictions(
+                    context,
+                    row,
+                    metadata,
+                )
+                contradictions += contradiction_count
+                if contradiction_count or not context_satisfies_row(context, row, metadata):
+                    raise ValueError(
+                        "row-satisfied predicate generation validation failed "
+                        f"for context index {validation_index}"
+                    )
         return (
             contexts,
             np.stack(repeated_rows, axis=0),
@@ -406,15 +487,16 @@ class PredicateTrainingContextGenerator:
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
     ) -> GeneratedTrainingContext:
-        query = self._generate_physical_query(encoded_row, metadata, rng)
-        tokens = tuple(
-            tokens_for_query_tables(
-                metadata,
-                set(query.included_tables),
-                set(query.inverse_fanout_columns),
-                dict(query.ordinary_predicates),
-            )
+        compiled = compiled or self._compiled(metadata)
+        query = self._generate_physical_query(encoded_row, metadata, rng, compiled)
+        tokens, encoded_two_slot_row = self._tokens_and_two_slot_for_query_tables(
+            metadata,
+            compiled,
+            set(query.included_tables),
+            set(query.inverse_fanout_columns),
+            dict(query.ordinary_predicates),
         )
         return GeneratedTrainingContext(
             tokens=tokens,
@@ -422,6 +504,7 @@ class PredicateTrainingContextGenerator:
             inverse_fanout_columns=query.inverse_fanout_columns,
             ordinary_predicates=query.ordinary_predicates,
             trajectory_query=query.trajectory_query,
+            encoded_two_slot_row=encoded_two_slot_row,
         )
 
     def _generate_physical_query(
@@ -429,15 +512,28 @@ class PredicateTrainingContextGenerator:
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
     ) -> GeneratedPhysicalQuery:
-        included_tables = self._sample_included_tables(encoded_row, metadata, rng)
-        inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
+        compiled = compiled or self._compiled(metadata)
+        included_table_mask = self._sample_included_table_mask(
+            encoded_row,
+            metadata,
+            rng,
+            compiled,
+        )
+        included_tables = self._tables_from_mask(compiled, included_table_mask)
+        inverse_fanouts = self._inverse_fanouts_for_table_mask(
+            metadata,
+            compiled,
+            included_table_mask,
+        )
         semantic_owned: set[str] = set()
         trajectory_query = self._pol_trajectory_query_for_row(
             encoded_row,
             metadata,
             rng,
             included_tables,
+            compiled,
         )
         if trajectory_query is not None:
             semantic_owned.update(_semantic_owned_column_names(trajectory_query))
@@ -447,6 +543,8 @@ class PredicateTrainingContextGenerator:
             rng,
             included_tables,
             excluded_columns=frozenset(semantic_owned),
+            compiled=compiled,
+            included_table_mask=included_table_mask,
         )
         if trajectory_query is not None:
             ordinary.update(dict(getattr(trajectory_query, "scalar_predicates", ())))
@@ -471,12 +569,19 @@ class PredicateTrainingContextGenerator:
             for column in metadata.columns
             if column.kind == ColumnKind.FANOUT
         )
-        tokens = tuple(tokens_for_query_tables(metadata, set(included_tables), set(inverse_fanouts)))
+        compiled = self._compiled(metadata)
+        tokens, encoded_two_slot_row = self._tokens_and_two_slot_for_query_tables(
+            metadata,
+            compiled,
+            set(included_tables),
+            set(inverse_fanouts),
+        )
         return GeneratedTrainingContext(
             tokens=tokens,
             included_tables=included_tables,
             inverse_fanout_columns=inverse_fanouts,
             ordinary_predicates={},
+            encoded_two_slot_row=encoded_two_slot_row,
         )
 
     def _sample_included_tables(
@@ -484,16 +589,20 @@ class PredicateTrainingContextGenerator:
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
     ) -> frozenset[str]:
-        present = present_tables_for_row(encoded_row, metadata)
-        return self._sample_included_from_present(present, metadata, rng)
+        compiled = compiled or self._compiled(metadata)
+        present = self._present_tables_for_row(encoded_row, metadata, compiled)
+        return self._sample_included_from_present(present, metadata, rng, compiled)
 
     def _sample_included_from_present(
         self,
         present: frozenset[str],
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
     ) -> frozenset[str]:
+        compiled = compiled or self._compiled(metadata)
         if not present:
             return frozenset()
         if self.table_subset_sampling == "full" or not self.enabled:
@@ -502,7 +611,7 @@ class PredicateTrainingContextGenerator:
             "neurocard_rooted_connected",
             "rooted_connected_uniform_legacy",
         }:
-            graph = infer_join_graph(metadata)
+            graph = compiled.graph
             if graph.root_table not in present:
                 return frozenset()
             candidates = connected_table_subsets(
@@ -515,7 +624,7 @@ class PredicateTrainingContextGenerator:
             index = int(rng.integers(0, len(candidates)))
             return frozenset(candidates[index])
         if self.table_subset_sampling == "neurocard_table_dropout_rooted":
-            return neurocard_table_dropout_rooted_subset(metadata, present, rng)
+            return self._neurocard_table_dropout_rooted_subset(compiled, present, rng)
         if self.table_subset_sampling != "connected":
             raise ValueError(
                 f"unsupported predicate_generation.table_subset_sampling "
@@ -527,7 +636,12 @@ class PredicateTrainingContextGenerator:
         index = int(rng.integers(0, len(candidates)))
         return frozenset(candidates[index])
 
-    def _requires_root(self, metadata: ModelMetadata) -> bool:
+    def _requires_root(
+        self,
+        metadata: ModelMetadata,
+        compiled: _CompiledGenerationMetadata | None = None,
+    ) -> bool:
+        compiled = compiled or self._compiled(metadata)
         return (
             self.enabled
             and self.table_subset_sampling in {
@@ -535,7 +649,7 @@ class PredicateTrainingContextGenerator:
                 "rooted_connected_uniform_legacy",
                 "neurocard_table_dropout_rooted",
             }
-            and bool(infer_join_graph(metadata).root_table)
+            and bool(compiled.graph.root_table)
         )
 
     def _ordinary_predicates(
@@ -545,20 +659,26 @@ class PredicateTrainingContextGenerator:
         rng: np.random.Generator,
         included_tables: frozenset[str],
         excluded_columns: frozenset[str] = frozenset(),
+        compiled: _CompiledGenerationMetadata | None = None,
+        included_table_mask: int | None = None,
     ) -> dict[str, PredicateToken]:
+        compiled = compiled or self._compiled(metadata)
+        if included_table_mask is None:
+            included_table_mask = _table_mask_from_tables(included_tables, compiled)
         ordinary: dict[str, PredicateToken] = {}
-        for column_index, column in enumerate(metadata.columns):
-            if column.kind != ColumnKind.DATA:
-                continue
+        for column_index in compiled.data_indices:
+            column = metadata.columns[column_index]
             if column.name in excluded_columns:
                 continue
-            if column.table is not None and column.table not in included_tables:
+            table_bit = compiled.data_table_bits[column_index]
+            if table_bit and not (included_table_mask & table_bit):
                 continue
             value = column.domain[int(encoded_row[column_index])]
             token = self._sample_satisfied_predicate(
-                self._column_cache(metadata, column_index),
+                compiled.column_caches[column_index],
                 value,
                 rng,
+                encoded_value_id=int(encoded_row[column_index]),
             )
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
@@ -570,7 +690,9 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         rng: np.random.Generator,
         included_tables: frozenset[str],
+        compiled: _CompiledGenerationMetadata | None = None,
     ) -> Any | None:
+        compiled = compiled or self._compiled(metadata)
         if self.trajectory_query_semantics not in {"auto_pol_segments", "pol_segments"}:
             return None
         if "segments" not in included_tables:
@@ -583,8 +705,7 @@ class PredicateTrainingContextGenerator:
             "segments:e_x",
             "segments:e_y",
         }
-        names = {column.name for column in metadata.columns}
-        if not required.issubset(names):
+        if not compiled.pol_required_available:
             if self.trajectory_query_semantics == "pol_segments":
                 raise ValueError("pol_segments trajectory query semantics require POL segment columns")
             return None
@@ -592,12 +713,12 @@ class PredicateTrainingContextGenerator:
         temporal_predicates = []
         spatial_predicates = []
         if float(rng.random()) < self.trajectory_temporal_probability:
-            generated = self._sample_pol_temporal_query(encoded_row, metadata, rng)
+            generated = self._sample_pol_temporal_query(encoded_row, metadata, rng, compiled)
             if generated is not None:
                 scalar_predicates.extend(generated[0])
                 temporal_predicates.append(generated[1])
         if float(rng.random()) < self.trajectory_spatial_probability:
-            generated = self._sample_pol_spatial_query(encoded_row, metadata, rng)
+            generated = self._sample_pol_spatial_query(encoded_row, metadata, rng, compiled)
             if generated is not None:
                 scalar_predicates.extend(generated[0])
                 spatial_predicates.append(generated[1])
@@ -616,19 +737,23 @@ class PredicateTrainingContextGenerator:
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
     ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
         from model.src.data.trajectory_distinct import SegmentTemporalPredicate
 
-        start_index = metadata.column_index("segments:t_s")
-        end_index = metadata.column_index("segments:t_e")
+        compiled = compiled or self._compiled(metadata)
+        if compiled.temporal_start_index is None or compiled.temporal_end_index is None:
+            return None
+        start_index = compiled.temporal_start_index
+        end_index = compiled.temporal_end_index
         start_value = metadata.columns[start_index].domain[int(encoded_row[start_index])]
         end_value = metadata.columns[end_index].domain[int(encoded_row[end_index])]
-        start_cache = self._column_cache(metadata, start_index)
-        end_cache = self._column_cache(metadata, end_index)
+        start_cache = compiled.column_caches[start_index]
+        end_cache = compiled.column_caches[end_index]
         if start_cache is None or end_cache is None:
             return None
-        lower_stop = bisect_right(end_cache.comparable_values, end_value)
-        upper_start = bisect_right(start_cache.comparable_values, start_value)
+        lower_stop = end_cache.domain_id_to_right_rank[int(encoded_row[end_index])]
+        upper_start = start_cache.domain_id_to_right_rank[int(encoded_row[start_index])]
         if lower_stop <= 0 or upper_start >= len(start_cache.comparable_values):
             return None
         lower = end_cache.comparable_values[int(rng.integers(0, lower_stop))]
@@ -652,15 +777,16 @@ class PredicateTrainingContextGenerator:
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata | None = None,
     ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
         """Sample a row-satisfied POL spatial rectangle context."""
 
         from model.src.data.trajectory_distinct import (
             SegmentMbrSpatialPredicate,
             SegmentSpatialPredicate,
-            canonicalize_segment_mbr_predicate,
         )
 
+        compiled = compiled or self._compiled(metadata)
         if self.trajectory_spatial_enabled:
             mbr_columns = (
                 "segments:seg_min_x",
@@ -668,8 +794,7 @@ class PredicateTrainingContextGenerator:
                 "segments:seg_min_y",
                 "segments:seg_max_y",
             )
-            names = {column.name for column in metadata.columns}
-            if not set(mbr_columns).issubset(names):
+            if len(compiled.mbr_spatial_indices) != len(mbr_columns):
                 if self.trajectory_query_semantics == "pol_segments":
                     raise ValueError(
                         "trajectory_spatial.segment_mbr requires prepared POL MBR columns"
@@ -677,14 +802,14 @@ class PredicateTrainingContextGenerator:
                 return None
             values = {
                 name: float(
-                    metadata.columns[metadata.column_index(name)].domain[
-                        int(encoded_row[metadata.column_index(name)])
+                    metadata.columns[compiled.mbr_spatial_indices[name]].domain[
+                        int(encoded_row[compiled.mbr_spatial_indices[name]])
                     ]
                 )
                 for name in mbr_columns
             }
             cache_by_name = {
-                name: self._column_cache(metadata, metadata.column_index(name))
+                name: compiled.column_caches[compiled.mbr_spatial_indices[name]]
                 for name in mbr_columns
             }
             if any(cache is None for cache in cache_by_name.values()):
@@ -693,10 +818,18 @@ class PredicateTrainingContextGenerator:
             seg_max_x_values = cache_by_name["segments:seg_max_x"].comparable_values  # type: ignore[union-attr]
             seg_min_y_values = cache_by_name["segments:seg_min_y"].comparable_values  # type: ignore[union-attr]
             seg_max_y_values = cache_by_name["segments:seg_max_y"].comparable_values  # type: ignore[union-attr]
-            x_upper_start = bisect_left(seg_min_x_values, values["segments:seg_min_x"])
-            x_lower_stop = bisect_right(seg_max_x_values, values["segments:seg_max_x"])
-            y_upper_start = bisect_left(seg_min_y_values, values["segments:seg_min_y"])
-            y_lower_stop = bisect_right(seg_max_y_values, values["segments:seg_max_y"])
+            x_upper_start = cache_by_name["segments:seg_min_x"].domain_id_to_left_rank[  # type: ignore[union-attr]
+                int(encoded_row[compiled.mbr_spatial_indices["segments:seg_min_x"]])
+            ]
+            x_lower_stop = cache_by_name["segments:seg_max_x"].domain_id_to_right_rank[  # type: ignore[union-attr]
+                int(encoded_row[compiled.mbr_spatial_indices["segments:seg_max_x"]])
+            ]
+            y_upper_start = cache_by_name["segments:seg_min_y"].domain_id_to_left_rank[  # type: ignore[union-attr]
+                int(encoded_row[compiled.mbr_spatial_indices["segments:seg_min_y"]])
+            ]
+            y_lower_stop = cache_by_name["segments:seg_max_y"].domain_id_to_right_rank[  # type: ignore[union-attr]
+                int(encoded_row[compiled.mbr_spatial_indices["segments:seg_max_y"]])
+            ]
             if (
                 x_upper_start >= len(seg_min_x_values)
                 or x_lower_stop <= 0
@@ -714,8 +847,8 @@ class PredicateTrainingContextGenerator:
             )
             min_x, max_x = sorted((raw_min_x, raw_max_x))
             min_y, max_y = sorted((raw_min_y, raw_max_y))
-            canonical = canonicalize_segment_mbr_predicate(
-                metadata,
+            canonical = self._canonicalize_segment_mbr_predicate_cached(
+                compiled,
                 min_x_column="segments:seg_min_x",
                 max_x_column="segments:seg_max_x",
                 min_y_column="segments:seg_min_y",
@@ -758,16 +891,18 @@ class PredicateTrainingContextGenerator:
             )
 
         column_names = ("segments:s_x", "segments:s_y", "segments:e_x", "segments:e_y")
+        if len(compiled.endpoint_spatial_indices) != len(column_names):
+            return None
         values = {
-            name: float(metadata.columns[metadata.column_index(name)].domain[int(encoded_row[metadata.column_index(name)])])
+            name: float(metadata.columns[compiled.endpoint_spatial_indices[name]].domain[int(encoded_row[compiled.endpoint_spatial_indices[name]])])
             for name in column_names
         }
         x_low_anchor = min(values["segments:s_x"], values["segments:e_x"])
         x_high_anchor = max(values["segments:s_x"], values["segments:e_x"])
         y_low_anchor = min(values["segments:s_y"], values["segments:e_y"])
         y_high_anchor = max(values["segments:s_y"], values["segments:e_y"])
-        x_domain = _numeric_values_for_columns(metadata, ("segments:s_x", "segments:e_x"))
-        y_domain = _numeric_values_for_columns(metadata, ("segments:s_y", "segments:e_y"))
+        x_domain = compiled.endpoint_x_domain
+        y_domain = compiled.endpoint_y_domain
         x_lower_candidates = [value for value in x_domain if value <= x_low_anchor]
         x_upper_candidates = [value for value in x_domain if value >= x_high_anchor]
         y_lower_candidates = [value for value in y_domain if value <= y_low_anchor]
@@ -792,17 +927,124 @@ class PredicateTrainingContextGenerator:
             srid=int(self.config.get("trajectory_srid", 26916)),
         )
 
+    def _canonicalize_segment_mbr_predicate_cached(
+        self,
+        compiled: _CompiledGenerationMetadata,
+        *,
+        min_x_column: str,
+        max_x_column: str,
+        min_y_column: str,
+        max_y_column: str,
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float,
+    ) -> Any:
+        from model.src.data.trajectory_distinct import CanonicalSegmentMbrPredicate
+
+        physical_min_x, physical_max_x = sorted((float(min_x), float(max_x)))
+        physical_min_y, physical_max_y = sorted((float(min_y), float(max_y)))
+        min_x_index = compiled.column_name_to_index[min_x_column]
+        max_x_index = compiled.column_name_to_index[max_x_column]
+        min_y_index = compiled.column_name_to_index[min_y_column]
+        max_y_index = compiled.column_name_to_index[max_y_column]
+        upper_x = _floor_numeric_literal(
+            compiled.numeric_literals_by_column[min_x_index],
+            physical_max_x,
+        )
+        lower_x = _ceil_numeric_literal(
+            compiled.numeric_literals_by_column[max_x_index],
+            physical_min_x,
+        )
+        upper_y = _floor_numeric_literal(
+            compiled.numeric_literals_by_column[min_y_index],
+            physical_max_y,
+        )
+        lower_y = _ceil_numeric_literal(
+            compiled.numeric_literals_by_column[max_y_index],
+            physical_min_y,
+        )
+        if upper_x is None:
+            return _zero_support_mbr_predicate_cached(
+                compiled.numeric_literals_by_column[min_x_index],
+                min_x_column,
+                PredicateOp.LESS_THAN,
+                physical_min_x,
+                physical_min_y,
+                physical_max_x,
+                physical_max_y,
+            )
+        if lower_x is None:
+            return _zero_support_mbr_predicate_cached(
+                compiled.numeric_literals_by_column[max_x_index],
+                max_x_column,
+                PredicateOp.GREATER_THAN,
+                physical_min_x,
+                physical_min_y,
+                physical_max_x,
+                physical_max_y,
+            )
+        if upper_y is None:
+            return _zero_support_mbr_predicate_cached(
+                compiled.numeric_literals_by_column[min_y_index],
+                min_y_column,
+                PredicateOp.LESS_THAN,
+                physical_min_x,
+                physical_min_y,
+                physical_max_x,
+                physical_max_y,
+            )
+        if lower_y is None:
+            return _zero_support_mbr_predicate_cached(
+                compiled.numeric_literals_by_column[max_y_index],
+                max_y_column,
+                PredicateOp.GREATER_THAN,
+                physical_min_x,
+                physical_min_y,
+                physical_max_x,
+                physical_max_y,
+            )
+        lower_x_value, lower_x_literal = lower_x
+        upper_x_value, upper_x_literal = upper_x
+        lower_y_value, lower_y_literal = lower_y
+        upper_y_value, upper_y_literal = upper_y
+        return CanonicalSegmentMbrPredicate(
+            min_x=lower_x_value,
+            min_y=lower_y_value,
+            max_x=upper_x_value,
+            max_y=upper_y_value,
+            min_x_literal=lower_x_literal,
+            min_y_literal=lower_y_literal,
+            max_x_literal=upper_x_literal,
+            max_y_literal=upper_y_literal,
+            physical_min_x=physical_min_x,
+            physical_min_y=physical_min_y,
+            physical_max_x=physical_max_x,
+            physical_max_y=physical_max_y,
+        )
+
     def _sample_satisfied_predicate(
         self,
         cache: _ColumnPredicateCache | None,
         value: Any,
         rng: np.random.Generator,
+        encoded_value_id: int | None = None,
     ) -> PredicateToken:
         if not self.enabled:
             return PredicateToken.wildcard()
         if cache is None or not _is_comparable_value(value):
             return PredicateToken.wildcard()
         comparable_values = cache.comparable_values
+        left_rank = (
+            cache.domain_id_to_left_rank[encoded_value_id]
+            if encoded_value_id is not None
+            else bisect_left(comparable_values, value)
+        )
+        right_rank = (
+            cache.domain_id_to_right_rank[encoded_value_id]
+            if encoded_value_id is not None
+            else bisect_right(comparable_values, value)
+        )
         roll = float(rng.random() * self._probability_total)
         if roll < self.wildcard_probability:
             return PredicateToken.wildcard()
@@ -811,21 +1053,22 @@ class PredicateTrainingContextGenerator:
             return PredicateToken.equal(value)
         roll -= self.equality_probability
         if roll < self.lower_bound_probability:
-            stop = bisect_right(comparable_values, value)
+            stop = right_rank
             if stop <= 0:
                 return PredicateToken.wildcard()
             threshold = comparable_values[int(rng.integers(0, stop))]
             return PredicateToken(PredicateOp.GREATER_EQUAL, value=threshold)
         roll -= self.lower_bound_probability
         if roll < self.upper_bound_probability:
-            start = bisect_left(comparable_values, value)
+            start = left_rank
             if start >= len(comparable_values):
                 return PredicateToken.wildcard()
             threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
             return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
         return self._sample_row_range_style_predicate(
             comparable_values,
-            value=value,
+            left_rank=left_rank,
+            right_rank=right_rank,
             domain_size=len(cache.comparable_values),
             rng=rng,
         )
@@ -834,7 +1077,8 @@ class PredicateTrainingContextGenerator:
         self,
         comparable_values: tuple[Any, ...],
         *,
-        value: Any,
+        left_rank: int,
+        right_rank: int,
         domain_size: int,
         rng: np.random.Generator,
     ) -> PredicateToken:
@@ -843,23 +1087,344 @@ class PredicateTrainingContextGenerator:
             and self.native_range_probability > 0.0
         ):
             if bool(rng.integers(0, 2)):
-                stop = bisect_right(comparable_values, value)
+                stop = right_rank
                 if stop <= 0:
                     return PredicateToken.wildcard()
                 threshold = comparable_values[int(rng.integers(0, stop))]
                 return PredicateToken(PredicateOp.GREATER_EQUAL, value=threshold)
-            start = bisect_left(comparable_values, value)
+            start = left_rank
             if start >= len(comparable_values):
                 return PredicateToken.wildcard()
             threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
             return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
-        stop = bisect_right(comparable_values, value)
-        start = bisect_left(comparable_values, value)
+        stop = right_rank
+        start = left_rank
         if stop <= 0 or start >= len(comparable_values):
             return PredicateToken.wildcard()
         lower = comparable_values[int(rng.integers(0, stop))]
         upper = comparable_values[int(rng.integers(start, len(comparable_values)))]
         return PredicateToken.range(lower, upper)
+
+    def _compiled(self, metadata: ModelMetadata) -> _CompiledGenerationMetadata:
+        key = id(metadata)
+        cached = self._compiled_by_metadata_id.get(key)
+        if cached is not None:
+            return cached
+        column_name_to_index = {
+            column.name: index for index, column in enumerate(metadata.columns)
+        }
+        data_indices = tuple(
+            index
+            for index, column in enumerate(metadata.columns)
+            if column.kind == ColumnKind.DATA
+        )
+        indicator_indices = tuple(
+            index
+            for index, column in enumerate(metadata.columns)
+            if column.kind == ColumnKind.INDICATOR
+        )
+        fanout_indices = tuple(
+            index
+            for index, column in enumerate(metadata.columns)
+            if column.kind == ColumnKind.FANOUT
+        )
+        table_indicator_indices = {
+            metadata.columns[index].table: index
+            for index in indicator_indices
+            if metadata.columns[index].table is not None
+        }
+        graph = infer_join_graph(metadata)
+        table_to_bit = {table: 1 << index for index, table in enumerate(graph.tables)}
+        bit_to_table = tuple(graph.tables)
+        fanout_child_by_name = {
+            metadata.columns[index].name: (
+                _fanout_child_table(metadata.columns[index].fanout_source)
+                or metadata.columns[index].table
+            )
+            for index in fanout_indices
+        }
+        column_caches = self._column_caches(metadata)
+        numeric_literals_by_column = tuple(
+            _numeric_domain_literals_from_cache(cache)
+            for cache in column_caches
+        )
+        pol_required = (
+            "segments:t_s",
+            "segments:t_e",
+            "segments:s_x",
+            "segments:s_y",
+            "segments:e_x",
+            "segments:e_y",
+        )
+        endpoint_names = ("segments:s_x", "segments:s_y", "segments:e_x", "segments:e_y")
+        mbr_names = (
+            "segments:seg_min_x",
+            "segments:seg_max_x",
+            "segments:seg_min_y",
+            "segments:seg_max_y",
+        )
+        compiled = _CompiledGenerationMetadata(
+            column_name_to_index=column_name_to_index,
+            data_indices=data_indices,
+            indicator_indices=indicator_indices,
+            fanout_indices=fanout_indices,
+            table_indicator_indices=table_indicator_indices,
+            graph=graph,
+            fanout_child_by_name=fanout_child_by_name,
+            column_caches=column_caches,
+            pol_required_available=all(name in column_name_to_index for name in pol_required),
+            temporal_start_index=column_name_to_index.get("segments:t_s"),
+            temporal_end_index=column_name_to_index.get("segments:t_e"),
+            endpoint_spatial_indices={
+                name: column_name_to_index[name]
+                for name in endpoint_names
+                if name in column_name_to_index
+            },
+            mbr_spatial_indices={
+                name: column_name_to_index[name]
+                for name in mbr_names
+                if name in column_name_to_index
+            },
+            endpoint_x_domain=_numeric_values_for_columns_from_cache(
+                metadata,
+                column_caches,
+                ("segments:s_x", "segments:e_x"),
+                column_name_to_index,
+            ),
+            endpoint_y_domain=_numeric_values_for_columns_from_cache(
+                metadata,
+                column_caches,
+                ("segments:s_y", "segments:e_y"),
+                column_name_to_index,
+            ),
+            numeric_literals_by_column=numeric_literals_by_column,
+            table_to_bit=table_to_bit,
+            bit_to_table=bit_to_table,
+            data_table_bits=tuple(
+                table_to_bit.get(column.table or "", 0) for column in metadata.columns
+            ),
+            fanout_child_bits=tuple(
+                table_to_bit.get(
+                    (
+                        _fanout_child_table(column.fanout_source)
+                        or column.table
+                        or ""
+                    ),
+                    0,
+                )
+                if column.kind == ColumnKind.FANOUT
+                else 0
+                for column in metadata.columns
+            ),
+        )
+        self._compiled_by_metadata_id[key] = compiled
+        return compiled
+
+    def _tokens_for_query_tables(
+        self,
+        metadata: ModelMetadata,
+        compiled: _CompiledGenerationMetadata,
+        included_tables: set[str],
+        inverse_fanout_columns: set[str],
+        ordinary_predicates: dict[str, PredicateToken] | None = None,
+    ) -> list[PredicateToken]:
+        tokens, _ = self._tokens_and_two_slot_for_query_tables(
+            metadata,
+            compiled,
+            included_tables,
+            inverse_fanout_columns,
+            ordinary_predicates,
+        )
+        return list(tokens)
+
+    def _tokens_and_two_slot_for_query_tables(
+        self,
+        metadata: ModelMetadata,
+        compiled: _CompiledGenerationMetadata,
+        included_tables: set[str],
+        inverse_fanout_columns: set[str],
+        ordinary_predicates: dict[str, PredicateToken] | None = None,
+    ) -> tuple[tuple[PredicateToken, ...], tuple[tuple[int, int, int, int], ...] | None]:
+        tokens = [_WILDCARD_TOKEN] * len(metadata.columns)
+        encoded = list(_wildcard_two_slot_row(metadata))
+        preencoding_supported = True
+        for column_name, token in (ordinary_predicates or {}).items():
+            column_index = compiled.column_name_to_index.get(column_name)
+            if column_index is not None:
+                tokens[column_index] = token
+                if preencoding_supported:
+                    try:
+                        encoded[column_index] = _encode_token_two_slot_for_metadata(
+                            metadata,
+                            column_index,
+                            token,
+                        )
+                    except ValueError:
+                        preencoding_supported = False
+        for table in included_tables:
+            indicator_index = compiled.table_indicator_indices.get(table)
+            if indicator_index is not None:
+                tokens[indicator_index] = _INDICATOR_INCLUDED_TOKEN
+                if preencoding_supported:
+                    encoded[indicator_index] = _encode_token_two_slot_for_metadata(
+                        metadata,
+                        indicator_index,
+                        _INDICATOR_INCLUDED_TOKEN,
+                    )
+        for column_index in compiled.fanout_indices:
+            column = metadata.columns[column_index]
+            if column.name in inverse_fanout_columns:
+                tokens[column_index] = _INV_FANOUT_TOKEN
+                if preencoding_supported:
+                    encoded[column_index] = _encode_token_two_slot_for_metadata(
+                        metadata,
+                        column_index,
+                        _INV_FANOUT_TOKEN,
+                    )
+        return tuple(tokens), tuple(encoded) if preencoding_supported else None
+
+    def _present_tables_for_row(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        compiled: _CompiledGenerationMetadata,
+    ) -> frozenset[str]:
+        if not compiled.table_indicator_indices:
+            return frozenset(
+                column.table
+                for column in metadata.columns
+                if column.table is not None
+            )
+        present: set[str] = set()
+        for table, column_index in compiled.table_indicator_indices.items():
+            column = metadata.columns[column_index]
+            if column.domain[int(encoded_row[column_index])] == 1:
+                present.add(table)
+        return frozenset(present)
+
+    def _present_table_mask_for_row(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        compiled: _CompiledGenerationMetadata,
+    ) -> int:
+        if not compiled.table_indicator_indices:
+            mask = 0
+            for table in compiled.graph.tables:
+                mask |= compiled.table_to_bit.get(table, 0)
+            return mask
+        mask = 0
+        for table, column_index in compiled.table_indicator_indices.items():
+            column = metadata.columns[column_index]
+            if column.domain[int(encoded_row[column_index])] == 1:
+                mask |= compiled.table_to_bit.get(table, 0)
+        return mask
+
+    def _tables_from_mask(self, compiled: _CompiledGenerationMetadata, mask: int) -> frozenset[str]:
+        return frozenset(
+            table for table in compiled.bit_to_table if mask & compiled.table_to_bit[table]
+        )
+
+    def _inverse_fanouts_for_table_subset(
+        self,
+        compiled: _CompiledGenerationMetadata,
+        included_tables: frozenset[str] | set[str],
+    ) -> frozenset[str]:
+        included = set(included_tables)
+        return frozenset(
+            fanout_name
+            for fanout_name, child_table in compiled.fanout_child_by_name.items()
+            if child_table is not None and child_table not in included
+        )
+
+    def _inverse_fanouts_for_table_mask(
+        self,
+        metadata: ModelMetadata,
+        compiled: _CompiledGenerationMetadata,
+        included_mask: int,
+    ) -> frozenset[str]:
+        inverse: set[str] = set()
+        for column_index in compiled.fanout_indices:
+            child_bit = compiled.fanout_child_bits[column_index]
+            if child_bit and not (included_mask & child_bit):
+                inverse.add(metadata.columns[column_index].name)
+        return frozenset(inverse)
+
+    def _sample_included_table_mask(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata,
+    ) -> int:
+        present_mask = self._present_table_mask_for_row(encoded_row, metadata, compiled)
+        if not present_mask:
+            return 0
+        if self.table_subset_sampling == "full" or not self.enabled:
+            return present_mask
+        if self.table_subset_sampling == "neurocard_table_dropout_rooted":
+            return self._neurocard_table_dropout_rooted_mask(compiled, present_mask, rng)
+        return _table_mask_from_tables(
+            self._sample_included_from_present(
+                self._tables_from_mask(compiled, present_mask),
+                metadata,
+                rng,
+                compiled,
+            ),
+            compiled,
+        )
+
+    def _neurocard_table_dropout_rooted_subset(
+        self,
+        compiled: _CompiledGenerationMetadata,
+        present_tables: frozenset[str] | set[str],
+        rng: np.random.Generator,
+    ) -> frozenset[str]:
+        graph = compiled.graph
+        tables = tuple(graph.tables)
+        present = set(present_tables)
+        if not tables or graph.root_table not in present:
+            return frozenset()
+        if len(tables) <= 1:
+            return frozenset({graph.root_table})
+        dropped_count = int(rng.integers(1, len(tables)))
+        drop_probability = dropped_count / len(tables)
+        proposed = {
+            table
+            for table in tables
+            if table == graph.root_table or float(rng.random()) > drop_probability
+        }
+        proposed.intersection_update(present)
+        proposed.add(graph.root_table)
+        return frozenset(
+            _root_connected_component(proposed, graph.root_table, graph.edges)
+        )
+
+    def _neurocard_table_dropout_rooted_mask(
+        self,
+        compiled: _CompiledGenerationMetadata,
+        present_mask: int,
+        rng: np.random.Generator,
+    ) -> int:
+        graph = compiled.graph
+        tables = tuple(graph.tables)
+        root_bit = compiled.table_to_bit.get(graph.root_table, 0)
+        if not tables or not (present_mask & root_bit):
+            return 0
+        if len(tables) <= 1:
+            return root_bit
+        dropped_count = int(rng.integers(1, len(tables)))
+        drop_probability = dropped_count / len(tables)
+        proposed_mask = root_bit
+        for table in tables:
+            if table == graph.root_table:
+                continue
+            table_bit = compiled.table_to_bit[table]
+            if float(rng.random()) > drop_probability:
+                proposed_mask |= table_bit
+        proposed_mask &= present_mask | root_bit
+        proposed_mask |= root_bit
+        return _root_connected_component_mask(proposed_mask, compiled, graph)
 
     def _column_caches(
         self,
@@ -895,8 +1460,170 @@ class PredicateTrainingContextGenerator:
     def _build_column_cache(self, column: Any) -> _ColumnPredicateCache | None:
         if column.kind != ColumnKind.DATA:
             return None
-        values = _sorted_comparable_domain_values(column.domain)
-        return _ColumnPredicateCache(comparable_values=values) if values else None
+        return _build_column_predicate_cache(column.domain)
+
+
+def _build_column_predicate_cache(domain: tuple[Any, ...]) -> _ColumnPredicateCache | None:
+    values = _sorted_comparable_domain_values(domain)
+    if not values:
+        return None
+    rank_by_value: dict[Any, tuple[int, int]] = {}
+    for rank, value in enumerate(values):
+        try:
+            previous = rank_by_value.get(value)
+            left = rank if previous is None else previous[0]
+            rank_by_value[value] = (left, rank + 1)
+        except TypeError:
+            continue
+    left_ranks: list[int] = []
+    right_ranks: list[int] = []
+    for value in domain:
+        if _is_comparable_value(value):
+            try:
+                ranks = rank_by_value.get(value)
+            except TypeError:
+                ranks = None
+            if ranks is None:
+                ranks = (bisect_left(values, value), bisect_right(values, value))
+            left_ranks.append(ranks[0])
+            right_ranks.append(ranks[1])
+        else:
+            left_ranks.append(-1)
+            right_ranks.append(0)
+    return _ColumnPredicateCache(
+        comparable_values=values,
+        domain_id_to_left_rank=tuple(left_ranks),
+        domain_id_to_right_rank=tuple(right_ranks),
+    )
+
+
+def _numeric_domain_literals_from_cache(
+    cache: _ColumnPredicateCache | None,
+) -> _NumericLiteralCache | None:
+    if cache is None:
+        return None
+    values: list[float] = []
+    literals: list[Any] = []
+    seen: set[float] = set()
+    for literal in cache.comparable_values:
+        if isinstance(literal, str) and literal.startswith("__"):
+            continue
+        try:
+            numeric = float(literal)
+        except (TypeError, ValueError):
+            continue
+        if numeric in seen:
+            continue
+        seen.add(numeric)
+        values.append(numeric)
+        literals.append(literal)
+    if not values:
+        return None
+    return _NumericLiteralCache(values=tuple(values), literals=tuple(literals))
+
+
+def _floor_numeric_literal(
+    cache: _NumericLiteralCache | None,
+    upper: float,
+) -> tuple[float, Any] | None:
+    if cache is None:
+        return None
+    index = bisect_right(cache.values, float(upper)) - 1
+    if index < 0:
+        return None
+    return cache.values[index], cache.literals[index]
+
+
+def _ceil_numeric_literal(
+    cache: _NumericLiteralCache | None,
+    lower: float,
+) -> tuple[float, Any] | None:
+    if cache is None:
+        return None
+    index = bisect_left(cache.values, float(lower))
+    if index >= len(cache.values):
+        return None
+    return cache.values[index], cache.literals[index]
+
+
+def _zero_support_mbr_predicate_cached(
+    cache: _NumericLiteralCache | None,
+    column_name: str,
+    op: PredicateOp,
+    physical_min_x: float,
+    physical_min_y: float,
+    physical_max_x: float,
+    physical_max_y: float,
+) -> Any:
+    from model.src.data.trajectory_distinct import CanonicalSegmentMbrPredicate
+
+    if cache is None or not cache.values:
+        raise ValueError(f"MBR column {column_name!r} has no numeric domain literals")
+    index = 0 if op == PredicateOp.LESS_THAN else len(cache.values) - 1
+    token = PredicateToken(op, value=cache.literals[index])
+    return CanonicalSegmentMbrPredicate(
+        min_x=physical_min_x,
+        min_y=physical_min_y,
+        max_x=physical_max_x,
+        max_y=physical_max_y,
+        min_x_literal=None,
+        min_y_literal=None,
+        max_x_literal=None,
+        max_y_literal=None,
+        physical_min_x=physical_min_x,
+        physical_min_y=physical_min_y,
+        physical_max_x=physical_max_x,
+        physical_max_y=physical_max_y,
+        zero_support=True,
+        zero_support_column=column_name,
+        zero_support_token=token,
+    )
+
+
+def _wildcard_two_slot_row(metadata: ModelMetadata) -> tuple[tuple[int, int, int, int], ...]:
+    return tuple(
+        (
+            TWO_SLOT_EMPTY_OPERATOR_ID,
+            len(column.domain),
+            TWO_SLOT_EMPTY_OPERATOR_ID,
+            len(column.domain),
+        )
+        for column in metadata.columns
+    )
+
+
+def _encode_token_two_slot_for_metadata(
+    metadata: ModelMetadata,
+    column_index: int,
+    token: PredicateToken,
+) -> tuple[int, int, int, int]:
+    column = metadata.columns[column_index]
+    missing_value_id = len(column.domain)
+    empty = (TWO_SLOT_EMPTY_OPERATOR_ID, missing_value_id)
+    if token.op == PredicateOp.WILDCARD:
+        return (*empty, *empty)
+    if token.op == PredicateOp.RANGE:
+        lower_op = (
+            PredicateOp.GREATER_EQUAL
+            if token.lower_inclusive
+            else PredicateOp.GREATER_THAN
+        )
+        upper_op = (
+            PredicateOp.LESS_EQUAL
+            if token.upper_inclusive
+            else PredicateOp.LESS_THAN
+        )
+        return (
+            TWO_SLOT_OP_TO_ID[lower_op],
+            column.encode_value(token.value),
+            TWO_SLOT_OP_TO_ID[upper_op],
+            column.encode_value(token.upper),
+        )
+    if token.op == PredicateOp.INV_FANOUT:
+        return (TWO_SLOT_OP_TO_ID[token.op], missing_value_id, *empty)
+    if token.op in TWO_SLOT_OP_TO_ID:
+        return (TWO_SLOT_OP_TO_ID[token.op], column.encode_value(token.value), *empty)
+    raise ValueError(f"unsupported predicate token {token!r}")
 
 
 def tokens_for_query_tables(
@@ -1456,15 +2183,54 @@ def _numeric_values_for_columns(
     metadata: ModelMetadata,
     column_names: tuple[str, ...],
 ) -> tuple[float, ...]:
+    column_name_to_index = {
+        column.name: index for index, column in enumerate(metadata.columns)
+    }
+    caches = tuple(
+        _build_column_predicate_cache(column.domain)
+        if column.kind == ColumnKind.DATA
+        else None
+        for column in metadata.columns
+    )
+    return _numeric_values_for_columns_from_cache(
+        metadata,
+        caches,
+        column_names,
+        column_name_to_index,
+    )
+
+
+def _numeric_values_for_columns_from_cache(
+    metadata: ModelMetadata,
+    column_caches: tuple[_ColumnPredicateCache | None, ...],
+    column_names: tuple[str, ...],
+    column_name_to_index: dict[str, int],
+) -> tuple[float, ...]:
     values: set[float] = set()
     for column_name in column_names:
-        column = metadata.columns[metadata.column_index(column_name)]
-        for value in comparable_domain_values(column.domain):
+        column_index = column_name_to_index.get(column_name)
+        if column_index is None:
+            continue
+        cache = column_caches[column_index]
+        if cache is None:
+            continue
+        for value in cache.comparable_values:
             try:
                 values.add(float(value))
             except (TypeError, ValueError):
                 continue
     return tuple(sorted(values))
+
+
+def _deterministic_validation_indices(total_count: int, sample_count: int) -> tuple[int, ...]:
+    if total_count <= 0 or sample_count <= 0:
+        return ()
+    if sample_count >= total_count:
+        return tuple(range(total_count))
+    return tuple(
+        int(index)
+        for index in np.linspace(0, total_count - 1, num=sample_count, dtype=int)
+    )
 
 
 def _fanout_child_table(fanout_source: str | None) -> str | None:
@@ -1515,6 +2281,48 @@ def _root_connected_component(
                 seen.add(neighbor)
                 stack.append(neighbor)
     return seen
+
+
+def _table_mask_from_tables(
+    tables: frozenset[str] | set[str],
+    compiled: _CompiledGenerationMetadata,
+) -> int:
+    mask = 0
+    for table in tables:
+        mask |= compiled.table_to_bit.get(table, 0)
+    return mask
+
+
+def _root_connected_component_mask(
+    table_mask: int,
+    compiled: _CompiledGenerationMetadata,
+    graph: JoinGraphMetadata,
+) -> int:
+    root_bit = compiled.table_to_bit.get(graph.root_table, 0)
+    if not (table_mask & root_bit):
+        return 0
+    if not graph.edges:
+        return root_bit
+    adjacency: dict[str, set[str]] = {
+        table: set()
+        for table in compiled.bit_to_table
+        if table_mask & compiled.table_to_bit[table]
+    }
+    for left, right in graph.edges:
+        left_bit = compiled.table_to_bit.get(left, 0)
+        right_bit = compiled.table_to_bit.get(right, 0)
+        if (table_mask & left_bit) and (table_mask & right_bit):
+            adjacency.setdefault(left, set()).add(right)
+            adjacency.setdefault(right, set()).add(left)
+    seen = {graph.root_table}
+    stack = [graph.root_table]
+    while stack:
+        table = stack.pop()
+        for neighbor in adjacency.get(table, set()):
+            if neighbor not in seen:
+                seen.add(neighbor)
+                stack.append(neighbor)
+    return _table_mask_from_tables(seen, compiled)
 
 
 def _coverage_key(column: Any, token: PredicateToken) -> str:

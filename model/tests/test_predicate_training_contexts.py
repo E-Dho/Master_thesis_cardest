@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
+from model.src.predicates import generation as generation_module
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.full_join_sampler import SyntheticFullJoinSampleSource
 from model.src.data.full_join_sampler import OUTER_MISSING
@@ -236,6 +238,134 @@ class PredicateTrainingContextTest(unittest.TestCase):
             len({context.ordinary_predicates["B.value"].value for context in contexts}),
             1,
         )
+
+    def test_compiled_metadata_cache_preserves_seeded_generation(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:12]
+        config = {
+            "enabled": True,
+            "strategy": "duet_batch_bounds",
+            "wildcard_probability": 0.2,
+            "equality_probability": 0.2,
+            "lower_bound_probability": 0.2,
+            "upper_bound_probability": 0.2,
+            "native_range_probability": 0.2,
+            "enable_native_range_tokens": True,
+            "normalize_predicate_probabilities": False,
+            "table_subset_sampling": "neurocard_table_dropout_rooted",
+            "per_row_contexts": 1,
+        }
+        uncached = PredicateTrainingContextGenerator(config)
+        cached = PredicateTrainingContextGenerator(config)
+
+        reference_contexts, reference_rows, reference_stats = uncached.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(123),
+        )
+        cached_contexts, cached_rows, cached_stats = cached.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(123),
+        )
+        cached.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(124),
+        )
+
+        self.assertEqual(
+            [[token.stable_key() for token in context.tokens] for context in cached_contexts],
+            [[token.stable_key() for token in context.tokens] for context in reference_contexts],
+        )
+        self.assertTrue(np.array_equal(cached_rows, reference_rows))
+        self.assertEqual(cached_stats, reference_stats)
+        self.assertEqual(len(cached._compiled_by_metadata_id), 1)
+        for context, row in zip(cached_contexts, cached_rows):
+            self.assertTrue(context_satisfies_row(context, row, source.metadata))
+
+    def test_preencoded_two_slot_rows_match_vocabulary_encoder(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:20]
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "duet_batch_bounds",
+                "wildcard_probability": 0.2,
+                "equality_probability": 0.2,
+                "lower_bound_probability": 0.2,
+                "upper_bound_probability": 0.2,
+                "native_range_probability": 0.2,
+                "enable_native_range_tokens": True,
+                "normalize_predicate_probabilities": False,
+                "table_subset_sampling": "neurocard_table_dropout_rooted",
+            }
+        )
+        contexts, _, _ = generator.generate_batch(
+            encoded_rows=rows,
+            metadata=source.metadata,
+            rng=np.random.default_rng(221),
+        )
+        vocabularies = PredicateVocabularies.from_metadata(
+            source.metadata,
+            encoding_mode="two_slot_binary_duet",
+        )
+        self.assertEqual(
+            [context.encoded_two_slot_row for context in contexts],
+            [
+                tuple(tuple(slot) for slot in row)
+                for row in vocabularies.encode_rows_two_slot(
+                    [list(context.tokens) for context in contexts]
+                )
+            ],
+        )
+
+    def test_sampled_validation_avoids_full_context_revalidation(self) -> None:
+        source = SyntheticFullJoinSampleSource()
+        rows = source.dataset.encoded_rows[:20]
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "strategy": "duet_batch_bounds",
+                "wildcard_probability": 0.2,
+                "equality_probability": 0.2,
+                "lower_bound_probability": 0.2,
+                "upper_bound_probability": 0.2,
+                "native_range_probability": 0.2,
+                "enable_native_range_tokens": True,
+                "normalize_predicate_probabilities": False,
+                "table_subset_sampling": "full",
+            }
+        )
+        real_context_satisfies = generation_module.context_satisfies_row
+        with mock.patch.object(
+            generation_module,
+            "context_satisfies_row",
+            side_effect=real_context_satisfies,
+        ) as sampled_check:
+            contexts, _, stats = generator.generate_batch(
+                encoded_rows=rows,
+                metadata=source.metadata,
+                rng=np.random.default_rng(23),
+                validate_contexts=False,
+                validation_sample_size=5,
+            )
+        self.assertEqual(len(contexts), len(rows))
+        self.assertEqual(sampled_check.call_count, 5)
+        self.assertEqual(stats.rejected_unsatisfied_contexts, 0)
+
+        with mock.patch.object(
+            generation_module,
+            "context_satisfies_row",
+            side_effect=real_context_satisfies,
+        ) as full_check:
+            generator.generate_batch(
+                encoded_rows=rows,
+                metadata=source.metadata,
+                rng=np.random.default_rng(23),
+                validate_contexts=True,
+            )
+        self.assertEqual(full_check.call_count, len(rows))
 
     def test_duet_row_lower_bounds_are_no_greater_than_row_value(self) -> None:
         source = SyntheticFullJoinSampleSource()

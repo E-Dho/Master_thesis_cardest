@@ -30,7 +30,7 @@ from model.src.predicates.generation import (
     token_coverage,
 )
 from model.src.predicates.operators import PredicateOp, PredicateToken
-from model.src.predicates.torch_encoding import encode_tokens_tensor
+from model.src.predicates.torch_encoding import encode_contexts_tensor, encode_tokens_tensor
 from model.src.predicates.vocabulary import PredicateVocabularies, key_to_token
 from model.src.predicates.vocabulary import (
     TWO_SLOT_OPERATOR_BINS,
@@ -433,9 +433,22 @@ def _phase_summary(values: list[dict[str, float]]) -> dict[str, dict[str, float]
         summary[key] = {
             "last": float(series[-1]),
             "mean": float(np.mean(series)),
+            "p50": float(np.percentile(series, 50)),
+            "p95": float(np.percentile(series, 95)),
             "min": float(np.min(series)),
             "max": float(np.max(series)),
             "sum": float(np.sum(series)),
+        }
+    if values:
+        total_series = [float(sum(timing.values())) for timing in values]
+        summary["total_optimizer_step"] = {
+            "last": float(total_series[-1]),
+            "mean": float(np.mean(total_series)),
+            "p50": float(np.percentile(total_series, 50)),
+            "p95": float(np.percentile(total_series, 95)),
+            "min": float(np.min(total_series)),
+            "max": float(np.max(total_series)),
+            "sum": float(np.sum(total_series)),
         }
     return summary
 
@@ -1385,6 +1398,10 @@ def _train_one_batch(
         encoded_rows=batch.encoded_values,
         metadata=metadata,
         rng=rng,
+        validate_contexts=compute_expensive_diagnostics,
+        validation_sample_size=int(
+            predicate_config.get("row_validation_sample_size", 32) or 0
+        ),
     )
     token_rows = [list(context.tokens) for context in contexts]
     coverage = token_coverage(
@@ -1526,7 +1543,8 @@ def _train_one_batch(
 
     token_encode_started = perf_counter()
     all_token_rows = token_rows + rare_token_rows
-    all_token_ids = encode_tokens_tensor(all_token_rows, vocabularies, device=device)
+    all_contexts = contexts + rare_contexts
+    all_token_ids = encode_contexts_tensor(all_contexts, vocabularies, device=device)
     main_count = len(token_rows)
     token_ids = all_token_ids[:main_count]
     rare_token_ids = all_token_ids[main_count:] if rare_token_rows else None
@@ -2212,7 +2230,7 @@ def _run_validation(
                 if np.any(rho <= 0.0) or not np.all(np.isfinite(rho)):
                     raise ValueError("importance weights rho must be finite and positive")
                 weights = stable_combine_importance_and_inverse_weights(weights, rho)
-            token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)
+            token_ids = encode_contexts_tensor(contexts, vocabularies, device=device)
             targets = torch.tensor(target_rows, dtype=torch.long, device=device)
             head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
             trajectory_config = TrajectoryDistinctConfig.from_dict(
