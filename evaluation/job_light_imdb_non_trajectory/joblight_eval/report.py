@@ -33,6 +33,14 @@ HEADLINE_METRICS = (
     "smoothed_q_error.max",
 )
 
+Q_ERROR_REPORT_FAMILIES = (
+    ("Raw, all scored queries", "raw_q_error"),
+    ("Raw, true cardinality > 0", "raw_q_error_true_positive"),
+    ("Smoothed, true cardinality = 0", "smoothed_q_error_true_zero"),
+    ("Smoothed, all scored queries", "smoothed_q_error"),
+)
+Q_ERROR_PERCENTILES = ("p50", "p90", "p95", "p99", "max")
+
 
 def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> dict[str, Any]:
     directories = tuple(Path(path).resolve() for path in run_directories)
@@ -222,29 +230,45 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
         f"# {aggregate['display_name']}",
         "",
         "Values are mean +/- sample standard deviation across seed-level summaries.",
-        "",
-        "| Workload | Coverage | Raw p50 | Raw p95 | Raw p99 | Raw max | Smoothed p50 | Smoothed p95 | Inference mean (ms) | QPS |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for workload_id, workload in aggregate["workloads"].items():
         metrics = workload["metrics"]
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    workload_id,
-                    "complete" if workload["coverage_complete_all_seeds"] else "incomplete",
-                    _format_mean_std(metrics["raw_q_error.p50"]),
-                    _format_mean_std(metrics["raw_q_error.p95"]),
-                    _format_mean_std(metrics["raw_q_error.p99"]),
-                    _format_mean_std(metrics["raw_q_error.max"]),
-                    _format_mean_std(metrics["smoothed_q_error.p50"]),
-                    _format_mean_std(metrics["smoothed_q_error.p95"]),
-                    _format_mean_std(metrics["inference.mean_ms"]),
-                    _format_mean_std(metrics["inference.throughput_queries_per_second"]),
-                ]
-            )
-            + " |"
+        coverage = "complete" if workload["coverage_complete_all_seeds"] else "incomplete"
+        lines.extend(
+            [
+                "",
+                f"## {workload_id}",
+                "",
+                f"Coverage: **{coverage}**",
+                "",
+                "| Q-error family | p50 | p90 | p95 | p99 | max |",
+                "| --- | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for label, family in Q_ERROR_REPORT_FAMILIES:
+            values = [
+                _format_mean_std(metrics[f"{family}.{name}"])
+                for name in Q_ERROR_PERCENTILES
+            ]
+            lines.append("| " + " | ".join([label, *values]) + " |")
+        lines.extend(
+            [
+                "",
+                "| Inference mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) | Throughput (queries/s) |",
+                "| ---: | ---: | ---: | ---: | ---: |",
+                "| "
+                + " | ".join(
+                    _format_mean_std(metrics[name])
+                    for name in (
+                        "inference.mean_ms",
+                        "inference.p50_ms",
+                        "inference.p95_ms",
+                        "inference.p99_ms",
+                        "inference.throughput_queries_per_second",
+                    )
+                )
+                + " |",
+            ]
         )
     return "\n".join(lines) + "\n"
 
@@ -261,9 +285,36 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
         "",
         "Values are mean +/- sample standard deviation across seed-level summaries.",
         "",
-        "| Method | Variant | Workload | Coverage | Raw p50 | Raw p95 | Raw p99 | Raw max | Smoothed p50 | Smoothed p95 | Mean ms | QPS |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "## Q-error",
+        "",
+        "| Method | Variant | Workload | Coverage | Family | p50 | p90 | p95 | p99 | max |",
+        "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
+    for row in rows:
+        def metric(name: str) -> str:
+            return _format_mean_std(
+                {"mean": row[f"{name}.mean"], "std": row[f"{name}.std"]}
+            )
+
+        identity = [
+            str(row["method_id"]),
+            str(row["variant_id"]),
+            str(row["workload"]),
+            "complete" if row["coverage_complete_all_seeds"] else "incomplete",
+        ]
+        for label, family in Q_ERROR_REPORT_FAMILIES:
+            values = [metric(f"{family}.{name}") for name in Q_ERROR_PERCENTILES]
+            lines.append("| " + " | ".join([*identity, label, *values]) + " |")
+    lines.extend(
+        [
+            "",
+            "## Inference",
+            "",
+            "| Method | Variant | Workload | Coverage | Mean (ms) | p50 (ms) | "
+            "p95 (ms) | p99 (ms) | Throughput (queries/s) |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
     for row in rows:
         def metric(name: str) -> str:
             return _format_mean_std(
@@ -278,13 +329,10 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
                     str(row["variant_id"]),
                     str(row["workload"]),
                     "complete" if row["coverage_complete_all_seeds"] else "incomplete",
-                    metric("raw_q_error.p50"),
-                    metric("raw_q_error.p95"),
-                    metric("raw_q_error.p99"),
-                    metric("raw_q_error.max"),
-                    metric("smoothed_q_error.p50"),
-                    metric("smoothed_q_error.p95"),
                     metric("inference.mean_ms"),
+                    metric("inference.p50_ms"),
+                    metric("inference.p95_ms"),
+                    metric("inference.p99_ms"),
                     metric("inference.throughput_queries_per_second"),
                 ]
             )

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
-import resource
 import shlex
 import subprocess
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,16 +37,22 @@ def run_logged_command(
             merged_env.pop(str(key), None)
         else:
             merged_env[str(key)] = str(value)
-    # Snapshot RUSAGE_CHILDREN before the subprocess so we capture only this
-    # command's contribution.  ru_maxrss is a session-cumulative high-water mark,
-    # not a per-process value, so we compute a delta.
-    before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    wrapper = Path(__file__).with_name("_resource_wrapper.py")
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix="joblight-resource-",
+        suffix=".json",
+        dir=stdout_path.parent,
+        delete=False,
+    ) as metrics_handle:
+        metrics_path = Path(metrics_handle.name)
     start = time.perf_counter()
     with stdout_path.open("a", encoding="utf-8") as stdout, stderr_path.open(
         "a", encoding="utf-8"
     ) as stderr:
         completed = subprocess.run(
-            argv,
+            [sys.executable, str(wrapper), str(metrics_path), *argv],
             cwd=cwd,
             env=merged_env,
             stdout=stdout,
@@ -52,15 +60,20 @@ def run_logged_command(
             check=False,
         )
     elapsed = time.perf_counter() - start
-    after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    # macOS reports bytes; Linux reports KiB.
-    is_darwin = os.uname().sysname == "Darwin"
-    scale = 1 if is_darwin else 1024
-    # Delta gives a per-command approximation; may undercount if the session-
-    # wide high-water mark was already set by an earlier, larger subprocess.
-    peak = int(max(after - before, 0) * scale) or None
     if completed.returncode:
+        metrics_path.unlink(missing_ok=True)
         raise RuntimeError(
-            f"command failed with exit code {completed.returncode}; see {stderr_path}"
+            f"resource wrapper failed with exit code {completed.returncode}; "
+            f"see {stderr_path}"
         )
-    return CommandResult(tuple(argv), completed.returncode, elapsed, peak)
+    try:
+        measurement = json.loads(metrics_path.read_text(encoding="utf-8"))
+    finally:
+        metrics_path.unlink(missing_ok=True)
+    returncode = int(measurement["returncode"])
+    peak = int(measurement["peak_rss_bytes"])
+    if returncode:
+        raise RuntimeError(
+            f"command failed with exit code {returncode}; see {stderr_path}"
+        )
+    return CommandResult(tuple(argv), returncode, elapsed, peak)

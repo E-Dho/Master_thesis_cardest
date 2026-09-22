@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,7 +73,16 @@ class ConfigAndArtifactsTest(unittest.TestCase):
                 [root / "aggregate" / "comparison.json"], root / "comparison"
             )
             self.assertEqual(comparison["aggregate_count"], 1)
-            self.assertTrue((root / "comparison" / "comparison.md").exists())
+            aggregate_markdown = (root / "aggregate" / "comparison.md").read_text()
+            comparison_markdown = (root / "comparison" / "comparison.md").read_text()
+            for label in (
+                "Raw, all scored queries",
+                "Raw, true cardinality > 0",
+                "Smoothed, true cardinality = 0",
+                "Smoothed, all scored queries",
+            ):
+                self.assertIn(label, aggregate_markdown)
+                self.assertIn(label, comparison_markdown)
             partial = root / "partial"
             partial.mkdir()
             with self.assertRaises(ValueError):
@@ -145,7 +155,29 @@ class ConfigAndArtifactsTest(unittest.TestCase):
                 else:
                     os.environ["PYTHONPATH"] = previous
             self.assertEqual(result.returncode, 0)
+            self.assertIsNotNone(result.peak_rss_bytes)
+            self.assertGreater(result.peak_rss_bytes, 0)
             self.assertNotIn("PYTHONPATH=", (root / "stdout").read_text(encoding="utf-8"))
+
+    def test_rss_measurement_is_per_command_not_a_cumulative_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            larger = run_logged_command(
+                [sys.executable, "-c", "x = bytearray(24_000_000)"],
+                cwd=root,
+                env={},
+                stdout_path=root / "stdout",
+                stderr_path=root / "stderr",
+            )
+            smaller = run_logged_command(
+                [sys.executable, "-c", "x = bytearray(2_000_000)"],
+                cwd=root,
+                env={},
+                stdout_path=root / "stdout",
+                stderr_path=root / "stderr",
+            )
+            self.assertGreater(larger.peak_rss_bytes, smaller.peak_rss_bytes)
+            self.assertGreater(smaller.peak_rss_bytes, 0)
 
     def test_dotted_minor_version_remains_a_string(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

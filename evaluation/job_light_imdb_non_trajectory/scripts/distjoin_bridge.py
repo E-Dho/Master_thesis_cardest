@@ -187,11 +187,15 @@ def _train(args: argparse.Namespace) -> None:
         "full_checkpoint_mb": sum(path.stat().st_size for path in checkpoints) / 1_000_000,
         "upstream_config": config,
     }
-    # Count total trainable parameters across all per-table checkpoint files.
+    # DistJoin registers autoregressive masks as state-dict buffers. Exclude
+    # those buffers so this remains a parameter count rather than a checkpoint
+    # tensor-element count.
     try:
         import torch as _torch
         parameter_count = sum(
-            sum(p.numel() for p in _torch.load(ckpt, map_location="cpu", weights_only=True).values())
+            _parameter_count_from_state_dict(
+                _torch.load(ckpt, map_location="cpu", weights_only=True)
+            )
             for ckpt in checkpoints
         )
     except Exception:
@@ -206,6 +210,16 @@ def _train(args: argparse.Namespace) -> None:
     _write_json(output / "build_stage_metrics.json", metrics)
     _write_json(output / "artifact_manifest.json", artifact)
     print(json.dumps(metrics, indent=2, sort_keys=True))
+
+
+def _parameter_count_from_state_dict(state: dict[str, Any]) -> int:
+    """Count parameters in pinned DistJoin checkpoints, excluding mask buffers."""
+
+    return sum(
+        int(value.numel())
+        for name, value in state.items()
+        if not name.endswith(".mask")
+    )
 
 
 def _evaluator_smoke(args: argparse.Namespace) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,15 @@ SPEC.loader.exec_module(BRIDGE)
 
 
 class DistJoinBridgeTests(unittest.TestCase):
+    def test_parameter_count_excludes_autoregressive_mask_buffers(self):
+        state = {
+            "net.0.weight": types.SimpleNamespace(numel=lambda: 12),
+            "net.0.bias": types.SimpleNamespace(numel=lambda: 3),
+            "net.0.mask": types.SimpleNamespace(numel=lambda: 12),
+            "direct_io_layer.mask": types.SimpleNamespace(numel=lambda: 9),
+        }
+        self.assertEqual(BRIDGE._parameter_count_from_state_dict(state), 15)
+
     def test_fixture_contains_all_job_light_tables_with_headers(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -18,7 +18,7 @@ all evaluated methods and the execution contract used by their adapters.
 | DeepDB | Subprocess `deepdb` adapter | Native `imdb-light` RDC ensemble, samples `10M/10M/1M/1M/1M`, budget factor 5, at most three tables |
 | NeuroCard | Subprocess `neurocard` adapter | Native JOB-light and JOB-light-ranges ResMADE configurations, native factorized sampling, 8,000 progressive samples |
 | DistJoin | Subprocess `distjoin` adapter | Published IMDB configuration and upstream dynamic sampler/ANPM implementation |
-| FOJ sampling | Native `foj_sampling` adapter | Nested unbiased Exact Weight full-outer-join reservoirs at 1k, 10k, 100k, 1M, and 7,168,000 rows |
+| FOJ sampling | Native `foj_sampling` adapter | Independent seeded Exact Weight full-outer-join subsets at 1k, 10k, 100k, 1M, and 7,168,000 rows |
 | Own approach | Subprocess `own_model` adapter | Arbitrary named config/checkpoint/ablation with the same result contract |
 
 Duet is intentionally deferred to a separate multi-table adaptation study.
@@ -122,7 +122,7 @@ packages over the shared PyTorch runtime. Its native sampler is rebuilt with
 `slurm/distjoin_sampler_build.sbatch`, which loads GCC 12 before compiling the
 extension.
 
-Each complete run contains `resolved_config.yaml`, `run_manifest.json`,
+Each complete run contains `resolved_config.json`, `run_manifest.json`,
 `predictions.csv`, `latency.csv`, `summary.json`, `build_metrics.json`,
 `resource_metrics.json`, and raw command logs. The aggregate emits JSON, CSV,
 and Markdown. Incomplete or unsupported queries remain explicit status rows.
