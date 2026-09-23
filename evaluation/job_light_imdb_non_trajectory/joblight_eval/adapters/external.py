@@ -54,6 +54,7 @@ class ExternalCommandAdapter(Adapter):
         exchange = self.run_directory / "exchange"
         exchange.mkdir(exist_ok=True)
         total_wall = 0.0
+        timing_outputs: dict[str, list[tuple[Path, str]]] = {}
         for workload in workloads:
             command = self.config.adapter.get("evaluate_command")
             if not command:
@@ -70,6 +71,50 @@ class ExternalCommandAdapter(Adapter):
                 },
             )
             total_wall += result.wall_seconds
+            timing_outputs[workload.workload_id] = [
+                (
+                    exchange / f"{workload.workload_id}_latency.csv",
+                    str(self.config.timing.get("device", "cpu")),
+                )
+            ]
+            supplementary = self.config.adapter.get(
+                "supplementary_evaluate_commands", []
+            )
+            if not isinstance(supplementary, list):
+                raise ValueError(
+                    "adapter.supplementary_evaluate_commands must be a list"
+                )
+            for profile in supplementary:
+                if (
+                    not isinstance(profile, dict)
+                    or not profile.get("command")
+                    or not profile.get("device")
+                ):
+                    raise ValueError(
+                        "each supplementary evaluation needs command and device"
+                    )
+                profile_id = str(profile.get("profile_id") or profile["device"])
+                latency_path = exchange / (
+                    f"{workload.workload_id}_{profile_id}_latency.csv"
+                )
+                supplemental = self._run_command(
+                    f"evaluate_{profile_id}",
+                    str(profile["command"]),
+                    extra={
+                        "workload_id": workload.workload_id,
+                        "queries_csv": str(workload.queries_csv),
+                        "queries_sql": str(workload.queries_sql or ""),
+                        "predictions_csv": str(
+                            exchange
+                            / f"{workload.workload_id}_{profile_id}_predictions.csv"
+                        ),
+                        "latency_csv": str(latency_path),
+                    },
+                )
+                total_wall += supplemental.wall_seconds
+                timing_outputs[workload.workload_id].append(
+                    (latency_path, str(profile["device"]))
+                )
         predictions: list[PredictionRecord] = []
         latencies: list[LatencyRecord] = []
         for workload in workloads:
@@ -108,8 +153,9 @@ class ExternalCommandAdapter(Adapter):
                             diagnostic="external adapter produced no row",
                         )
                     )
-            latency_path = exchange / f"{workload.workload_id}_latency.csv"
-            if latency_path.exists():
+            for latency_path, configured_device in timing_outputs[workload.workload_id]:
+                if not latency_path.exists():
+                    continue
                 for row in _read_csv(latency_path):
                     latencies.append(
                         LatencyRecord(
@@ -118,12 +164,20 @@ class ExternalCommandAdapter(Adapter):
                             repetition=int(row["repetition"]),
                             latency_ms=float(row["latency_ms"]),
                             scope=row.get("scope", "end_to_end"),
+                            device=row.get("device") or configured_device,
+                            device_name=row.get("device_name", ""),
                         )
                     )
         return AdapterEvaluation(
             predictions=tuple(predictions),
             latencies=tuple(latencies),
-            detail={"evaluation_subprocess_wall_seconds": total_wall},
+            detail={
+                "evaluation_subprocess_wall_seconds": total_wall,
+                "timing_profiles": {
+                    workload_id: [device for _path, device in outputs]
+                    for workload_id, outputs in timing_outputs.items()
+                },
+            },
         )
 
     def artifact_metadata(self) -> dict[str, Any]:

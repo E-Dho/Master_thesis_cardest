@@ -117,6 +117,48 @@ class ConfigAndArtifactsTest(unittest.TestCase):
             self.assertEqual(accuracy["estimate_lt_1_count"], 1)
             self.assertEqual(accuracy["smoothed_q_error"]["max"], 10.0)
 
+    def test_reports_primary_and_supplementary_timing_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runs = [
+                _write_complete_run(root / f"seed-{seed}", seed, "abc")
+                for seed in (0, 1)
+            ]
+            for run in runs:
+                path = run / "summary.json"
+                summary = json.loads(path.read_text(encoding="utf-8"))
+                workload = summary["workloads"]["job_light"]
+                workload["timing_protocol"] = {
+                    "device": "cuda",
+                    "primary_device": "cuda",
+                    "synchronize_cuda": True,
+                    "published_reference_hardware": "Reference GPU",
+                }
+                workload["inference_by_device"] = {
+                    "cuda": {
+                        **workload["inference"],
+                        "device": "cuda",
+                        "device_names": ["Test GPU"],
+                        "scopes": ["inference"],
+                    },
+                    "cpu": {
+                        **workload["inference"],
+                        "mean_ms": 5.0,
+                        "device": "cpu",
+                        "device_names": ["Test CPU"],
+                        "scopes": ["inference"],
+                    },
+                }
+                path.write_text(json.dumps(summary), encoding="utf-8")
+            aggregate = aggregate_runs(runs, root / "aggregate")
+            profiles = aggregate["workloads"]["job_light"]["inference_profiles"]
+            self.assertEqual(set(profiles), {"cpu", "cuda"})
+            self.assertEqual(profiles["cuda"]["device_names"], ["Test GPU"])
+            markdown = (root / "aggregate" / "comparison.md").read_text()
+            self.assertIn("Primary timing device: **cuda**", markdown)
+            self.assertIn("Test GPU", markdown)
+            self.assertIn("Test CPU", markdown)
+
     def test_external_long_build_requires_smoke_command(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -195,6 +237,26 @@ class ConfigAndArtifactsTest(unittest.TestCase):
             config = load_experiment_config(config_path)
             self.assertEqual(config.source["installed_version"], "16.10")
             self.assertEqual(config.adapter["postgres_version"], "16.10")
+
+    def test_cuda_timing_requires_explicit_synchronization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            query_path = root / "queries.txt"
+            query_path.write_text("title t##t.id,=,1#1\n", encoding="utf-8")
+            config_path = root / "config.yaml"
+            text = _config_text(query_path, root / "results", "v", "Fixture")
+            text = text.replace(
+                "timing:\n  warmup_passes:",
+                "timing:\n  device: cuda\n  warmup_passes:",
+            )
+            config_path.write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "synchronize_cuda"):
+                load_experiment_config(config_path)
+            config_path.write_text(
+                text.replace("  device: cuda\n", "  device: cuda\n  synchronize_cuda: true\n"),
+                encoding="utf-8",
+            )
+            self.assertEqual(load_experiment_config(config_path).timing["device"], "cuda")
 
 
 def _config_text(query_path: Path, result_path: Path, variant: str, display: str) -> str:

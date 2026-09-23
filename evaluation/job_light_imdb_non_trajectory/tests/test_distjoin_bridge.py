@@ -37,6 +37,22 @@ class DistJoinBridgeTests(unittest.TestCase):
         self.assertEqual(command[mark_index + 1], "smoke")
         self.assertEqual(run.call_args.kwargs["env"]["CUDA_VISIBLE_DEVICES"], "")
 
+    def test_gpu_evaluator_keeps_allocated_cuda_device_visible(self):
+        completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(BRIDGE.subprocess, "run", return_value=completed) as run:
+            BRIDGE._run_distjoin_evaluator(
+                source=Path("/source"), overlay=Path("/overlay"),
+                python=Path("/python"), queries=Path("/queries"),
+                base_cardinalities=Path("/basecards"),
+                predictions=Path("/predictions"), latencies=Path("/latencies"),
+                warmup_passes=1, repetitions=2, device="cuda",
+            )
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--device") + 1], "cuda")
+        self.assertNotEqual(
+            run.call_args.kwargs["env"].get("CUDA_VISIBLE_DEVICES"), ""
+        )
+
     def test_absolute_smoke_warmup_is_one_step(self):
         self.assertEqual(
             BRIDGE._effective_warmup_steps(1, batches_per_epoch=1, epochs=1),

@@ -17,7 +17,10 @@ workloads:
     queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light-ranges.csv
     expected_query_count: 1000
 timing:
-  device: cpu
+  device: cuda
+  synchronize_cuda: true
+  comparison_basis: neural_gpu_inference_with_cpu_supplement
+  published_reference_hardware: Report actual cluster GPU; compare NeuroCard against its V100 result with hardware caveat
   warmup_passes: 1
   repetitions: 10
   sequential_single_query: true
@@ -32,4 +35,8 @@ adapter:
   prepare_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory}
   smoke_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv --query-limit {query_limit} --warmup-passes 1 --repetitions 2
   build_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py build --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory}
-  evaluate_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10
+  evaluate_command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cuda
+  supplementary_evaluate_commands:
+    - profile_id: cpu
+      device: cpu
+      command: python3 evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /path/to/model-config.yaml --checkpoint /path/to/checkpoint.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cpu

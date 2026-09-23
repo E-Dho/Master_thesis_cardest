@@ -114,6 +114,6 @@ class TorchDistributionModel:
                         metadata=self.metadata,
                         predicate_token=token,
                     )
-                values.append(factor[0].detach().cpu())
+                values.append(factor[0].detach())
             self.last_decode_seconds = perf_counter() - decode_start
-        return np.array([float(value) for value in values], dtype=float)
+        return torch.stack(values).cpu().numpy().astype(float, copy=False)

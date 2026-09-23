@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import platform
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -277,12 +278,56 @@ def summarize_run(
         )
         expected_queries = load_workload(workload.queries_csv, workload.workload_id)
         _validate_prediction_contract(workload_predictions, expected_queries)
+        primary_device = str(config.timing.get("device", "cpu"))
+        inference_profiles = _summarize_inference_profiles(
+            workload_latencies, configured_device=primary_device
+        )
         result["workloads"][workload.workload_id] = {
             "accuracy": summarize_predictions(list(workload_predictions)),
-            "inference": summarize_latency(list(workload_latencies)),
+            "inference": inference_profiles[primary_device],
+            "inference_by_device": inference_profiles,
+            "timing_protocol": {
+                **config.timing,
+                "primary_device": primary_device,
+            },
             "workload": workload_metadata[workload.workload_id],
         }
     return result
+
+
+def _summarize_inference_profiles(
+    records: tuple[LatencyRecord, ...], *, configured_device: str
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[LatencyRecord]] = {}
+    for record in records:
+        device = record.device if record.device != "unspecified" else configured_device
+        grouped.setdefault(device, []).append(record)
+    grouped.setdefault(configured_device, [])
+    profiles: dict[str, dict[str, Any]] = {}
+    for device, device_records in sorted(grouped.items()):
+        device_names = sorted(
+            {record.device_name for record in device_records if record.device_name}
+        )
+        if device == "cpu" and not device_names:
+            device_names = [_cpu_model_name()]
+        profiles[device] = {
+            **summarize_latency(device_records),
+            "device": device,
+            "device_names": device_names,
+            "scopes": sorted({record.scope for record in device_records}),
+        }
+    return profiles
+
+
+def _cpu_model_name() -> str:
+    name = platform.processor().strip()
+    cpuinfo = Path("/proc/cpuinfo")
+    if not name and cpuinfo.exists():
+        for line in cpuinfo.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.lower().startswith("model name") and ":" in line:
+                name = line.split(":", 1)[1].strip()
+                break
+    return name or platform.machine() or "CPU"
 
 
 def _workload_metadata(config: ExperimentConfig) -> dict[str, Any]:
@@ -310,6 +355,24 @@ def _validate_complete_run(run_directory: Path, summary: dict[str, Any]) -> None
             for value in accuracy[metric_family].values():
                 if value is not None and not math.isfinite(float(value)):
                     raise ValueError(f"{workload_id} contains non-finite {metric_family}")
+        timing = workload.get("timing_protocol", {})
+        primary_device = str(timing.get("primary_device", timing.get("device", "cpu")))
+        profiles = workload.get("inference_by_device", {})
+        primary = profiles.get(primary_device, workload.get("inference", {}))
+        if int(primary.get("observation_count", 0)) <= 0:
+            raise ValueError(f"{workload_id} has no primary-device latency observations")
+        for name in (
+            "mean_ms", "p50_ms", "p95_ms", "p99_ms",
+            "throughput_queries_per_second",
+        ):
+            value = primary.get(name)
+            if value is None or not math.isfinite(float(value)):
+                raise ValueError(f"{workload_id} has invalid inference metric {name}")
+        if primary_device == "cuda":
+            if timing.get("synchronize_cuda") is not True:
+                raise ValueError(f"{workload_id} CUDA timing is not synchronized")
+            if not primary.get("device_names"):
+                raise ValueError(f"{workload_id} did not record the CUDA device name")
     missing = [name for name in REQUIRED_ARTIFACTS if not (run_directory / name).exists()]
     # Validation runs before the final manifest rewrite, but every path already exists.
     if missing:

@@ -57,7 +57,8 @@ class LatencyRecord:
     repetition: int
     latency_ms: float
     scope: str = "end_to_end"
+    device: str = "unspecified"
+    device_name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-

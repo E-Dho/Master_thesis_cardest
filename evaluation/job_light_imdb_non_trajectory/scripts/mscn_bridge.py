@@ -358,6 +358,12 @@ def _evaluate(args: argparse.Namespace) -> None:
                         "repetition": repetition,
                         "latency_ms": latency_ms,
                         "scope": "predicate_bitmap_encoding_and_setconv_inference",
+                        "device": args.device,
+                        "device_name": (
+                            str(torch.cuda.get_device_name(device))
+                            if device.type == "cuda"
+                            else "CPU"
+                        ),
                     })
                 except Exception as exc:
                     failures[query_id] = f"{type(exc).__name__}: {exc}"
@@ -377,7 +383,7 @@ def _evaluate(args: argparse.Namespace) -> None:
     )
     _write_csv(
         Path(args.latency), latency_rows,
-        ("query_id", "repetition", "latency_ms", "scope")
+        ("query_id", "repetition", "latency_ms", "scope", "device", "device_name")
     )
     payload = {
         "status": "ok" if not failures else "partial_failure",

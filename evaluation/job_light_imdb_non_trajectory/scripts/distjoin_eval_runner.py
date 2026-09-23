@@ -30,7 +30,12 @@ def main() -> int:
     parser.add_argument("--warmup-passes", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=10)
     parser.add_argument("--initialize-missing-checkpoints", action="store_true")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
+
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA inference requested but CUDA is unavailable")
+    device = torch.device(args.device)
 
     source = args.source_root.resolve()
     overlay = args.overlay_root.resolve()
@@ -38,6 +43,7 @@ def main() -> int:
     sys.path.insert(0, str(source))
     sys.argv = [str(source / "eval-IMDB.py"), "--config", "IMDB", "--no_wandb"]
     module = _load_module(source / "eval-IMDB.py")
+    module.util.get_device = lambda: device
     _install_missing_tesseract_transformer(sys.modules["estimator"])
     module.JoinOrderBenchmark.LoadTrueBaseCard(module.raw_config["tag"])
     tables, _, estimator, _ = _build_estimator_cpu_compatible(
@@ -55,14 +61,17 @@ def main() -> int:
     for _ in range(args.warmup_passes):
         for query in loaded:
             _estimate(module, estimator, tables, query, base_cards)
+        _synchronize(device)
 
     predictions: list[dict[str, Any]] = []
     latencies: list[dict[str, Any]] = []
     reference: dict[int, float] = {}
     for repetition in range(args.repetitions):
         for query_id, query in enumerate(loaded):
+            _synchronize(device)
             started = time.perf_counter()
             estimate = _estimate(module, estimator, tables, query, base_cards)
+            _synchronize(device)
             latency_ms = (time.perf_counter() - started) * 1000.0
             if repetition == 0:
                 reference[query_id] = estimate
@@ -82,11 +91,24 @@ def main() -> int:
                     "repetition": repetition,
                     "latency_ms": latency_ms,
                     "scope": "predicate_encoding_and_estimation",
+                    "device": args.device,
+                    "device_name": _device_name(device),
                 }
             )
     _write_csv(args.predictions, predictions)
     _write_csv(args.latencies, latencies)
     return 0
+
+
+def _synchronize(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _device_name(device: torch.device) -> str:
+    if device.type == "cuda":
+        return str(torch.cuda.get_device_name(device))
+    return "CPU"
 
 
 def _load_module(path: Path):

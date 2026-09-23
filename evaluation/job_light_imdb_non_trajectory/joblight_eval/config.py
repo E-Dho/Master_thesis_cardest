@@ -124,6 +124,12 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     if not (source.get("revision") or source.get("installed_version")):
         raise ValueError("source.revision or source.installed_version is required")
     artifacts = _mapping(raw, "artifacts")
+    timing = dict(raw.get("timing", {}))
+    timing_device = str(timing.get("device", "cpu"))
+    if timing_device not in ("cpu", "cuda"):
+        raise ValueError("timing.device must be 'cpu' or 'cuda'")
+    if timing_device == "cuda" and timing.get("synchronize_cuda") is not True:
+        raise ValueError("CUDA timing must set timing.synchronize_cuda: true")
     canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
     config_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return ExperimentConfig(
@@ -137,7 +143,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         workloads=tuple(workloads),
         adapter_type=adapter_type,
         adapter=adapter,
-        timing=dict(raw.get("timing", {})),
+        timing=timing,
         resources=dict(raw.get("resources", {})),
         source=source,
         artifacts=artifacts,

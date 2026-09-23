@@ -444,9 +444,9 @@ def eval_query_native(
                     metadata=metadata,
                     predicate_token=output_token,
                 )
-            factor_values.append(float(factor[0].detach().cpu()))
+            factor_values.append(factor[0].detach())
         wrapped.last_decode_seconds = perf_counter() - decode_start
-    factors = np.array(factor_values, dtype=float)
+    factors = torch.stack(factor_values).cpu().numpy().astype(float, copy=False)
     calls = model.forward_calls - before
     if metadata.full_join_cardinality == 0 or np.any(factors == 0):
         estimate = 0.0

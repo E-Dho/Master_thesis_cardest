@@ -17,6 +17,8 @@ workloads:
     queries_csv: /path/to/job-light-ranges.csv
 timing:
   device: cpu
+  comparison_basis: published_or_native_device
+  published_reference_hardware: Describe the paper's timing hardware
   warmup_passes: 1
   repetitions: 10
   sequential_single_query: true
@@ -25,7 +27,6 @@ timing:
 resources:
   profile: cpu_primary
   cpu_threads: 1
-  accelerator_native_timing_is_additional: true
 artifacts:
   dataset_root: /path/to/checksummed/imdb-csv
   checkpoint: /path/to/checkpoint
@@ -37,4 +38,4 @@ adapter:
   smoke_command: /path/to/environment/python smoke.py --queries 2 --seed {seed}
   build_command: /path/to/environment/python train.py --seed {seed}
   evaluate_command: /path/to/environment/python evaluate.py --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --seed {seed}
-
+  supplementary_evaluate_commands: []

@@ -15,4 +15,8 @@ sources:
   naru_reference:
     url: https://github.com/naru-project/naru.git
     commit: 264cf4e9c96c9e34422f9eebc455a714aeef0b57
-
+papers:
+  mscn: https://arxiv.org/abs/1809.00677
+  deepdb: https://www.vldb.org/pvldb/vol13/p992-hilprecht.pdf
+  neurocard: https://www.vldb.org/pvldb/vol14/p61-yang.pdf
+  distjoin: https://arxiv.org/abs/2503.08994

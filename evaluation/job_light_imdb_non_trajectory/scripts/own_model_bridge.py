@@ -23,6 +23,7 @@ def main() -> int:
     parser.add_argument("--query-limit", type=int, default=2)
     parser.add_argument("--warmup-passes", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=10)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     _validate(args.config, args.checkpoint)
     if args.command == "prepare":
@@ -90,6 +91,7 @@ def _evaluate(args: argparse.Namespace, *, smoke: bool) -> None:
         "--predictions", str(predictions), "--latencies", str(latencies),
         "--warmup-passes", str(args.warmup_passes),
         "--repetitions", str(args.repetitions),
+        "--device", args.device,
     ]
     started = time.perf_counter()
     subprocess.run(command, check=True)

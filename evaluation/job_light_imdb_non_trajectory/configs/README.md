@@ -19,8 +19,10 @@ the seed and timing policy and substitutes these fields:
 
 The evaluation subprocess must write `query_id,estimated_cardinality` and may
 write `status,diagnostic`. It writes timing observations as
-`query_id,repetition,latency_ms,scope`. Missing prediction rows are converted
-to explicit failures. An optional `artifact_manifest.json` reports parameter
+`query_id,repetition,latency_ms,scope,device,device_name`. The last two columns
+are optional for legacy CPU adapters but required for GPU timing. Missing
+prediction rows are converted to explicit failures. An optional
+`artifact_manifest.json` reports parameter
 count, inference-only serialized size, full checkpoint size, and framework
 memory measurements.
 
@@ -42,6 +44,16 @@ production build on a CPU-only `base` node.
 
 `../slurm/gpu_build.sbatch` provides the same staged CUDA guard for other
 learned baselines, including MSCN and DistJoin.
+`../slurm/gpu_evaluate.sbatch` similarly requires a GPU allocation and runs the
+evaluation plus summary stages. CUDA configs must declare
+`timing.synchronize_cuda: true`; configuration loading rejects asynchronous
+CUDA timing because it would measure launch overhead rather than inference.
+
+An external adapter may add `supplementary_evaluate_commands`, each with a
+`profile_id`, `device`, and `command`. These commands reuse the same checkpoint
+and workload and add latency profiles without replacing the primary accuracy
+predictions. The own-model example uses this to report GPU-primary and
+supplementary CPU timings together.
 
 Environment specifications live in `../environments`. They intentionally do
 not install DeepDB's 2019 dependency lock into the modern shared environment,

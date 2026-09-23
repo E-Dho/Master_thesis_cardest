@@ -118,6 +118,40 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
                 for summary in summaries
             ]
             workload_result["metrics"][f"inference.{name}"] = _mean_std(values)
+        timing_protocol = summaries[0]["workloads"][workload_id].get(
+            "timing_protocol", {}
+        )
+        profile_sets = [
+            set(_inference_profiles(summary, workload_id)) for summary in summaries
+        ]
+        if any(devices != profile_sets[0] for devices in profile_sets[1:]):
+            raise ValueError("seed summaries have different inference timing profiles")
+        workload_result["timing_protocol"] = timing_protocol
+        workload_result["inference_profiles"] = {}
+        for device in sorted(profile_sets[0]):
+            profiles = [
+                _inference_profiles(summary, workload_id)[device]
+                for summary in summaries
+            ]
+            workload_result["inference_profiles"][device] = {
+                "device_names": sorted(
+                    {
+                        name
+                        for profile in profiles
+                        for name in profile.get("device_names", [])
+                    }
+                ),
+                "metrics": {
+                    name: _mean_std([profile[name] for profile in profiles])
+                    for name in (
+                        "mean_ms",
+                        "p50_ms",
+                        "p95_ms",
+                        "p99_ms",
+                        "throughput_queries_per_second",
+                    )
+                },
+            }
         aggregate["workloads"][workload_id] = workload_result
         row: dict[str, Any] = {
             "experiment_id": experiment_id,
@@ -128,6 +162,16 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
             "workload": workload_id,
             "seed_count": len(seeds),
             "coverage_complete_all_seeds": workload_result["coverage_complete_all_seeds"],
+            "inference_device": timing_protocol.get("primary_device", timing_protocol.get("device", "unspecified")),
+            "published_reference_hardware": timing_protocol.get("published_reference_hardware", ""),
+            "actual_hardware": ", ".join(
+                workload_result["inference_profiles"]
+                .get(timing_protocol.get("primary_device", timing_protocol.get("device", "")), {})
+                .get("device_names", [])
+            ),
+            "inference_profiles_json": json.dumps(
+                workload_result["inference_profiles"], sort_keys=True
+            ),
         }
         for name, value in workload_result["metrics"].items():
             row[f"{name}.mean"] = value["mean"]
@@ -162,10 +206,27 @@ def compare_aggregates(
                 "workload": workload_id,
                 "seed_count": aggregate["seed_count"],
                 "coverage_complete_all_seeds": workload["coverage_complete_all_seeds"],
+                "inference_device": workload.get("timing_protocol", {}).get(
+                    "primary_device",
+                    workload.get("timing_protocol", {}).get("device", "unspecified"),
+                ),
+                "published_reference_hardware": workload.get(
+                    "timing_protocol", {}
+                ).get("published_reference_hardware", ""),
+                "inference_profiles": workload.get("inference_profiles", {}),
             }
             for name, metric in workload["metrics"].items():
                 row[f"{name}.mean"] = metric["mean"]
                 row[f"{name}.std"] = metric["std"]
+            primary_profile = row["inference_profiles"].get(
+                row["inference_device"], {}
+            )
+            row["actual_hardware"] = ", ".join(
+                primary_profile.get("device_names", [])
+            )
+            row["inference_profiles_json"] = json.dumps(
+                row["inference_profiles"], sort_keys=True
+            )
             rows.append(row)
     comparison = {
         "schema_version": 1,
@@ -219,6 +280,16 @@ def _mean_std(values: list[float | int | None]) -> dict[str, float | None]:
     }
 
 
+def _inference_profiles(summary: dict[str, Any], workload_id: str) -> dict[str, Any]:
+    workload = summary["workloads"][workload_id]
+    profiles = workload.get("inference_by_device")
+    if profiles:
+        return profiles
+    protocol = workload.get("timing_protocol", {})
+    device = str(protocol.get("primary_device", protocol.get("device", "unspecified")))
+    return {device: {**workload["inference"], "device_names": [], "scopes": []}}
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
@@ -226,7 +297,15 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(
+            {
+                key: json.dumps(value, sort_keys=True)
+                if isinstance(value, (dict, list))
+                else value
+                for key, value in row.items()
+            }
+            for row in rows
+        )
 
 
 def _markdown_table(aggregate: dict[str, Any]) -> str:
@@ -258,25 +337,41 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
                 for name in Q_ERROR_PERCENTILES
             ]
             lines.append("| " + " | ".join([label, *values]) + " |")
+        protocol = workload.get("timing_protocol", {})
+        primary = protocol.get("primary_device", protocol.get("device", "unspecified"))
         lines.extend(
             [
                 "",
-                "| Inference mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) | Throughput (queries/s) |",
-                "| ---: | ---: | ---: | ---: | ---: |",
-                "| "
-                + " | ".join(
-                    _format_mean_std(metrics[name])
-                    for name in (
-                        "inference.mean_ms",
-                        "inference.p50_ms",
-                        "inference.p95_ms",
-                        "inference.p99_ms",
-                        "inference.throughput_queries_per_second",
-                    )
-                )
-                + " |",
+                f"Primary timing device: **{primary}**",
+                "",
+                f"Published reference hardware: {protocol.get('published_reference_hardware', 'not specified')}",
+                "",
+                "| Device | Actual hardware | Mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) | Throughput (queries/s) |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
+        for device, profile in workload.get("inference_profiles", {}).items():
+            profile_metrics = profile["metrics"]
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        device,
+                        ", ".join(profile.get("device_names", [])) or "not recorded",
+                        *(
+                            _format_mean_std(profile_metrics[name])
+                            for name in (
+                                "mean_ms",
+                                "p50_ms",
+                                "p95_ms",
+                                "p99_ms",
+                                "throughput_queries_per_second",
+                            )
+                        ),
+                    ]
+                )
+                + " |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -322,9 +417,9 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
             "",
             "## Inference",
             "",
-            "| Method | Variant | Display name | Protocol | Workload | Coverage | Mean (ms) | p50 (ms) | "
-            "p95 (ms) | p99 (ms) | Throughput (queries/s) |",
-            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Method | Variant | Display name | Protocol | Workload | Coverage | Device | Actual hardware | "
+            "Published reference | Mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) | Throughput (queries/s) |",
+            "| --- | --- | --- | --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in rows:
@@ -333,23 +428,47 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
                 {"mean": row[f"{name}.mean"], "std": row[f"{name}.std"]}
             )
 
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    str(row["method_id"]),
-                    str(row["variant_id"]),
-                    str(row["display_name"]),
-                    str(row.get("protocol", "native")),
-                    str(row["workload"]),
-                    "complete" if row["coverage_complete_all_seeds"] else "incomplete",
-                    metric("inference.mean_ms"),
-                    metric("inference.p50_ms"),
-                    metric("inference.p95_ms"),
-                    metric("inference.p99_ms"),
-                    metric("inference.throughput_queries_per_second"),
-                ]
+        profiles = row.get("inference_profiles", {})
+        if not profiles:
+            profiles = {
+                row.get("inference_device", "unspecified"): {
+                    "device_names": [row.get("actual_hardware", "")],
+                    "metrics": {
+                        name: {
+                            "mean": row[f"inference.{name}.mean"],
+                            "std": row[f"inference.{name}.std"],
+                        }
+                        for name in (
+                            "mean_ms", "p50_ms", "p95_ms", "p99_ms",
+                            "throughput_queries_per_second",
+                        )
+                    },
+                }
+            }
+        for device, profile in profiles.items():
+            profile_metrics = profile["metrics"]
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(row["method_id"]),
+                        str(row["variant_id"]),
+                        str(row["display_name"]),
+                        str(row.get("protocol", "native")),
+                        str(row["workload"]),
+                        "complete" if row["coverage_complete_all_seeds"] else "incomplete",
+                        device,
+                        ", ".join(profile.get("device_names", [])) or "not recorded",
+                        str(row.get("published_reference_hardware", "")),
+                        *(
+                            _format_mean_std(profile_metrics[name])
+                            for name in (
+                                "mean_ms", "p50_ms", "p95_ms", "p99_ms",
+                                "throughput_queries_per_second",
+                            )
+                        ),
+                    ]
+                )
+                + " |"
             )
-            + " |"
-        )
     return "\n".join(lines) + "\n"

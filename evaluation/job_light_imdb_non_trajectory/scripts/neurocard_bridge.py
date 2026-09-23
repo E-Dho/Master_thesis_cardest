@@ -235,6 +235,12 @@ def _evaluate(args: argparse.Namespace) -> None:
                         "repetition": repetition,
                         "latency_ms": elapsed_ms,
                         "scope": "predicate_encoding_and_native_progressive_sampling",
+                        "device": args.device,
+                        "device_name": (
+                            str(runtime.torch.cuda.get_device_name(runtime.device))
+                            if runtime.device.type == "cuda"
+                            else "CPU"
+                        ),
                     }
                 )
             except Exception as exc:
@@ -268,7 +274,7 @@ def _evaluate(args: argparse.Namespace) -> None:
     _write_csv(
         Path(args.latency),
         latency_rows,
-        ("query_id", "repetition", "latency_ms", "scope"),
+        ("query_id", "repetition", "latency_ms", "scope", "device", "device_name"),
     )
     payload = {
         "status": "ok" if not failures else "partial_failure",

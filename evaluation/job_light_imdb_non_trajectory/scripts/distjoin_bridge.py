@@ -47,6 +47,7 @@ def main() -> int:
     evaluate.add_argument("--python", default=sys.executable)
     evaluate.add_argument("--warmup-passes", type=int, default=1)
     evaluate.add_argument("--repetitions", type=int, default=10)
+    evaluate.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     if args.command == "prepare":
         _prepare(args)
@@ -316,6 +317,7 @@ def _evaluate(args: argparse.Namespace) -> None:
         latencies=Path(args.latencies).resolve(),
         warmup_passes=args.warmup_passes,
         repetitions=args.repetitions,
+        device=args.device,
     )
     print(completed.stdout)
 
@@ -326,6 +328,7 @@ def _run_distjoin_evaluator(
     warmup_passes: int, repetitions: int,
     experiment_mark: str = "production",
     initialize_missing_checkpoints: bool = False,
+    device: str = "cpu",
 ):
     command = [
         str(python), str(Path(__file__).resolve().parent / "distjoin_eval_runner.py"),
@@ -337,6 +340,7 @@ def _run_distjoin_evaluator(
         "--latencies", str(latencies),
         "--warmup-passes", str(warmup_passes),
         "--repetitions", str(repetitions),
+        "--device", device,
     ]
     if initialize_missing_checkpoints:
         command.append("--initialize-missing-checkpoints")
@@ -344,7 +348,8 @@ def _run_distjoin_evaluator(
     environment["PYTHONPATH"] = os.pathsep.join(
         [str(_compat_directory()), str(source), str(source / "MySampler"), environment.get("PYTHONPATH", "")]
     )
-    environment["CUDA_VISIBLE_DEVICES"] = ""
+    if device == "cpu":
+        environment["CUDA_VISIBLE_DEVICES"] = ""
     environment.setdefault("MPLBACKEND", "Agg")
     completed = subprocess.run(
         command, cwd=overlay, env=environment, text=True,

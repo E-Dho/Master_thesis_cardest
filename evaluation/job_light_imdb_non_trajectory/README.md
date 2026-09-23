@@ -236,7 +236,13 @@ interpreter plus the isolated evaluation package layer and persists
 `smoke_metrics.json` before any long build may start. NeuroCard production
 training uses `slurm/neurocard_build.sbatch`; that staged launcher requires an
 existing smoke-passed run directory and explicitly requests the GPU partition
-and one GPU. CPU-comparable evaluation remains a later, separate stage.
+and one GPU. GPU-native evaluation uses `slurm/gpu_evaluate.sbatch`, which
+refuses to run without an allocated GPU, prints the actual accelerator model,
+and performs the staged `evaluate` and `summarize` steps. MSCN, NeuroCard, and
+DistJoin use this path because their reported inference evaluations use GPUs.
+PostgreSQL, DeepDB, and FOJ sampling remain CPU evaluations. The own-model
+recipe records GPU timing as primary and CPU timing as a supplementary profile
+from the same checkpoint.
 
 ## Evaluation principles
 
@@ -337,6 +343,31 @@ Record the warm-up query count, timed repetitions, batch size, execution
 device, CPU thread count, and whether synchronization was required for GPU
 timing. Model-only latency and end-to-end latency may both be reported, but
 must be clearly distinguished.
+
+### Hardware-aligned timing policy
+
+The headline device follows the method's published evaluation protocol rather
+than forcing every method onto CPU. Every latency row records `device` and
+`device_name`; summaries preserve all profiles under `inference_by_device` and
+identify one `timing_protocol.primary_device`. CUDA is synchronized immediately
+before and after every timed query. Reports include the actual cluster device
+and the paper's reference hardware, since measurements on different GPU models
+are not hardware-normalized.
+
+| Method | Headline device | Published/reference setup |
+| --- | --- | --- |
+| PostgreSQL 16.10 | CPU | Native planner; no GPU inference path |
+| MSCN | GPU | Original MSCN reports AWS ml.p2.xlarge with CUDA; the NeuroCard comparison reruns MSCN on an NVIDIA V100 |
+| DeepDB | CPU | NeuroCard's matched comparison explicitly runs DeepDB on CPU |
+| NeuroCard | GPU | AWS EC2, NVIDIA V100, 32 vCPUs |
+| DistJoin | GPU | NVIDIA RTX4070Ti 12GB with AMD Ryzen9 7950X3D; the paper reports GPU inference memory |
+| FOJ sampling | CPU | Weighted sample scan; no neural accelerator path |
+| Own approach | GPU plus CPU supplement | Actual cluster GPU/CPU are recorded for each profile |
+
+Primary sources are the MSCN, NeuroCard, DeepDB, and DistJoin papers and their
+official repositories. This policy aligns the execution class, not the
+absolute hardware: a cluster GPU result must not be presented as if measured
+on the paper's exact V100, AWS GPU instance, or RTX4070Ti.
 
 ## Training and build cost
 

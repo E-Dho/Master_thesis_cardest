@@ -14,6 +14,9 @@ from evaluation.job_light_imdb_non_trajectory.joblight_eval.records import (
     LatencyRecord,
     PredictionRecord,
 )
+from evaluation.job_light_imdb_non_trajectory.joblight_eval.runner import (
+    _summarize_inference_profiles,
+)
 
 
 class MetricsTest(unittest.TestCase):
@@ -51,6 +54,17 @@ class MetricsTest(unittest.TestCase):
         summary = summarize_latency(records)
         self.assertEqual(summary["mean_ms"], 100.0)
         self.assertAlmostEqual(summary["throughput_queries_per_second"], 10.0)
+
+    def test_latency_profiles_keep_cpu_and_gpu_separate(self) -> None:
+        records = (
+            LatencyRecord("w", 0, 0, 10.0, device="cpu", device_name="CPU"),
+            LatencyRecord("w", 0, 0, 2.0, device="cuda", device_name="Test GPU"),
+        )
+        profiles = _summarize_inference_profiles(records, configured_device="cuda")
+        self.assertEqual(set(profiles), {"cpu", "cuda"})
+        self.assertEqual(profiles["cpu"]["mean_ms"], 10.0)
+        self.assertEqual(profiles["cuda"]["mean_ms"], 2.0)
+        self.assertEqual(profiles["cuda"]["device_names"], ["Test GPU"])
 
 
 if __name__ == "__main__":

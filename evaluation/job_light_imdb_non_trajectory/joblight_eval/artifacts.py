@@ -79,6 +79,8 @@ def read_latencies(path: Path) -> tuple[LatencyRecord, ...]:
             repetition=int(row["repetition"]),
             latency_ms=float(row["latency_ms"]),
             scope=row.get("scope", "end_to_end"),
+            device=row.get("device", "unspecified"),
+            device_name=row.get("device_name", ""),
         )
         for row in _read_rows(path)
     )

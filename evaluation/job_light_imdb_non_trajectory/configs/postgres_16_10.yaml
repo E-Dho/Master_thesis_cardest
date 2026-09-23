@@ -19,6 +19,8 @@ workloads:
     expected_query_count: 1000
 timing:
   device: cpu
+  comparison_basis: native_cpu_inference
+  published_reference_hardware: CPU (PostgreSQL planner; no GPU inference path)
   warmup_passes: 1
   repetitions: 10
   sequential_single_query: true

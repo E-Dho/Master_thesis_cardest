@@ -19,6 +19,8 @@ workloads:
     expected_query_count: 1000
 timing:
   device: cpu
+  comparison_basis: published_cpu_inference
+  published_reference_hardware: CPU (NeuroCard comparison executes DeepDB on CPU)
   warmup_passes: 1
   repetitions: 10
   sequential_single_query: true
