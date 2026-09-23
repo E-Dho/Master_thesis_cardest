@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "distjoin_bridge.py"
@@ -15,6 +17,36 @@ SPEC.loader.exec_module(BRIDGE)
 
 
 class DistJoinBridgeTests(unittest.TestCase):
+    def test_evaluator_receives_explicit_experiment_mark(self):
+        completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(BRIDGE.subprocess, "run", return_value=completed) as run:
+            BRIDGE._run_distjoin_evaluator(
+                source=Path("/source"),
+                overlay=Path("/overlay"),
+                python=Path("/python"),
+                queries=Path("/queries"),
+                base_cardinalities=Path("/basecards"),
+                predictions=Path("/predictions"),
+                latencies=Path("/latencies"),
+                warmup_passes=1,
+                repetitions=2,
+                experiment_mark="smoke",
+            )
+        command = run.call_args.args[0]
+        mark_index = command.index("--experiment-mark")
+        self.assertEqual(command[mark_index + 1], "smoke")
+        self.assertEqual(run.call_args.kwargs["env"]["CUDA_VISIBLE_DEVICES"], "")
+
+    def test_absolute_smoke_warmup_is_one_step(self):
+        self.assertEqual(
+            BRIDGE._effective_warmup_steps(1, batches_per_epoch=1, epochs=1),
+            1,
+        )
+
+    def test_fractional_tiny_smoke_warmup_rejects_zero_steps(self):
+        with self.assertRaisesRegex(ValueError, "resolves to zero"):
+            BRIDGE._effective_warmup_steps(0.1, batches_per_epoch=1, epochs=1)
+
     def test_parameter_count_excludes_autoregressive_mask_buffers(self):
         state = {
             "net.0.weight": types.SimpleNamespace(numel=lambda: 12),
@@ -32,6 +64,12 @@ class DistJoinBridgeTests(unittest.TestCase):
             self.assertEqual(set(observed), set(BRIDGE.JOB_LIGHT_TABLES))
             self.assertIn("production_year", observed["title"]["header"])
             self.assertIn("keyword_id", observed["movie_keyword"]["header"])
+            with (root / "title.csv").open(newline="", encoding="utf-8") as handle:
+                title_rows = list(csv.DictReader(handle))
+            for column in ("imdb_index", "series_years"):
+                values = {row[column] for row in title_rows}
+                self.assertNotIn("", values)
+                self.assertGreater(len(values), 1)
 
     def test_smoke_workload_covers_two_native_join_queries(self):
         with tempfile.TemporaryDirectory() as temporary:

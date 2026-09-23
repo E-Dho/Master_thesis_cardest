@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 TABLES = (
     "title", "movie_info_idx", "movie_info", "cast_info",
     "movie_keyword", "movie_companies",
@@ -279,7 +284,6 @@ def evaluate_workload(
         raise ValueError("warmup passes must be nonnegative and repetitions positive")
     from evaluation.job_light_imdb_non_trajectory.joblight_eval.workloads import (
         load_workload,
-        query_to_sql,
     )
 
     runtime = load_upstream(source)
@@ -293,9 +297,22 @@ def evaluate_workload(
         records = records[:query_limit]
     parsed: list[tuple[int, Any]] = []
     failures: dict[int, str] = {}
+    unsupported: dict[int, str] = {}
     for record in records:
         try:
-            parsed.append((record.query_id, runtime["parse_query"](query_to_sql(record), schema)))
+            unsupported_columns = deepdb_unsupported_filter_columns(record, schema)
+            if unsupported_columns:
+                unsupported[record.query_id] = (
+                    "columns excluded by the native DeepDB JOB-light schema: "
+                    + ", ".join(unsupported_columns)
+                )
+                continue
+            parsed.append(
+                (
+                    record.query_id,
+                    runtime["parse_query"](deepdb_compatible_query_to_sql(record), schema),
+                )
+            )
         except Exception as exc:
             failures[record.query_id] = f"{type(exc).__name__}: {exc}"
 
@@ -349,8 +366,16 @@ def evaluate_workload(
         {
             "query_id": record.query_id,
             "estimated_cardinality": estimates.get(record.query_id, ""),
-            "status": "failed" if record.query_id in failures else "ok",
-            "diagnostic": failures.get(record.query_id, ""),
+            "status": (
+                "unsupported"
+                if record.query_id in unsupported
+                else "failed"
+                if record.query_id in failures
+                else "ok"
+            ),
+            "diagnostic": unsupported.get(
+                record.query_id, failures.get(record.query_id, "")
+            ),
         }
         for record in records
     ]
@@ -364,9 +389,87 @@ def evaluate_workload(
     )
     print(json.dumps({
         "query_count": len(records),
-        "success_count": len(records) - len(failures),
+        "success_count": len(records) - len(failures) - len(unsupported),
+        "unsupported_count": len(unsupported),
         "failure_count": len(failures),
     }, indent=2, sort_keys=True))
+
+
+def deepdb_compatible_query_to_sql(query: Any) -> str:
+    """Render JOB-light joins using DeepDB's title-centered relationship schema.
+
+    JOB-light-ranges sometimes encodes its connected movie-id join tree with
+    child-to-child edges.  DeepDB registers only child.movie_id = title.id
+    relationships.  For a valid connected JOB-light equijoin, both forms are
+    relationally equivalent, so canonicalize the tree before native parsing.
+    """
+    from dataclasses import replace
+
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.records import (
+        JoinPredicate,
+    )
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.workloads import (
+        query_to_sql,
+    )
+
+    aliases = {table.alias: table.name for table in query.tables}
+    title_aliases = [alias for alias, name in aliases.items() if name == "title"]
+    if len(title_aliases) != 1:
+        return query_to_sql(query)
+    title_alias = title_aliases[0]
+
+    adjacency = {alias: set() for alias in aliases}
+    for join in query.joins:
+        if join.operator != "=":
+            raise ValueError("DeepDB JOB-light canonicalization requires equality joins")
+        try:
+            left_alias, left_column = join.left.split(".", 1)
+            right_alias, right_column = join.right.split(".", 1)
+        except ValueError as exc:
+            raise ValueError(f"invalid qualified JOB-light join: {join}") from exc
+        for alias, column in ((left_alias, left_column), (right_alias, right_column)):
+            expected = "id" if alias == title_alias else "movie_id"
+            if alias not in aliases or column != expected:
+                raise ValueError(f"unsupported JOB-light relationship endpoint: {alias}.{column}")
+        adjacency[left_alias].add(right_alias)
+        adjacency[right_alias].add(left_alias)
+
+    reachable = {title_alias}
+    frontier = [title_alias]
+    while frontier:
+        new_aliases = adjacency[frontier.pop()] - reachable
+        reachable.update(new_aliases)
+        frontier.extend(new_aliases)
+    if reachable != set(aliases):
+        raise ValueError("JOB-light join graph must connect every table to title")
+
+    canonical_joins = tuple(
+        JoinPredicate(f"{alias}.movie_id", "=", f"{title_alias}.id")
+        for alias, table_name in aliases.items()
+        if table_name != "title"
+    )
+    return query_to_sql(replace(query, joins=canonical_joins))
+
+
+def deepdb_unsupported_filter_columns(query: Any, schema: Any) -> tuple[str, ...]:
+    """Return filters that the selected native DeepDB schema cannot model."""
+    aliases = {table.alias: table.name for table in query.tables}
+    unsupported = set()
+    for predicate in query.filters:
+        try:
+            alias, attribute = predicate.column.split(".", 1)
+        except ValueError:
+            unsupported.add(predicate.column)
+            continue
+        table_name = aliases.get(alias)
+        table = None if table_name is None else schema.table_dictionary.get(table_name)
+        if (
+            table is None
+            or attribute not in table.attributes
+            or attribute in table.irrelevant_attributes
+        ):
+            unsupported.add(predicate.column)
+    return tuple(sorted(unsupported))
 
 
 def load_upstream(source: Path) -> dict[str, Any]:

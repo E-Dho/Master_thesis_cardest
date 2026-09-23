@@ -97,9 +97,14 @@ def _smoke(args: argparse.Namespace) -> None:
             "bs": 16,
             "sample_bs": 16,
             "max_steps": 1,
-            "warmups": 0.1,
+            "warmups": 1,
             "patient": 2,
         }
+    )
+    effective_warmup_steps = _effective_warmup_steps(
+        config["train"]["warmups"],
+        batches_per_epoch=config["train"]["max_steps"],
+        epochs=config["train"]["epochs"],
     )
     config["test"]["glob"] = f"{{}}-seed{args.seed}-0.pt"
     config["test"]["glob_epoch"] = f"{{}}-seed{args.seed}-{{}}.pt"
@@ -107,6 +112,12 @@ def _smoke(args: argparse.Namespace) -> None:
     started = time.perf_counter()
     completed = _run_upstream_train(source, overlay, Path(args.python), "smoke")
     wall_seconds = time.perf_counter() - started
+    (output / "upstream_train.stdout.log").write_text(
+        completed.stdout, encoding="utf-8"
+    )
+    (output / "upstream_train.stderr.log").write_text(
+        completed.stderr, encoding="utf-8"
+    )
     checkpoints = sorted((overlay / "Configs" / "IMDB" / "model" / "smoke").glob("*.pt"))
     checkpoint_tables = {
         path.name.split(f"-seed{args.seed}-", 1)[0]
@@ -134,6 +145,7 @@ def _smoke(args: argparse.Namespace) -> None:
         latencies=latencies,
         warmup_passes=1,
         repetitions=2,
+        experiment_mark="smoke",
     )
     with predictions.open(newline="", encoding="utf-8") as handle:
         prediction_rows = list(csv.DictReader(handle))
@@ -155,6 +167,7 @@ def _smoke(args: argparse.Namespace) -> None:
         "evaluator_integration": "ok",
         "evaluation_query_count": len(prediction_rows),
         "evaluation_timing_rows": len(latency_rows),
+        "effective_warmup_steps": effective_warmup_steps,
         "stdout_tail": completed.stdout[-4000:],
     }
     _write_json(output / "smoke_metrics.json", payload)
@@ -220,6 +233,26 @@ def _parameter_count_from_state_dict(state: dict[str, Any]) -> int:
         for name, value in state.items()
         if not name.endswith(".mask")
     )
+
+
+def _effective_warmup_steps(
+    warmups: float | int,
+    *,
+    batches_per_epoch: int,
+    epochs: int,
+) -> int:
+    """Mirror DistJoin's warmup conversion and reject a zero denominator."""
+    steps = (
+        int(float(warmups) * batches_per_epoch * epochs)
+        if float(warmups) < 1
+        else int(warmups)
+    )
+    if steps < 1:
+        raise ValueError(
+            "DistJoin warmup resolves to zero steps; use at least one absolute "
+            "warmup step for a short smoke run"
+        )
+    return steps
 
 
 def _evaluator_smoke(args: argparse.Namespace) -> None:
@@ -291,11 +324,13 @@ def _run_distjoin_evaluator(
     *, source: Path, overlay: Path, python: Path, queries: Path,
     base_cardinalities: Path, predictions: Path, latencies: Path,
     warmup_passes: int, repetitions: int,
+    experiment_mark: str = "production",
     initialize_missing_checkpoints: bool = False,
 ):
     command = [
         str(python), str(Path(__file__).resolve().parent / "distjoin_eval_runner.py"),
         "--source-root", str(source), "--overlay-root", str(overlay),
+        "--experiment-mark", experiment_mark,
         "--queries", str(queries),
         "--base-cardinalities", str(base_cardinalities),
         "--predictions", str(predictions),
@@ -309,6 +344,7 @@ def _run_distjoin_evaluator(
     environment["PYTHONPATH"] = os.pathsep.join(
         [str(_compat_directory()), str(source), str(source / "MySampler"), environment.get("PYTHONPATH", "")]
     )
+    environment["CUDA_VISIBLE_DEVICES"] = ""
     environment.setdefault("MPLBACKEND", "Agg")
     completed = subprocess.run(
         command, cwd=overlay, env=environment, text=True,
@@ -457,10 +493,12 @@ def _write_fixture(directory: Path) -> None:
             writer.writerow(header)
             for index in range(1, 129):
                 values = {
-                    "id": index, "title": f"title-{index}", "imdb_index": "",
+                    "id": index, "title": f"title-{index}",
+                    "imdb_index": f"I{index % 5}",
                     "kind_id": index % 7 + 1, "production_year": 1950 + index % 75,
                     "imdb_id": index, "phonetic_code": f"P{index % 17}", "episode_of_id": "",
-                    "season_nr": index % 10, "episode_nr": index % 50, "series_years": "",
+                    "season_nr": index % 10, "episode_nr": index % 50,
+                    "series_years": f"{1950 + index % 20}-{1955 + index % 20}",
                     "md5sum": f"hash-{index}", "person_id": index, "movie_id": index,
                     "person_role_id": index, "note": "", "nr_order": index % 20,
                     "role_id": index % 11 + 1, "info_type_id": index % 71 + 1,
