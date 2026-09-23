@@ -261,6 +261,8 @@ def summarize_run(
         "method_id": config.method_id,
         "variant_id": config.variant_id,
         "display_name": config.display_name,
+        "protocol": config.protocol,
+        "adaptation": config.adaptation,
         "seed": seed,
         "config_hash": config.config_hash,
         "evaluation_detail": evaluation_detail or {},

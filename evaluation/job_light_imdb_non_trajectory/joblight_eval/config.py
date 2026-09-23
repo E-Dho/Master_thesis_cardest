@@ -11,6 +11,9 @@ from model.src.config import load_simple_yaml
 
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
+# "native": the method's published configuration.  "adapted": an explicitly
+# project-modified variant (e.g. extended schema); reports label it as such.
+PROTOCOLS = ("native", "adapted")
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,8 @@ class ExperimentConfig:
     artifacts: dict[str, Any]
     raw: dict[str, Any]
     config_hash: str
+    protocol: str = "native"
+    adaptation: str = ""
 
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
@@ -58,6 +63,12 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     method_id = _slug(identity.get("method_id"), "method_id")
     variant_id = _slug(identity.get("variant_id"), "variant_id")
     display_name = str(identity.get("display_name") or variant_id)
+    protocol = str(identity.get("protocol") or "native")
+    if protocol not in PROTOCOLS:
+        raise ValueError(f"experiment.protocol must be one of {PROTOCOLS}; received {protocol!r}")
+    adaptation = str(identity.get("adaptation") or "")
+    if protocol == "adapted" and not adaptation:
+        raise ValueError("adapted experiments must describe the adaptation in experiment.adaptation")
     seeds_value = identity.get("seeds", [0])
     if not isinstance(seeds_value, list) or not seeds_value:
         raise ValueError("experiment.seeds must be a non-empty list")
@@ -132,6 +143,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         artifacts=artifacts,
         raw=raw,
         config_hash=config_hash,
+        protocol=protocol,
+        adaptation=adaptation,
     )
 
 

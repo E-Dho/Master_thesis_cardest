@@ -67,6 +67,8 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
         "method_id": method_id,
         "variant_id": variant_id,
         "display_name": summaries[0]["display_name"],
+        "protocol": summaries[0].get("protocol", "native"),
+        "adaptation": summaries[0].get("adaptation", ""),
         "config_hash": config_hash,
         "seeds": sorted(seeds),
         "seed_count": len(seeds),
@@ -122,6 +124,7 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
             "method_id": method_id,
             "variant_id": variant_id,
             "display_name": summaries[0]["display_name"],
+            "protocol": aggregate["protocol"],
             "workload": workload_id,
             "seed_count": len(seeds),
             "coverage_complete_all_seeds": workload_result["coverage_complete_all_seeds"],
@@ -155,6 +158,7 @@ def compare_aggregates(
                 "method_id": aggregate["method_id"],
                 "variant_id": aggregate["variant_id"],
                 "display_name": aggregate["display_name"],
+                "protocol": aggregate.get("protocol", "native"),
                 "workload": workload_id,
                 "seed_count": aggregate["seed_count"],
                 "coverage_complete_all_seeds": workload["coverage_complete_all_seeds"],
@@ -229,8 +233,11 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
     lines = [
         f"# {aggregate['display_name']}",
         "",
-        "Values are mean +/- sample standard deviation across seed-level summaries.",
+        f"Protocol: **{aggregate.get('protocol', 'native')}**",
     ]
+    if aggregate.get("adaptation"):
+        lines.extend(["", f"Adaptation: {aggregate['adaptation']}"])
+    lines.extend(["", "Values are mean +/- sample standard deviation across seed-level summaries."])
     for workload_id, workload in aggregate["workloads"].items():
         metrics = workload["metrics"]
         coverage = "complete" if workload["coverage_complete_all_seeds"] else "incomplete"
@@ -287,8 +294,11 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
         "",
         "## Q-error",
         "",
-        "| Method | Variant | Workload | Coverage | Family | p50 | p90 | p95 | p99 | max |",
-        "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        "Rows with protocol `adapted` are project-modified variants, not the "
+        "method's published configuration.",
+        "",
+        "| Method | Variant | Display name | Protocol | Workload | Coverage | Family | p50 | p90 | p95 | p99 | max |",
+        "| --- | --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         def metric(name: str) -> str:
@@ -299,6 +309,8 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
         identity = [
             str(row["method_id"]),
             str(row["variant_id"]),
+            str(row["display_name"]),
+            str(row.get("protocol", "native")),
             str(row["workload"]),
             "complete" if row["coverage_complete_all_seeds"] else "incomplete",
         ]
@@ -310,9 +322,9 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
             "",
             "## Inference",
             "",
-            "| Method | Variant | Workload | Coverage | Mean (ms) | p50 (ms) | "
+            "| Method | Variant | Display name | Protocol | Workload | Coverage | Mean (ms) | p50 (ms) | "
             "p95 (ms) | p99 (ms) | Throughput (queries/s) |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in rows:
@@ -327,6 +339,8 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
                 [
                     str(row["method_id"]),
                     str(row["variant_id"]),
+                    str(row["display_name"]),
+                    str(row.get("protocol", "native")),
                     str(row["workload"]),
                     "complete" if row["coverage_complete_all_seeds"] else "incomplete",
                     metric("inference.mean_ms"),

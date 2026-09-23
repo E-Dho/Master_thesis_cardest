@@ -58,3 +58,10 @@ this native recipe.
 `postgres_16_10_smoke.yaml` and `foj_sampling_smoke.yaml` are disposable,
 row/sample-limited end-to-end fixtures for cluster validation. They are not
 headline baseline configurations.
+
+`deepdb_job_light_ranges_adapted.yaml` is an explicitly adapted DeepDB
+variant (`protocol: adapted`) with its own schema, preprocessing root, and
+ensemble; see "Adapted DeepDB JOB-light-ranges schema" in `../README.md`.
+Every config may set `experiment.protocol` to `native` (default) or
+`adapted`; adapted configs must also describe the change in
+`experiment.adaptation`, and reports carry both fields.

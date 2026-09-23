@@ -16,6 +16,7 @@ all evaluated methods and the execution contract used by their adapters.
 | MSCN | Subprocess `mscn` adapter | Published SetConv JOB-light recipe: 100k training queries, 100 epochs, 1,000 sample bits, batch 1,024, hidden size 256 |
 | MSCN ranges | Subprocess `mscn` adapter | Separate deterministic and test-disjoint 100k range workload, complete-domain ranks for strings, and `=/< />/<=/>=` operators |
 | DeepDB | Subprocess `deepdb` adapter | Native `imdb-light` RDC ensemble, samples `10M/10M/1M/1M/1M`, budget factor 5, at most three tables |
+| DeepDB JOB-light-ranges adapted | Subprocess `deepdb` adapter, `protocol: adapted` | Project-owned extension of `imdb-light` modeling the six columns JOB-light-ranges filters on; string columns as PostgreSQL-collation ranks; separate preprocessing and a newly trained ensemble with the published budgets |
 | NeuroCard | Subprocess `neurocard` adapter | Native JOB-light and JOB-light-ranges ResMADE configurations, native factorized sampling, 8,000 progressive samples |
 | DistJoin | Subprocess `distjoin` adapter | Published IMDB configuration and upstream dynamic sampler/ANPM implementation |
 | FOJ sampling | Native `foj_sampling` adapter | Independent seeded Exact Weight full-outer-join subsets at 1k, 10k, 100k, 1M, and 7,168,000 rows |
@@ -115,6 +116,110 @@ upstream `SetConv`, encoders, bitmap format, and Q-error loss, and adds reusable
 checkpoints plus the common timing and resource contract. Its Python 3.7
 universal-newline file mode is adapted for current Python without changing the
 parsed data.
+
+## Adapted DeepDB JOB-light-ranges schema
+
+The native DeepDB `imdb-light` schema evaluates 70/70 JOB-light queries but
+only 197/1000 JOB-light-ranges queries: the other 803 filter on columns that
+upstream `gen_job_light_imdb_schema()` deliberately marks irrelevant
+(`title.phonetic_code` 710 predicate occurrences, `cast_info.nr_order` 123,
+`title.season_nr` 79, `title.episode_nr` 74, `title.series_years` 24,
+`title.imdb_index` 15). The native result stays unchanged and is reported
+separately (`configs/deepdb_job_light.yaml`, variant
+`imdb_light_rdc_published`, which reports the 803 queries as unsupported).
+
+`configs/deepdb_job_light_ranges_adapted.yaml` defines the explicitly
+non-native variant `deepdb / imdb_light_ranges_adapted`, displayed as
+"DeepDB JOB-light-ranges adapted" and carrying `protocol: adapted` plus an
+`adaptation` description through run manifests, summaries, aggregates, and the
+cross-method comparison (which gains *Display name* and *Protocol* columns;
+configs without `protocol` are `native`). It is a genuine adapted baseline,
+not an evaluator patch: the added columns change DeepDB's preprocessing, RDC
+statistics, ensemble selection, and learned SPNs.
+
+- **Schema** (`joblight_eval/deepdb_ranges.py`): a project-owned copy of the
+  upstream generator with the same six tables, attribute order, and five
+  `child.movie_id = title.id` relationships; only the six columns above leave
+  `irrelevant_attributes`. They are also listed in `no_compression`: DeepDB
+  replaces NULL by a sentinel and subtracts its mass inside ranges, but
+  histogram compression of leaves with more than 10,000 distinct values
+  (`phonetic_code` has 23,259, `episode_nr` 14,906) would erase the sentinel
+  and count NULL rows inside ranges.
+- **Ordered string encoding**: SPN leaves only support `<, <=, >, >=` on
+  numeric columns, so `title.phonetic_code`, `title.imdb_index`, and
+  `title.series_years` become dense integer ranks `0..n-1` of their complete
+  non-NULL domain, ordered by PostgreSQL itself with
+  `ORDER BY column COLLATE "C"`. `C` (byte order) is the collation under
+  which the published JOB-light-ranges labels are reproduced; a linguistic
+  default such as `en_US.UTF-8` orders `series_years` values like
+  `1995-????` differently and fails to reproduce many
+  `series_years`-range labels (see validation below). The collation is a
+  `prepare-shared --collation` option (`column` uses the column's own
+  collation) and is recorded together with the database locale and server
+  version. Python never emulates a collation: PostgreSQL computes each
+  workload literal's `bisect_left` (`#values < literal`) and `bisect_right`
+  (`#values <= literal`).
+- **Literal rewriting**: `= v` becomes the exact rank; `>= v` becomes
+  `rank >= bisect_left`, `> v` becomes `rank >= bisect_right`, `<= v`
+  becomes `rank < bisect_right`, `< v` becomes `rank < bisect_left`. A missing
+  equality literal, a range outside the domain, or contradictory bounds is an
+  explicit empty predicate result (estimate 0, diagnostic
+  `empty_predicate:...`). NULL has no rank and stays NULL (NaN) in the CSV,
+  so it never satisfies a rewritten predicate, exactly as in SQL. Textual
+  literals are recovered from the workload line so numeric-looking strings
+  such as `imdb_index = '1'` are not converted to numbers. Latency rows use
+  scope `rank_literal_rewrite_and_native_deepdb_inference`: the per-query
+  rewrite is timed together with DeepDB inference; SQL parsing stays outside
+  the timed region as in the native bridge.
+- **Adapted dataset** (`deepdb_ranges_adapted_shared`, separate from the
+  native `deepdb_shared`): `rank_domains.json`; headerless CSVs where the
+  five child tables are byte copies and `title` is exported from PostgreSQL
+  in source row order with ranked string columns, written in a dialect that
+  DeepDB's reader parses exactly (all strings quoted, backslashes escaped).
+  This matters: DeepDB's backslash `escapechar` also applies outside quotes,
+  so on the IMDB snapshot the native reader shifts every field of title id
+  2522636 (unquoted `\Frag'ile\`) and alters the title text of seven more
+  rows; the adapted export records these differences
+  (`native_reader_title_mismatches`) and verifies that DeepDB's reader
+  recovers every PostgreSQL value of the ranked title file. Stage records and
+  `shared_preprocessing_manifest.json` hold SHA-256 checksums and sizes of
+  every CSV, HDF, and domain file, per-stage conversion and HDF times, the
+  columns DeepDB kept, and `native_shared_preprocessing_reused: false`.
+- **Ensemble**: HDF, sampled HDF, RDC statistics, and SPN ensemble are all
+  rebuilt with the published sample sizes `10M/10M/1M/1M/1M`, budget factor
+  5, and at most three tables; the native ensemble cannot be reused because
+  its modeled columns and distributions differ.
+
+Execution order on the cluster (all launchers live in `slurm/` and source
+`_deepdb_ranges_adapted_common.sh`):
+
+1. `deepdb_ranges_adapted_prepare.sbatch`: rank domains and ranked CSVs, then
+   `validate` before the HDF stage, then HDF/sampled HDF, then `validate`
+   again. Validation requires 1000/1000 JOB-light-ranges and 70/70 JOB-light
+   queries to rewrite and parse with DeepDB's parser against modeled
+   columns; compares every distinct ranked-string predicate and every
+   query's full title-filter conjunction between PostgreSQL (original
+   literals) and the adapted CSV as DeepDB reads it (rank predicates); does
+   the same for `cast_info.nr_order` predicates; reports how many workload
+   literals would move under code-point order; and re-counts every workload
+   query with a string range (`LABEL_CHECK_LIMIT=-1`, the default) against
+   the published labels, under the rank collation (all must match) and, as
+   evidence, under the database default collation. Reports are written
+   to `validation/{pre,post}_hdf_validation.json`; the job fails if any
+   check fails.
+2. `adapter_smoke.sbatch` with `CONFIG=.../deepdb_job_light_ranges_adapted.yaml`
+   runs the two-query smoke: a synthetic fixture trained with native DeepDB
+   code, one query with a ranked `phonetic_code` range and one with
+   `cast_info.nr_order` and `title.season_nr`, plus rewrite-and-parse of the
+   first real workload query on `phonetic_code` and on another added column.
+3. `deepdb_ranges_adapted_validate_ensemble.sbatch`: bounded real-ensemble
+   validation (real adapted HDF, samples `100k/100k/10k/10k/10k`, all 1,000
+   queries); `bounded_validation.json` must report `passed: true`. It is a
+   gate, not a reported result.
+4. `deepdb_ranges_adapted_seeds.sbatch` (array `0-2%1`): prepare, smoke,
+   build, evaluate, and summarize seeds 0, 1, 2 after checking both
+   validation gates; then `cli aggregate --config
+   configs/deepdb_job_light_ranges_adapted.yaml`.
 
 Legacy dependency stacks are isolated under `environments/`. DeepDB uses the
 recorded Python 3.8/SPFlow environment, while DistJoin layers only its missing

@@ -91,6 +91,8 @@ def run_manifest(config: ExperimentConfig, seed: int, run_directory: Path) -> di
         "method_id": config.method_id,
         "variant_id": config.variant_id,
         "display_name": config.display_name,
+        "protocol": config.protocol,
+        "adaptation": config.adaptation,
         "seed": seed,
         "config_hash": config.config_hash,
         "config_path": str(config.source_path),
