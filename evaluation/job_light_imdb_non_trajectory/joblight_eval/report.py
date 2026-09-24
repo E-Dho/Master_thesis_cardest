@@ -8,6 +8,8 @@ from typing import Any, Iterable
 import numpy as np
 
 from .artifacts import write_json
+from .timing import load_timing_summaries
+from .timing_guard import PROFILES
 
 
 HEADLINE_METRICS = (
@@ -40,6 +42,12 @@ Q_ERROR_REPORT_FAMILIES = (
     ("Smoothed, all scored queries", "smoothed_q_error"),
 )
 Q_ERROR_PERCENTILES = ("p50", "p90", "p95", "p99", "max")
+LATENCY_METRICS = ("mean_ms", "p50_ms", "p95_ms", "p99_ms", "throughput_queries_per_second")
+MODEL_CORE_METRICS = ("mean_ms", "p50_ms", "p95_ms", "p99_ms")
+EVALUATE_STAGE_TIMING_NOTE = (
+    "Evaluate-stage timing is not profile-controlled (thread limits, pinning, and "
+    "hardware class are not enforced); report the standardized profile tables instead."
+)
 
 
 def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> dict[str, Any]:
@@ -58,6 +66,11 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
         raise ValueError("duplicate seed in aggregate input")
 
     experiment_id, method_id, variant_id, config_hash = identities.pop()
+    timings = [load_timing_summaries(path) for path in directories]
+    all_profiles = sorted({profile for timing in timings for profile in timing})
+    complete_profiles = [
+        profile for profile in all_profiles if all(profile in timing for timing in timings)
+    ]
     workload_ids = set(summaries[0]["workloads"])
     if any(set(item["workloads"]) != workload_ids for item in summaries):
         raise ValueError("seed summaries have different workload coverage")
@@ -73,6 +86,16 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
         "seeds": sorted(seeds),
         "seed_count": len(seeds),
         "runs": [str(path) for path in directories],
+        "standardized_timing_profiles": complete_profiles,
+        "incomplete_timing_profiles": {
+            profile: sorted(
+                int(summary["seed"])
+                for summary, timing in zip(summaries, timings)
+                if profile in timing
+            )
+            for profile in all_profiles
+            if profile not in complete_profiles
+        },
         "workloads": {},
     }
     rows: list[dict[str, Any]] = []
@@ -152,6 +175,12 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
                     )
                 },
             }
+        workload_result["standardized_timing"] = {
+            profile: _aggregate_profile(
+                [timing[profile] for timing in timings], workload_id, profile
+            )
+            for profile in complete_profiles
+        }
         aggregate["workloads"][workload_id] = workload_result
         row: dict[str, Any] = {
             "experiment_id": experiment_id,
@@ -176,6 +205,7 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
         for name, value in workload_result["metrics"].items():
             row[f"{name}.mean"] = value["mean"]
             row[f"{name}.std"] = value["std"]
+        row.update(_timing_columns(workload_result["standardized_timing"]))
         rows.append(row)
 
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -227,6 +257,8 @@ def compare_aggregates(
             row["inference_profiles_json"] = json.dumps(
                 row["inference_profiles"], sort_keys=True
             )
+            row["standardized_timing"] = workload.get("standardized_timing", {})
+            row.update(_timing_columns(row["standardized_timing"]))
             rows.append(row)
     comparison = {
         "schema_version": 1,
@@ -290,12 +322,107 @@ def _inference_profiles(summary: dict[str, Any], workload_id: str) -> dict[str, 
     return {device: {**workload["inference"], "device_names": [], "scopes": []}}
 
 
+def _aggregate_profile(
+    summaries: list[dict[str, Any]], workload_id: str, profile: str
+) -> dict[str, Any]:
+    workloads = [summary["workloads"].get(workload_id) for summary in summaries]
+    if any(workload is None for workload in workloads):
+        return {"available": False}
+    guards = [workload.get("guard") or {} for workload in workloads]
+    cpu_models = sorted({guard.get("cpu_model") or "unknown" for guard in guards})
+    gpu_names = sorted({name for guard in guards for name in guard.get("gpu_names", [])})
+    nodes = sorted({guard.get("node") or "unknown" for guard in guards})
+    result: dict[str, Any] = {
+        "available": True,
+        "report_table": PROFILES[profile].report_table,
+        "seed_count": len(summaries),
+        "metrics": {
+            name: _mean_std([workload["inference"].get(name) for workload in workloads])
+            for name in LATENCY_METRICS
+        },
+        "model_core_metrics": (
+            {
+                name: _mean_std([workload["model_core"].get(name) for workload in workloads])
+                for name in MODEL_CORE_METRICS
+            }
+            if all(workload.get("model_core") for workload in workloads)
+            else None
+        ),
+        "scopes": sorted({scope for workload in workloads for scope in workload.get("scopes", [])}),
+        "cpu_models": cpu_models,
+        "gpu_names": gpu_names,
+        "nodes": nodes,
+        "hardware_consistent": len(cpu_models) == 1 and len(gpu_names) <= 1,
+        "guard_warning_count": sum(len(guard.get("warnings", [])) for guard in guards),
+        "estimate_consistency": [
+            {
+                "seed": summary["seed"],
+                "mode": summary["estimate_consistency"]["mode"],
+                "passed": summary["estimate_consistency"]["passed"],
+                "max_relative_difference": summary["estimate_consistency"]["max_relative_difference"],
+            }
+            for summary in summaries
+        ],
+        "config_drift": sorted({path for summary in summaries for path in summary.get("config_drift", [])}),
+        "timing_directories": [summary.get("timing_directory") for summary in summaries],
+    }
+    return result
+
+
+def _timing_columns(standardized: dict[str, Any]) -> dict[str, Any]:
+    columns: dict[str, Any] = {}
+    for profile, result in sorted(standardized.items()):
+        if not result.get("available"):
+            continue
+        for name, metric in result["metrics"].items():
+            columns[f"timing.{profile}.{name}.mean"] = metric["mean"]
+            columns[f"timing.{profile}.{name}.std"] = metric["std"]
+        if result.get("model_core_metrics"):
+            for name, metric in result["model_core_metrics"].items():
+                columns[f"timing.{profile}.model_core.{name}.mean"] = metric["mean"]
+                columns[f"timing.{profile}.model_core.{name}.std"] = metric["std"]
+        columns[f"timing.{profile}.cpu_models"] = "; ".join(result["cpu_models"])
+        columns[f"timing.{profile}.gpu_names"] = "; ".join(result["gpu_names"])
+        columns[f"timing.{profile}.hardware_consistent"] = result["hardware_consistent"]
+    return columns
+
+
+def _profile_table_lines(entries: list[tuple[list[str], dict[str, Any]]], identity_header: list[str]) -> list[str]:
+    header = identity_header + [
+        "Hardware", "Mean (ms)", "p50 (ms)", "p95 (ms)", "p99 (ms)",
+        "Throughput (queries/s)", "Model-core mean (ms)", "Estimates vs accuracy run",
+    ]
+    lines = ["| " + " | ".join(header) + " |",
+             "| " + " | ".join(["---"] * len(identity_header) + ["---"] + ["---:"] * 6 + ["---"]) + " |"]
+    for identity, result in entries:
+        hardware = "; ".join(result["cpu_models"] + result["gpu_names"])
+        if not result["hardware_consistent"]:
+            hardware += " (MIXED)"
+        core = result.get("model_core_metrics")
+        checks = result["estimate_consistency"]
+        consistency = (
+            f"{checks[0]['mode']}, max rel. diff "
+            f"{max(item['max_relative_difference'] for item in checks):.2g}"
+            if checks else "n/a"
+        )
+        lines.append("| " + " | ".join(
+            identity
+            + [hardware]
+            + [_format_mean_std(result["metrics"][name]) for name in LATENCY_METRICS]
+            + [_format_mean_std(core["mean_ms"]) if core else "n/a", consistency]
+        ) + " |")
+    return lines
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
         return
+    fieldnames: list[str] = []
+    for row in rows:
+        fieldnames.extend(key for key in row if key not in fieldnames)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, restval="")
         writer.writeheader()
         writer.writerows(
             {
@@ -342,6 +469,10 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
+                "### Evaluate-stage timing (not profile-controlled)",
+                "",
+                EVALUATE_STAGE_TIMING_NOTE,
+                "",
                 f"Primary timing device: **{primary}**",
                 "",
                 f"Published reference hardware: {protocol.get('published_reference_hardware', 'not specified')}",
@@ -372,6 +503,15 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
                 )
                 + " |"
             )
+        for profile, result in workload.get("standardized_timing", {}).items():
+            if not result.get("available"):
+                continue
+            lines.extend(["", f"### Standardized latency: {result['report_table']} (`{profile}`)", ""])
+            lines.extend(_profile_table_lines([([profile], result)], ["Profile"]))
+    missing = aggregate.get("incomplete_timing_profiles", {})
+    if missing:
+        lines.extend(["", "Incomplete timing profiles (not all seeds timed): "
+                      + ", ".join(f"{profile} (seeds {seeds})" for profile, seeds in missing.items())])
     return "\n".join(lines) + "\n"
 
 
@@ -412,10 +552,31 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
         for label, family in Q_ERROR_REPORT_FAMILIES:
             values = [metric(f"{family}.{name}") for name in Q_ERROR_PERCENTILES]
             lines.append("| " + " | ".join([*identity, label, *values]) + " |")
+    profiles = sorted({profile for row in rows for profile, result in row.get("standardized_timing", {}).items()
+                       if result.get("available")},
+                      key=lambda name: list(PROFILES).index(name))
+    for profile in profiles:
+        entries = []
+        absent = []
+        for row in rows:
+            result = row.get("standardized_timing", {}).get(profile)
+            identity = [str(row["method_id"]), str(row["variant_id"]), str(row["display_name"]),
+                        str(row.get("protocol", "native")), str(row["workload"])]
+            if result and result.get("available"):
+                entries.append((identity, result))
+            else:
+                absent.append(" / ".join(identity[:2] + identity[4:]))
+        lines.extend(["", f"## Standardized latency: {PROFILES[profile].report_table} (`{profile}`)", "",
+                      PROFILES[profile].description + ".", ""])
+        lines.extend(_profile_table_lines(entries, ["Method", "Variant", "Display name", "Protocol", "Workload"]))
+        if absent:
+            lines.extend(["", "Not measured under this profile: " + "; ".join(absent)])
     lines.extend(
         [
             "",
-            "## Inference",
+            "## Evaluate-stage timing (not profile-controlled)",
+            "",
+            EVALUATE_STAGE_TIMING_NOTE,
             "",
             "| Method | Variant | Display name | Protocol | Workload | Coverage | Device | Actual hardware | "
             "Published reference | Mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) | Throughput (queries/s) |",

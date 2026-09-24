@@ -81,6 +81,8 @@ def read_latencies(path: Path) -> tuple[LatencyRecord, ...]:
             scope=row.get("scope", "end_to_end"),
             device=row.get("device", "unspecified"),
             device_name=row.get("device_name", ""),
+            profile=row.get("profile", ""),
+            model_core_ms=_optional_float(row.get("model_core_ms", "")),
         )
         for row in _read_rows(path)
     )
@@ -152,7 +154,7 @@ def _read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _optional_float(value: str) -> float | None:
+def _optional_float(value: str | None) -> float | None:
     return None if value in (None, "") else float(value)
 
 

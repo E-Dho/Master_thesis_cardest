@@ -22,6 +22,17 @@ class StageMetrics:
 
 
 @dataclass(frozen=True)
+class TimingOutcome:
+    """Result of a profile-controlled, timing-only evaluation."""
+
+    predictions: tuple[PredictionRecord, ...]
+    latencies: tuple[LatencyRecord, ...]
+    #: workload id -> timing-guard report written by the measuring process
+    guard_reports: dict[str, Path]
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AdapterEvaluation:
     predictions: tuple[PredictionRecord, ...]
     latencies: tuple[LatencyRecord, ...]
@@ -53,3 +64,15 @@ class Adapter(ABC):
     @abstractmethod
     def artifact_metadata(self) -> dict[str, Any]:
         raise NotImplementedError
+
+    def time(
+        self,
+        profile: str,
+        workloads: tuple[WorkloadConfig, ...],
+        output_directory: Path,
+        environment: dict[str, str],
+    ) -> TimingOutcome:
+        """Re-measure latency under ``profile`` without rebuilding the model."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support profile-controlled timing"
+        )

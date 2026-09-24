@@ -26,6 +26,12 @@ timing:
   sequential_single_query: true
   includes_predicate_encoding: true
   includes_workload_parsing: false
+  primary_profile: cpu_1core
+  profiles: [cpu_1core]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 0.0
+    absolute_tolerance: 0.0
 resources:
   profile: high_memory_cpu
   cpu_threads: 1

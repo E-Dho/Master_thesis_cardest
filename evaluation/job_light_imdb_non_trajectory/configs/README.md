@@ -77,3 +77,12 @@ ensemble; see "Adapted DeepDB JOB-light-ranges schema" in `../README.md`.
 Every config may set `experiment.protocol` to `native` (default) or
 `adapted`; adapted configs must also describe the change in
 `experiment.adaptation`, and reports carry both fields.
+
+Standardized latency is configured per method with
+`timing.primary_profile`, `timing.profiles`, `timing.estimate_consistency`
+(`mode: deterministic|stochastic`, `relative_tolerance`, `absolute_tolerance`)
+and, for subprocess adapters, `adapter.timing_commands.<profile>`. Timing
+commands receive the usual placeholders plus `{timing_directory}`,
+`{timing_environment_json}`, and `{profile}`; they must request the profile's
+device and one CPU thread. `timing_plan.example.txt` shows the plan format
+used by `../slurm/timing_*.sbatch`.

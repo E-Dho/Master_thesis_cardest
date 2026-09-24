@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,10 @@ def main() -> int:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
 
+    timing = _timing()
+    session = timing.session_from_environment("own_model_eval_runner", device=args.device)
+    if session is not None:
+        session.configure(torch=torch)
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA inference requested but CUDA is unavailable")
     device = torch.device(args.device)
@@ -47,6 +52,12 @@ def main() -> int:
         if line.strip()
     ]
 
+    if session is not None:
+        session.configure_torch(torch)
+        session.note(query_count=len(queries))
+        session.verify("pre_timing")
+    measured = timing.measured(session, "own_model_workload")
+    measured.__enter__()
     for _ in range(args.warmup_passes):
         for _query_id, included, predicates, _truth in queries:
             eval_query(estimator, wrapped, model, vocabularies, metadata, included, predicates)
@@ -88,9 +99,22 @@ def main() -> int:
                     "device_name": _device_name(device),
                 }
             )
+    measured.__exit__(None, None, None)
+    if session is not None:
+        session.verify("post_timing")
+        session.write()
     _write_csv(args.predictions, predictions)
     _write_csv(args.latencies, latencies)
     return 0
+
+
+def _timing():
+    directory = str(Path(__file__).resolve().parent)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import _timing
+
+    return _timing
 
 
 def _synchronize(device: torch.device) -> None:

@@ -26,6 +26,12 @@ timing:
   sequential_single_query: true
   includes_predicate_encoding: true
   includes_workload_parsing: false
+  primary_profile: cpu_postgres_2core
+  profiles: [cpu_postgres_2core]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 0.0
+    absolute_tolerance: 0.0
 resources:
   profile: cpu_primary
   cpu_threads: 1

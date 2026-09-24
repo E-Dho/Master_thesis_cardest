@@ -25,6 +25,12 @@ timing:
   sequential_single_query: true
   includes_predicate_encoding: true
   includes_workload_parsing: false
+  primary_profile: cpu_1core
+  profiles: [cpu_1core, gpu_single_query]
+  estimate_consistency:
+    mode: stochastic
+    relative_tolerance: 1.0e-6
+    absolute_tolerance: 0.0
 resources:
   profile: gpu_training_gpu_inference
   cpu_threads: 4
@@ -45,3 +51,6 @@ adapter:
   smoke_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cpu --cpu-threads 1 --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/models/job-light-ranges-pretrained.pt --queries /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light-ranges.csv --predictions {exchange_directory}/smoke_predictions.csv --latency {exchange_directory}/smoke_latency.csv --psamples 8000 --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --smoke
   build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py train --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cuda --cpu-threads 4 --checkpoint-output {exchange_directory}/model.pt --artifact-manifest {exchange_directory}/artifact_manifest.json --training-metrics {exchange_directory}/build_stage_metrics.json
   evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cuda --cpu-threads 4 --checkpoint {exchange_directory}/model.pt --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --psamples 8000
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cpu --cpu-threads 1 --checkpoint {exchange_directory}/model.pt --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --psamples 8000
+    gpu_single_query: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/neurocard_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --model-kind job_light_ranges --seed {seed} --device cuda --cpu-threads 1 --checkpoint {exchange_directory}/model.pt --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --psamples 8000

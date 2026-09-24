@@ -12,6 +12,8 @@
 # one at a time (%1) because they share the PostgreSQL cluster that DeepDB
 # queries for exact full-join sizes.  Requires a completed
 # deepdb_ranges_adapted_prepare.sbatch and a passed bounded validation.
+# The evaluate stage here produces accuracy only; standardized latency is
+# measured afterwards with slurm/timing_cpu_1core.sbatch on the finished runs.
 # Aggregate afterwards with:
 #   python -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli aggregate --config "$CONFIG_ADAPTED"
 

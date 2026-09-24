@@ -28,6 +28,12 @@ timing:
   sequential_single_query: true
   includes_predicate_encoding: true
   includes_workload_parsing: false
+  primary_profile: cpu_1core
+  profiles: [cpu_1core, gpu_single_query]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-4
+    absolute_tolerance: 1.0
 resources:
   profile: gpu_training_gpu_inference
   cpu_threads: 4
@@ -48,3 +54,6 @@ adapter:
   smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py smoke --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --output-directory {exchange_directory}/distjoin_smoke --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --seed {seed}
   build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py train --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --output-directory {exchange_directory} --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --seed {seed}
   evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --output-directory {exchange_directory} --queries {queries_csv} --base-cardinalities /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/distjoin_base_cardinalities.json --predictions {predictions_csv} --latencies {latency_csv} --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --warmup-passes 1 --repetitions 10 --device cuda
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --output-directory {exchange_directory} --queries {queries_csv} --base-cardinalities /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/distjoin_base_cardinalities.json --predictions {predictions_csv} --latencies {latency_csv} --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --warmup-passes 1 --repetitions 10 --device cpu
+    gpu_single_query: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/distjoin_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin --revision 09908b91e9a42f29e2168a47831319d3236da022 --output-directory {exchange_directory} --queries {queries_csv} --base-cardinalities /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/distjoin_base_cardinalities.json --predictions {predictions_csv} --latencies {latency_csv} --python /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python --warmup-passes 1 --repetitions 10 --device cuda

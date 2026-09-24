@@ -27,6 +27,12 @@ timing:
   includes_predicate_encoding: true
   includes_workload_parsing: false
   includes_rank_literal_rewrite: true
+  primary_profile: cpu_1core
+  profiles: [cpu_1core]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-9
+    absolute_tolerance: 0.0
 resources:
   profile: cpu_build_cpu_inference
   cpu_threads: 4
@@ -52,3 +58,5 @@ adapter:
   smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_ranges_adapted_bridge.py smoke --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/deepdb_ranges_adapted_shared --queries /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv --output-directory {exchange_directory}/deepdb_smoke
   build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_ranges_adapted_bridge.py build --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --dataset-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/deepdb_ranges_adapted_shared --output-directory {exchange_directory} --database imdb_joblight --pg-host /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/socket --pg-port 55432 --seed {seed}
   evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_ranges_adapted_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/deepdb_ranges_adapted_shared --checkpoint {exchange_directory}/ensemble/ensemble_join_3_budget_5_10000000.pkl --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv}
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/job_light_imdb_non_trajectory/scripts/deepdb_ranges_adapted_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/deepdb_ranges_adapted_shared --checkpoint {exchange_directory}/ensemble/ensemble_join_3_budget_5_10000000.pkl --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv}

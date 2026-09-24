@@ -268,6 +268,30 @@ def build(
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
 
+LATENCY_SCOPE = "deepdb_sql_rendering_parse_and_native_inference"
+CACHE_POLICY = (
+    "SPNEnsemble.cached_expecation_vals is cleared before every query (outside the "
+    "timed region): upstream keeps it across queries, keyed by a factor hash that "
+    "omits the SPN, which makes estimates order-dependent and turns repeated timings "
+    "into cache lookups; reuse within one query is kept"
+)
+
+
+def reset_expectation_cache(model: Any) -> None:
+    """Cold per-query state for DeepDB's cross-query expectation cache."""
+    model.cached_expecation_vals = dict()
+
+
+def _timing():
+    """The timing-guard helper next to this script (loaded lazily)."""
+    directory = str(Path(__file__).resolve().parent)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import _timing
+
+    return _timing
+
+
 def evaluate_workload(
     source: Path,
     shared: Path,
@@ -280,12 +304,21 @@ def evaluate_workload(
     warmup_passes: int,
     repetitions: int,
 ) -> None:
+    """Native DeepDB inference.
+
+    Timed per query, from the canonical parsed workload record: rendering the
+    DeepDB-compatible SQL, DeepDB's own ``parse_query`` (its predicate
+    encoding), ``SPNEnsemble.cardinality``, and float conversion.  The
+    ``model_core_ms`` column isolates ``cardinality`` alone.
+    """
     if warmup_passes < 0 or repetitions <= 0:
         raise ValueError("warmup passes must be nonnegative and repetitions positive")
     from evaluation.job_light_imdb_non_trajectory.joblight_eval.workloads import (
         load_workload,
     )
 
+    timing = _timing()
+    session = timing.session_from_environment("deepdb_native_bridge", device="cpu")
     runtime = load_upstream(source)
     manifest = json.loads((shared / "shared_preprocessing_manifest.json").read_text())
     schema = make_schema(
@@ -295,30 +328,28 @@ def evaluate_workload(
     records = load_workload(queries_path, queries_path.stem)
     if query_limit is not None:
         records = records[:query_limit]
-    parsed: list[tuple[int, Any]] = []
+    supported: list[Any] = []
     failures: dict[int, str] = {}
     unsupported: dict[int, str] = {}
     for record in records:
         try:
             unsupported_columns = deepdb_unsupported_filter_columns(record, schema)
-            if unsupported_columns:
-                unsupported[record.query_id] = (
-                    "columns excluded by the native DeepDB JOB-light schema: "
-                    + ", ".join(unsupported_columns)
-                )
-                continue
-            parsed.append(
-                (
-                    record.query_id,
-                    runtime["parse_query"](deepdb_compatible_query_to_sql(record), schema),
-                )
-            )
         except Exception as exc:
             failures[record.query_id] = f"{type(exc).__name__}: {exc}"
+            continue
+        if unsupported_columns:
+            unsupported[record.query_id] = (
+                "columns excluded by the native DeepDB JOB-light schema: "
+                + ", ".join(unsupported_columns)
+            )
+            continue
+        supported.append(record)
 
     pairwise = checkpoint.parent / "pairwise_rdc.pkl"
 
-    def estimate(query) -> float:
+    def estimate(record) -> tuple[float, float]:
+        query = runtime["parse_query"](deepdb_compatible_query_to_sql(record), schema)
+        core_started = time.perf_counter()
         _, _, value, _ = model.cardinality(
             query,
             rdc_spn_selection=True,
@@ -329,39 +360,54 @@ def evaluate_workload(
             return_factor_values=True,
         )
         value = float(value)
+        core_ms = (time.perf_counter() - core_started) * 1_000
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"invalid estimate {value}")
-        return value
+        return value, core_ms
 
-    for _ in range(warmup_passes):
-        for query_id, query in parsed:
-            if query_id in failures:
-                continue
-            try:
-                estimate(query)
-            except Exception as exc:
-                failures[query_id] = f"{type(exc).__name__}: {exc}"
+    if session is not None:
+        session.configure()
+        session.note(query_count=len(records), supported_query_count=len(supported),
+                     cache_policy=CACHE_POLICY)
+        session.verify("pre_timing")
     estimates: dict[int, float] = {}
     latency_rows: list[dict[str, Any]] = []
-    for repetition in range(repetitions):
-        for query_id, query in parsed:
-            if query_id in failures:
-                continue
-            try:
-                started = time.perf_counter()
-                value = estimate(query)
-                elapsed = (time.perf_counter() - started) * 1_000
-                estimates.setdefault(query_id, value)
-                latency_rows.append(
-                    {
-                        "query_id": query_id,
-                        "repetition": repetition,
-                        "latency_ms": elapsed,
-                        "scope": "predicate_encoding_and_native_deepdb_inference",
-                    }
-                )
-            except Exception as exc:
-                failures[query_id] = f"{type(exc).__name__}: {exc}"
+    with timing.measured(session, "deepdb_native_workload"):
+        for _ in range(warmup_passes):
+            for record in supported:
+                if record.query_id in failures:
+                    continue
+                try:
+                    reset_expectation_cache(model)
+                    estimate(record)
+                except Exception as exc:
+                    failures[record.query_id] = f"{type(exc).__name__}: {exc}"
+        for repetition in range(repetitions):
+            for record in supported:
+                if record.query_id in failures:
+                    continue
+                try:
+                    reset_expectation_cache(model)
+                    started = time.perf_counter()
+                    value, core_ms = estimate(record)
+                    elapsed = (time.perf_counter() - started) * 1_000
+                    estimates.setdefault(record.query_id, value)
+                    latency_rows.append(
+                        {
+                            "query_id": record.query_id,
+                            "repetition": repetition,
+                            "latency_ms": elapsed,
+                            "scope": LATENCY_SCOPE,
+                            "device": "cpu",
+                            "device_name": "CPU",
+                            "model_core_ms": core_ms,
+                        }
+                    )
+                except Exception as exc:
+                    failures[record.query_id] = f"{type(exc).__name__}: {exc}"
+    if session is not None:
+        session.verify("post_timing")
+        session.write()
     prediction_rows = [
         {
             "query_id": record.query_id,
@@ -385,13 +431,15 @@ def evaluate_workload(
     )
     write_csv(
         latency_path, latency_rows,
-        ("query_id", "repetition", "latency_ms", "scope"),
+        ("query_id", "repetition", "latency_ms", "scope", "device", "device_name", "model_core_ms"),
     )
     print(json.dumps({
         "query_count": len(records),
         "success_count": len(records) - len(failures) - len(unsupported),
         "unsupported_count": len(unsupported),
         "failure_count": len(failures),
+        "latency_scope": LATENCY_SCOPE,
+        "cache_policy": CACHE_POLICY,
     }, indent=2, sort_keys=True))
 
 

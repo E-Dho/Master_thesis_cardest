@@ -23,6 +23,22 @@ def build_parser() -> argparse.ArgumentParser:
         stage.add_argument("--run-directory", type=Path)
         stage.add_argument("--run-id")
 
+    timing = subparsers.add_parser(
+        "time", help="profile-controlled timing of an evaluated run (no rebuild)"
+    )
+    timing.add_argument("--config", required=True, type=Path)
+    timing.add_argument("--seed", required=True, type=int)
+    timing.add_argument("--run-directory", required=True, type=Path)
+    timing.add_argument("--profile", required=True)
+    timing.add_argument(
+        "--allow-config-drift", action="append", default=[],
+        help="dotted config path that may differ from the accuracy run (repeatable)",
+    )
+    timing.add_argument(
+        "--allow-estimate-drift", action="store_true",
+        help="record but do not fail on estimate differences to the accuracy run",
+    )
+
     aggregate = subparsers.add_parser("aggregate", help="aggregate complete seed runs")
     aggregate.add_argument("--config", required=True, type=Path)
     aggregate.add_argument("--run-directory", action="append", type=Path)
@@ -48,6 +64,23 @@ def main(argv: list[str] | None = None) -> int:
         paths = [run_seed(config, seed, run_id=args.run_id) for seed in seeds]
         for path in paths:
             print(path)
+        return 0
+
+    if args.command == "time":
+        if args.seed not in config.seeds:
+            raise ValueError(f"seed {args.seed} is not declared by config")
+        from .timing import run_timing_stage
+
+        print(
+            run_timing_stage(
+                config,
+                args.seed,
+                args.run_directory,
+                args.profile,
+                allow_config_drift=args.allow_config_drift,
+                allow_estimate_drift=args.allow_estimate_drift,
+            )
+        )
         return 0
 
     if args.command in {"prepare", "smoke", "build", "evaluate", "summarize"}:

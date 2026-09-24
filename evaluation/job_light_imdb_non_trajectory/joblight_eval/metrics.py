@@ -155,6 +155,22 @@ def summarize_latency(records: list[LatencyRecord]) -> dict[str, Any]:
     }
 
 
+def summarize_model_core(records: list[LatencyRecord]) -> dict[str, Any] | None:
+    """Summary of the optional model-core latency column, or None if absent."""
+    values = [record.model_core_ms for record in records if record.model_core_ms is not None]
+    if not values:
+        return None
+    data = np.asarray(values, dtype=float)
+    return {
+        "observation_count": int(data.size),
+        "coverage_fraction": float(data.size / max(len(records), 1)),
+        "mean_ms": float(np.mean(data)),
+        "p50_ms": float(np.percentile(data, 50)),
+        "p95_ms": float(np.percentile(data, 95)),
+        "p99_ms": float(np.percentile(data, 99)),
+    }
+
+
 # Metric families surfaced per seed and aggregated across seeds.
 # Each entry is (summary_key, metric_name) where summary_key is the top-level
 # key inside the per-workload accuracy dict.

@@ -1,0 +1,7 @@
+# Timing plan for slurm/timing_*.sbatch (one evaluated run per line).
+# CONFIG_PATH  SEED  RUN_DIRECTORY  [extra `cli time` arguments]
+# All lines of one plan run back to back on the same node and core(s).
+evaluation/job_light_imdb_non_trajectory/configs/deepdb_job_light.yaml  0  evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_0/RUN
+evaluation/job_light_imdb_non_trajectory/configs/deepdb_job_light_ranges_adapted.yaml  0  evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_0/RUN
+# Runs evaluated before a non-timing config change need an explicit allowance:
+evaluation/job_light_imdb_non_trajectory/configs/mscn_job_light.yaml  0  evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/VARIANT/seed_0/RUN  --allow-config-drift adapter.evaluate_command

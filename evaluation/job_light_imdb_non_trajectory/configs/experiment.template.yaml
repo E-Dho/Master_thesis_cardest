@@ -24,6 +24,12 @@ timing:
   sequential_single_query: true
   includes_predicate_encoding: true
   includes_workload_parsing: false
+  primary_profile: cpu_1core
+  profiles: [cpu_1core]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-9
+    absolute_tolerance: 0.0
 resources:
   profile: cpu_primary
   cpu_threads: 1
@@ -39,3 +45,5 @@ adapter:
   build_command: /path/to/environment/python train.py --seed {seed}
   evaluate_command: /path/to/environment/python evaluate.py --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --seed {seed}
   supplementary_evaluate_commands: []
+  timing_commands:
+    cpu_1core: /path/to/environment/python evaluate.py --device cpu --cpu-threads 1 --queries {queries_csv} --predictions {predictions_csv} --latency {latency_csv} --seed {seed}

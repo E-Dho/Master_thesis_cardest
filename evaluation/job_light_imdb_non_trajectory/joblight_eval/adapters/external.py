@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .base import Adapter, AdapterEvaluation, StageMetrics
+from .base import Adapter, AdapterEvaluation, StageMetrics, TimingOutcome
 from ..config import WorkloadConfig
 from ..records import LatencyRecord, PredictionRecord
 from ..resources import run_logged_command
@@ -156,18 +156,9 @@ class ExternalCommandAdapter(Adapter):
             for latency_path, configured_device in timing_outputs[workload.workload_id]:
                 if not latency_path.exists():
                     continue
-                for row in _read_csv(latency_path):
-                    latencies.append(
-                        LatencyRecord(
-                            workload=workload.workload_id,
-                            query_id=int(row["query_id"]),
-                            repetition=int(row["repetition"]),
-                            latency_ms=float(row["latency_ms"]),
-                            scope=row.get("scope", "end_to_end"),
-                            device=row.get("device") or configured_device,
-                            device_name=row.get("device_name", ""),
-                        )
-                    )
+                latencies.extend(
+                    _latency_records(latency_path, workload.workload_id, configured_device)
+                )
         return AdapterEvaluation(
             predictions=tuple(predictions),
             latencies=tuple(latencies),
@@ -178,6 +169,62 @@ class ExternalCommandAdapter(Adapter):
                     for workload_id, outputs in timing_outputs.items()
                 },
             },
+        )
+
+    def time(
+        self,
+        profile: str,
+        workloads: tuple[WorkloadConfig, ...],
+        output_directory: Path,
+        environment: dict[str, str],
+    ) -> TimingOutcome:
+        """Run ``adapter.timing_commands[profile]`` once per workload.
+
+        The command reads the accuracy run's artifacts through the usual
+        placeholders (``{exchange_directory}``) and writes predictions,
+        latencies, and the timing-guard report into ``output_directory``.
+        """
+        commands = self.config.adapter.get("timing_commands", {})
+        if not isinstance(commands, dict) or not commands.get(profile):
+            raise ValueError(f"adapter.timing_commands.{profile} is not configured")
+        from ..timing_guard import REPORT_ENV, get_profile
+
+        device = get_profile(profile).device
+        predictions: list[PredictionRecord] = []
+        latencies: list[LatencyRecord] = []
+        reports: dict[str, Path] = {}
+        wall: dict[str, float] = {}
+        for workload in workloads:
+            prediction_path = output_directory / f"{workload.workload_id}_predictions.csv"
+            latency_path = output_directory / f"{workload.workload_id}_latency.csv"
+            report_path = output_directory / f"{workload.workload_id}_timing_environment.json"
+            result = self._run_command(
+                f"time_{profile}_{workload.workload_id}",
+                str(commands[profile]),
+                extra={
+                    "workload_id": workload.workload_id,
+                    "queries_csv": str(workload.queries_csv),
+                    "queries_sql": str(workload.queries_sql or ""),
+                    "predictions_csv": str(prediction_path),
+                    "latency_csv": str(latency_path),
+                    "timing_directory": str(output_directory),
+                    "timing_environment_json": str(report_path),
+                    "profile": profile,
+                },
+                log_directory=output_directory / "logs",
+                env_overrides={**environment, REPORT_ENV: str(report_path)},
+            )
+            wall[workload.workload_id] = result.wall_seconds
+            predictions.extend(_prediction_records(prediction_path, workload))
+            latencies.extend(
+                _latency_records(latency_path, workload.workload_id, device, profile=profile)
+            )
+            reports[workload.workload_id] = report_path
+        return TimingOutcome(
+            predictions=tuple(predictions),
+            latencies=tuple(latencies),
+            guard_reports=reports,
+            detail={"subprocess_wall_seconds": wall},
         )
 
     def artifact_metadata(self) -> dict[str, Any]:
@@ -218,7 +265,15 @@ class ExternalCommandAdapter(Adapter):
             },
         )
 
-    def _run_command(self, stage: str, command: str, extra: dict[str, str] | None = None):
+    def _run_command(
+        self,
+        stage: str,
+        command: str,
+        extra: dict[str, str] | None = None,
+        *,
+        log_directory: Path | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ):
         exchange = self.run_directory / "exchange"
         exchange.mkdir(exist_ok=True)
         values = {
@@ -238,6 +293,11 @@ class ExternalCommandAdapter(Adapter):
             str(key): (None if value is None else str(value).format(**values))
             for key, value in self.config.adapter.get("environment", {}).items()
         }
+        # Python's per-process string-hash randomization changes set/dict
+        # iteration order; DeepDB's SPN/factor selection depends on it, so
+        # estimates differed between processes.  Fix it per experiment seed
+        # unless a config sets PYTHONHASHSEED explicitly.
+        env.setdefault("PYTHONHASHSEED", str(self.seed))
         env.update(
             {
                 "JOBLIGHT_SEED": str(self.seed),
@@ -245,13 +305,72 @@ class ExternalCommandAdapter(Adapter):
                 "JOBLIGHT_TIMING_REPETITIONS": str(self.config.timing.get("repetitions", 10)),
             }
         )
+        env.update(env_overrides or {})
+        logs = log_directory or self.run_directory / "logs"
         return run_logged_command(
             rendered,
             cwd=cwd,
             env=env,
-            stdout_path=self.run_directory / "logs" / f"{stage}.out",
-            stderr_path=self.run_directory / "logs" / f"{stage}.err",
+            stdout_path=logs / f"{stage}.out",
+            stderr_path=logs / f"{stage}.err",
         )
+
+
+def _latency_records(
+    path: Path, workload_id: str, configured_device: str, *, profile: str = ""
+) -> list[LatencyRecord]:
+    records = []
+    for row in _read_csv(path):
+        core = row.get("model_core_ms", "")
+        records.append(
+            LatencyRecord(
+                workload=workload_id,
+                query_id=int(row["query_id"]),
+                repetition=int(row["repetition"]),
+                latency_ms=float(row["latency_ms"]),
+                scope=row.get("scope", "end_to_end"),
+                device=row.get("device") or configured_device,
+                device_name=row.get("device_name", ""),
+                profile=profile,
+                model_core_ms=None if core in (None, "") else float(core),
+            )
+        )
+    return records
+
+
+def _prediction_records(path: Path, workload: WorkloadConfig) -> list[PredictionRecord]:
+    truth = {
+        query.query_id: query.true_cardinality
+        for query in load_workload(workload.queries_csv, workload.workload_id)
+    }
+    records: list[PredictionRecord] = []
+    seen: set[int] = set()
+    for row in _read_csv(path):
+        query_id = int(row["query_id"])
+        seen.add(query_id)
+        estimate_text = row.get("estimated_cardinality", "")
+        status = row.get("status") or ("ok" if estimate_text != "" else "failed")
+        records.append(
+            PredictionRecord(
+                workload=workload.workload_id,
+                query_id=query_id,
+                status=status,
+                true_cardinality=truth[query_id],
+                estimated_cardinality=(
+                    float(estimate_text) if status == "ok" and estimate_text != "" else None
+                ),
+                diagnostic=row.get("diagnostic", ""),
+            )
+        )
+    for query_id, cardinality in truth.items():
+        if query_id not in seen:
+            records.append(
+                PredictionRecord(
+                    workload.workload_id, query_id, "failed", cardinality, None,
+                    diagnostic="timing command produced no row",
+                )
+            )
+    return records
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

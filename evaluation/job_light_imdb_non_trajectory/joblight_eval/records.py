@@ -59,6 +59,10 @@ class LatencyRecord:
     scope: str = "end_to_end"
     device: str = "unspecified"
     device_name: str = ""
+    #: timing profile (timing_guard.PROFILES) or "" for evaluate-stage timing
+    profile: str = ""
+    #: optional model-core latency inside ``latency_ms`` where a method exposes one
+    model_core_ms: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -56,7 +56,13 @@ python -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli evaluate \
   --config CONFIG --seed 0 --run-directory RUN_DIRECTORY
 python -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli summarize \
   --config CONFIG --seed 0 --run-directory RUN_DIRECTORY
+python -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli time \
+  --config CONFIG --seed 0 --run-directory RUN_DIRECTORY --profile cpu_1core
 ```
+
+`time` is the profile-controlled latency measurement described under
+"Standardized timing profiles"; on the cluster it is launched through the
+`slurm/timing_*.sbatch` scripts rather than directly.
 
 Aggregate the latest complete seed runs with:
 
@@ -344,7 +350,109 @@ device, CPU thread count, and whether synchronization was required for GPU
 timing. Model-only latency and end-to-end latency may both be reported, but
 must be clearly distinguished.
 
-### Hardware-aligned timing policy
+### Standardized timing profiles
+
+Reported latency comes only from profile-controlled, timing-only runs. The
+`evaluate` stage still produces the predictions used for accuracy (and records
+its own evaluate-stage timing as context), but that timing does not control
+threads, pinning, or node class and is labelled as such in every report.
+
+| Profile | Resources | Report table |
+| --- | --- | --- |
+| `cpu_1core` | one physical core (SMT sibling reserved, unused); BLAS/OpenMP/NumExpr/Numba/PyTorch intra-op threads = 1, PyTorch inter-op threads = 1; CUDA hidden | primary CPU latency, every method |
+| `cpu_postgres_2core` | PostgreSQL only: client pinned to one core, server (postmaster and backend) to a second; autovacuum off, planner settings unchanged and recorded | PostgreSQL CPU latency |
+| `gpu_single_query` | one L40S, four pinned support cores, CPU thread pools = 1, synchronized CUDA timing | GPU latency, GPU-capable methods |
+| `cpu_fullnode_exclusive` | exclusive node, pools sized to the physical core count | supplementary scalability only, never mixed with `cpu_1core` |
+
+**Latency definition.** Per query, starting from the canonical, already parsed
+workload query: method-specific encoding, estimation, and conversion of the
+result to a Python float. Workload-file parsing, model loading, and result
+writing are excluded; evaluation is sequential, one query at a time, after the
+configured warm-up. Where a method exposes a meaningful internal boundary the
+optional `model_core_ms` column is reported separately (DeepDB: 
+`SPNEnsemble.cardinality`; MSCN: the SetConv forward pass on transferred
+tensors). DeepDB's SQL rendering and `parse_query` are its predicate encoding
+and are therefore inside the timed region; PostgreSQL's timed region is SQL
+rendering, `EXPLAIN` planning, and the `Plan Rows` conversion.
+
+**Caches.** No cache of query-dependent results may survive between timed
+queries. DeepDB keeps `SPNEnsemble.cached_expecation_vals` across queries,
+keyed by a factor hash that omits the SPN; with ten repetitions every timed
+call was a cache lookup, and cross-query collisions made estimates depend on
+query order. Both DeepDB bridges now clear it before every query (outside the
+timer). In a sandbox check on a 5% IMDB subset the adapted DeepDB mean latency
+went from 0.22 ms (cache lookups) to 19.9 ms under `cpu_1core`, of which
+17.9 ms is `SPNEnsemble.cardinality` itself. Query-independent, model-derived state may stay
+warm and is documented in the guard report: DistJoin's upstream `use_cache`
+(unfiltered join-key distributions) and FOJ sampling's per-table-subset
+inverse-fanout weights.
+
+**Determinism.** Every external command now runs with
+`PYTHONHASHSEED=<experiment seed>` (unless a config sets it). Python's
+per-process hash randomization changes set iteration order, which DeepDB's
+factor/SPN selection depends on: identical models gave estimates up to 6.5x
+apart between processes before this change.
+
+**How it works.**
+
+1. Each config declares `timing.primary_profile`, `timing.profiles`, and
+   `timing.estimate_consistency` (`deterministic` with tolerances, or
+   `stochastic` for NeuroCard's progressive sampling), and external adapters
+   declare `adapter.timing_commands.<profile>`.
+2. `cli time --config C --seed S --run-directory RUN --profile P` re-measures an
+   evaluated run without rebuilding. It refuses if the run's resolved config
+   differs from `C` outside timing-only keys (`timing`, `resources`,
+   `adapter.timing_commands`, `experiment.display_name`) unless each
+   difference is passed via `--allow-config-drift` (recorded), and refuses an
+   allocation that does not match the profile.
+3. The runner exports the profile's thread-limit environment before the
+   measuring process starts. The measuring process (bridge, eval runner, or the
+   in-process PostgreSQL/FOJ adapter) loads `joblight_eval/timing_guard.py`,
+   re-applies the limits (threadpoolctl, PyTorch intra/inter-op), and verifies
+   before and after the timed region. Hard checks: thread-limit variables,
+   threadpoolctl BLAS pools, PyTorch threads, CPU affinity in physical cores,
+   SMT sibling ownership by the Slurm job cgroup, CUDA visibility, unexpected
+   child processes, and for PostgreSQL the backend's pinning and disjointness
+   from the client. The raw OS thread count (with thread names) and the
+   CPU-time/wall-time ratio are recorded and only warn.
+4. Results go to `RUN/timing/<profile>/<utc>-<hash>/` (`timing_manifest.json`,
+   `timing_summary.json`, `latency.csv` with a `profile` column,
+   `predictions.csv`, per-workload guard reports, logs). The timing run's
+   estimates are compared with the accuracy run; a deterministic method that
+   disagrees fails unless `--allow-estimate-drift` is given.
+5. `aggregate` and `compare` add one table per profile (with CPU/GPU model,
+   a `MIXED` flag when seeds ran on different hardware, and the estimate
+   consistency), keep the evaluate-stage table separately labelled, and write
+   `timing.<profile>.*` CSV columns. Profiles missing for some seeds are listed
+   as incomplete instead of being averaged.
+
+**Launching.** `slurm/timing_{cpu_1core,cpu_postgres_2core,gpu_single_query,cpu_fullnode_exclusive}.sbatch`
+run `scripts/timing_launch.py` under `srun --cpu-bind=cores` (with
+`--hint=nomultithread` and an explicit `--cpus-per-task`, because Slurm >= 22.05
+does not pass the batch value to `srun`). The launcher checks the step's CPU
+set, splits it into physical cores, and runs every entry of a plan file
+(`configs/timing_plan.example.txt`) back to back on the same node; for
+PostgreSQL it starts the server pinned to the second core and refuses if a
+server is already running outside the allocation. Fix the node class at
+submission, e.g. `PLAN=plan.tsv sbatch --constraint=<feature> slurm/timing_cpu_1core.sbatch`.
+Every interpreter that measures needs `threadpoolctl` (present in the DeepDB
+environment through scikit-learn; install `threadpoolctl==3.5.0` into the
+learned-gpu environment and into `python_packages` for the geo-mlp CLI, which
+measures PostgreSQL and FOJ sampling in-process). Setting
+`JOBLIGHT_TIMING_ALLOW_UNPINNED=1` permits local debugging on an unpinned
+allocation, but such results are marked not reportable.
+
+**Reusing completed runs.** Accuracy runs and checkpoints are reused; only
+timing is rerun. DeepDB (native and adapted) additionally needs its
+`evaluate` and `summarize` stages rerun once, because the expectation-cache
+and hash-seed fixes change a small number of its estimates (no rebuild).
+
+### Evaluate-stage device context (hardware-aligned)
+
+The following policy governs the evaluate-stage timing only; it documents the
+execution class of each method's published setup and is not the standardized
+comparison above.
+
 
 The headline device follows the method's published evaluation protocol rather
 than forcing every method onto CPU. Every latency row records `device` and

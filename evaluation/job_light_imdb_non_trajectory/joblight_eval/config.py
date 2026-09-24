@@ -130,6 +130,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         raise ValueError("timing.device must be 'cpu' or 'cuda'")
     if timing_device == "cuda" and timing.get("synchronize_cuda") is not True:
         raise ValueError("CUDA timing must set timing.synchronize_cuda: true")
+    _validate_timing_profiles(timing, _mapping(raw, "adapter"))
     canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
     config_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return ExperimentConfig(
@@ -152,6 +153,39 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         protocol=protocol,
         adaptation=adaptation,
     )
+
+
+IN_PROCESS_TIMING_ADAPTERS = ("postgres", "foj_sampling")
+
+
+def _validate_timing_profiles(timing: dict[str, Any], adapter: dict[str, Any]) -> None:
+    """Validate the standardized timing profiles (see timing_guard.PROFILES)."""
+    from .timing_guard import PROFILES
+
+    profiles = timing.get("profiles")
+    if profiles in (None, ""):
+        if timing.get("primary_profile"):
+            raise ValueError("timing.primary_profile requires timing.profiles")
+        return
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError("timing.profiles must be a non-empty list")
+    unknown = sorted(set(map(str, profiles)) - set(PROFILES))
+    if unknown:
+        raise ValueError(f"unknown timing profiles {unknown}; known: {sorted(PROFILES)}")
+    primary = timing.get("primary_profile")
+    if primary not in profiles:
+        raise ValueError("timing.primary_profile must be one of timing.profiles")
+    if PROFILES[str(primary)].exclusive_node:
+        raise ValueError("the supplementary full-node profile cannot be primary")
+    if str(adapter.get("type")) in IN_PROCESS_TIMING_ADAPTERS:
+        return
+    commands = adapter.get("timing_commands")
+    missing = [
+        profile for profile in profiles
+        if not isinstance(commands, dict) or not commands.get(profile)
+    ]
+    if missing:
+        raise ValueError(f"adapter.timing_commands lacks commands for profiles {missing}")
 
 
 def _mapping(data: dict[str, Any], key: str) -> dict[str, Any]:

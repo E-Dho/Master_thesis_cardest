@@ -169,7 +169,23 @@ def _prepare(args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _timing():
+    directory = str(Path(__file__).resolve().parent)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import _timing
+
+    return _timing
+
+
 def _evaluate(args: argparse.Namespace) -> None:
+    timing = _timing()
+    session = timing.session_from_environment("neurocard_bridge", device=args.device)
+    if session is not None:
+        import torch
+
+        # Before any model construction so inter-op threads can still be set.
+        session.configure(torch=torch)
     warmup_passes = (
         args.warmup_passes
         if args.warmup_passes is not None
@@ -203,6 +219,13 @@ def _evaluate(args: argparse.Namespace) -> None:
     estimator = runtime.make_estimator(args.psamples)
 
     failures: dict[int, str] = {}
+    if session is not None:
+        session.configure_torch(runtime.torch)
+        session.note(cli_cpu_threads=args.cpu_threads, psamples=args.psamples,
+                     query_count=len(queries))
+        session.verify("pre_timing")
+    measured = timing.measured(session, "neurocard_workload")
+    measured.__enter__()
     for _ in range(warmup_passes):
         for query_id, query in enumerate(queries):
             if query_id in failures:
@@ -245,6 +268,10 @@ def _evaluate(args: argparse.Namespace) -> None:
                 )
             except Exception as exc:
                 failures[query_id] = f"{type(exc).__name__}: {exc}"
+    measured.__exit__(None, None, None)
+    if session is not None:
+        session.verify("post_timing")
+        session.write()
 
     prediction_rows = []
     for query_id in range(len(queries)):

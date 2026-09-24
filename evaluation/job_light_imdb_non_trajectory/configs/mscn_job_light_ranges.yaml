@@ -25,6 +25,12 @@ timing:
   sequential_single_query: true
   includes_predicate_encoding: true
   includes_workload_parsing: false
+  primary_profile: cpu_1core
+  profiles: [cpu_1core, gpu_single_query]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-4
+    absolute_tolerance: 1.0
 resources:
   profile: gpu_training_gpu_inference
   cpu_threads: 4
@@ -50,3 +56,6 @@ adapter:
   smoke_command: /work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py smoke --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cpu --cpu-threads 4 --output-directory {exchange_directory}/mscn_smoke --queries-prefix /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/workloads/job-light-ranges --query-limit {query_limit}
   build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py train --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cuda --cpu-threads 4 --checkpoint-output {exchange_directory}/model.pt --metadata-output {exchange_directory}/model_metadata.json --artifact-manifest {exchange_directory}/artifact_manifest.json --training-metrics {exchange_directory}/build_stage_metrics.json --queries 100000 --epochs 100 --batch-size 1024 --hidden-size 256
   evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cuda --cpu-threads 4 --checkpoint {exchange_directory}/model.pt --metadata {exchange_directory}/model_metadata.json --queries-prefix /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/workloads/job-light-ranges --predictions {predictions_csv} --latency {latency_csv}
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cpu --cpu-threads 1 --checkpoint {exchange_directory}/model.pt --metadata {exchange_directory}/model_metadata.json --queries-prefix /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/workloads/job-light-ranges --predictions {predictions_csv} --latency {latency_csv}
+    gpu_single_query: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/mscn_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/mscn --runtime-root /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted --seed {seed} --device cuda --cpu-threads 1 --checkpoint {exchange_directory}/model.pt --metadata {exchange_directory}/model_metadata.json --queries-prefix /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/mscn_job_light_ranges_adapted/workloads/job-light-ranges --predictions {predictions_csv} --latency {latency_csv}

@@ -4,13 +4,13 @@ import json
 import os
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .base import Adapter, AdapterEvaluation, StageMetrics
+from .base import Adapter, AdapterEvaluation, StageMetrics, TimingOutcome
 from ..config import WorkloadConfig
 from ..records import LatencyRecord, PredictionRecord, QueryRecord
 from ..workloads import load_workload
@@ -150,6 +150,33 @@ class FojSamplingAdapter(Adapter):
         )
 
     def evaluate(self, workloads: tuple[WorkloadConfig, ...]) -> AdapterEvaluation:
+        return self._evaluate(workloads)
+
+    def time(
+        self,
+        profile: str,
+        workloads: tuple[WorkloadConfig, ...],
+        output_directory: Path,
+        environment: dict[str, str],
+    ) -> TimingOutcome:
+        from ..timing_guard import TimingSession
+
+        report = output_directory / "foj_timing_environment.json"
+        session = TimingSession(profile, report, role="in_process_foj_sampler")
+        session.configure()
+        evaluation = self._evaluate(workloads, session=session, profile=profile)
+        session.verify("post_timing")
+        session.write()
+        return TimingOutcome(
+            predictions=evaluation.predictions,
+            latencies=evaluation.latencies,
+            guard_reports={workload.workload_id: report for workload in workloads},
+            detail=evaluation.detail,
+        )
+
+    def _evaluate(
+        self, workloads: tuple[WorkloadConfig, ...], *, session: Any = None, profile: str = ""
+    ) -> AdapterEvaluation:
         from model.src.data.schema import ModelMetadata
 
         payload = json.loads(self._metadata_path().read_text(encoding="utf-8"))
@@ -169,6 +196,22 @@ class FojSamplingAdapter(Adapter):
         predictions: list[PredictionRecord] = []
         latencies: list[LatencyRecord] = []
         cache: dict[tuple[str, ...], np.ndarray] = {}
+        if session is not None:
+            session.verify("pre_timing")
+        measured = session.measure("foj_workloads") if session is not None else nullcontext()
+        with measured:
+            self._run_workloads(
+                workloads, rows, metadata, cache, warmup_passes, repetitions,
+                predictions, latencies, profile,
+            )
+        return AdapterEvaluation(
+            tuple(predictions),
+            tuple(latencies),
+            detail={"sample_size": sample_size, "full_join_cardinality": metadata.full_join_cardinality},
+        )
+
+    def _run_workloads(self, workloads, rows, metadata, cache, warmup_passes, repetitions,
+                       predictions, latencies, profile) -> None:
         for workload in workloads:
             queries = load_workload(workload.queries_csv, workload.workload_id)
             for _ in range(warmup_passes):
@@ -181,7 +224,11 @@ class FojSamplingAdapter(Adapter):
                     status, estimate, diagnostic = self._estimate(query, rows, metadata, cache)
                     elapsed = (time.perf_counter() - start) * 1000.0
                     latencies.append(
-                        LatencyRecord(workload.workload_id, query.query_id, repetition, elapsed)
+                        LatencyRecord(
+                            workload.workload_id, query.query_id, repetition, elapsed,
+                            scope="predicate_domain_encoding_and_weighted_sample_scan",
+                            device="cpu", profile=profile,
+                        )
                     )
                     if repetition == 0:
                         first_estimates[query.query_id] = (status, estimate, diagnostic)
@@ -197,11 +244,6 @@ class FojSamplingAdapter(Adapter):
                         diagnostic=diagnostic,
                     )
                 )
-        return AdapterEvaluation(
-            tuple(predictions),
-            tuple(latencies),
-            detail={"sample_size": sample_size, "full_join_cardinality": metadata.full_join_cardinality},
-        )
 
     def artifact_metadata(self) -> dict[str, Any]:
         reservoir = self._reservoir_path()

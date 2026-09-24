@@ -73,7 +73,7 @@ MAX_TABLES = 3
 RDC_SAMPLE_SIZE = 10_000
 CSV_READ_OPTIONS = {"escapechar": "\\", "quotechar": '"', "encoding": "utf-8"}
 MANIFEST = "shared_preprocessing_manifest.json"
-LATENCY_SCOPE = "rank_literal_rewrite_and_native_deepdb_inference"
+LATENCY_SCOPE = "rank_rewrite_deepdb_sql_rendering_parse_and_native_inference"
 # The published JOB-light-ranges labels are reproduced under byte-order "C"
 # comparisons, not under a linguistic default collation such as en_US.UTF-8
 # (series_years values like '1995-????' sort differently); ``validate``
@@ -1645,8 +1645,19 @@ def evaluate_workload(
     warmup_passes: int,
     repetitions: int,
 ) -> Dict[str, Any]:
+    """Adapted DeepDB inference.
+
+    Timed per query, from the canonical parsed workload record: rank rewrite
+    of string literals, DeepDB-compatible SQL rendering, DeepDB's
+    ``parse_query``, ``SPNEnsemble.cardinality``, and float conversion (the
+    same boundary as the native bridge plus the rank rewrite).  Empty
+    predicates stop after the rewrite.  ``model_core_ms`` isolates
+    ``cardinality``.
+    """
     if warmup_passes < 0 or repetitions <= 0:
         raise ValueError("warmup passes must be nonnegative and repetitions positive")
+    timing = native._timing()
+    session = timing.session_from_environment("deepdb_adapted_bridge", device="cpu")
     runtime = load_runtime(source)
     manifest = read_manifest(shared)
     domains = load_shared_domains(shared, manifest)
@@ -1686,15 +1697,14 @@ def evaluate_workload(
 
     pairwise = checkpoint.parent / "pairwise_rdc.pkl"
 
-    def estimate(record: QueryRecord, parsed) -> Tuple[float, float]:
-        rewrite_started = time.perf_counter()
+    def estimate(record: QueryRecord) -> Tuple[float, Optional[float]]:
         rewrite = adapted.rewrite_query(record, domains)
-        rewrite_ms = (time.perf_counter() - rewrite_started) * 1_000
         if rewrite.is_empty:
-            return 0.0, rewrite_ms
-        model_started = time.perf_counter()
+            return 0.0, None
+        query = runtime["parse_query"](native.deepdb_compatible_query_to_sql(rewrite.query), schema)
+        core_started = time.perf_counter()
         _, _, value, _ = model.cardinality(
-            parsed,
+            query,
             rdc_spn_selection=True,
             pairwise_rdc_path=str(pairwise),
             merge_indicator_exp=True,
@@ -1702,37 +1712,53 @@ def evaluate_workload(
             exploit_overlapping=True,
             return_factor_values=True,
         )
-        model_ms = (time.perf_counter() - model_started) * 1_000
         value = float(value)
+        core_ms = (time.perf_counter() - core_started) * 1_000
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"invalid estimate {value}")
-        return value, rewrite_ms + model_ms
+        return value, core_ms
 
-    for _ in range(warmup_passes):
-        for record, _, parsed in prepared:
-            if record.query_id in failures:
-                continue
-            try:
-                estimate(record, parsed)
-            except Exception as exc:
-                failures[record.query_id] = f"{type(exc).__name__}: {exc}"
+    if session is not None:
+        session.configure()
+        session.note(query_count=len(records), prepared_query_count=len(prepared),
+                     cache_policy=native.CACHE_POLICY)
+        session.verify("pre_timing")
     estimates: Dict[int, float] = {}
     latency_rows: List[Dict[str, Any]] = []
-    for repetition in range(repetitions):
-        for record, _, parsed in prepared:
-            if record.query_id in failures:
-                continue
-            try:
-                value, elapsed = estimate(record, parsed)
-                estimates.setdefault(record.query_id, value)
-                latency_rows.append({
-                    "query_id": record.query_id,
-                    "repetition": repetition,
-                    "latency_ms": elapsed,
-                    "scope": LATENCY_SCOPE,
-                })
-            except Exception as exc:
-                failures[record.query_id] = f"{type(exc).__name__}: {exc}"
+    with timing.measured(session, "deepdb_adapted_workload"):
+        for _ in range(warmup_passes):
+            for record, _, _ in prepared:
+                if record.query_id in failures:
+                    continue
+                try:
+                    native.reset_expectation_cache(model)
+                    estimate(record)
+                except Exception as exc:
+                    failures[record.query_id] = f"{type(exc).__name__}: {exc}"
+        for repetition in range(repetitions):
+            for record, _, _ in prepared:
+                if record.query_id in failures:
+                    continue
+                try:
+                    native.reset_expectation_cache(model)
+                    started = time.perf_counter()
+                    value, core_ms = estimate(record)
+                    elapsed = (time.perf_counter() - started) * 1_000
+                    estimates.setdefault(record.query_id, value)
+                    latency_rows.append({
+                        "query_id": record.query_id,
+                        "repetition": repetition,
+                        "latency_ms": elapsed,
+                        "scope": LATENCY_SCOPE,
+                        "device": "cpu",
+                        "device_name": "CPU",
+                        "model_core_ms": "" if core_ms is None else core_ms,
+                    })
+                except Exception as exc:
+                    failures[record.query_id] = f"{type(exc).__name__}: {exc}"
+    if session is not None:
+        session.verify("post_timing")
+        session.write()
     empty = {record.query_id: rewrite.empty_reason for record, rewrite, _ in prepared if rewrite.is_empty}
     prediction_rows = [
         {
@@ -1757,7 +1783,10 @@ def evaluate_workload(
         predictions_path, prediction_rows,
         ("query_id", "estimated_cardinality", "status", "diagnostic"),
     )
-    native.write_csv(latency_path, latency_rows, ("query_id", "repetition", "latency_ms", "scope"))
+    native.write_csv(
+        latency_path, latency_rows,
+        ("query_id", "repetition", "latency_ms", "scope", "device", "device_name", "model_core_ms"),
+    )
     native.write_csv(
         predictions_path.with_name(predictions_path.stem + "_rank_rewrite.csv"),
         rewrite_rows, ("query_id", "empty_reason", "rank_predicates"),
@@ -1770,6 +1799,7 @@ def evaluate_workload(
         "failure_count": sum(row["status"] == "failed" for row in prediction_rows),
         "empty_predicate_count": len(empty),
         "latency_scope": LATENCY_SCOPE,
+        "cache_policy": native.CACHE_POLICY,
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
     return summary

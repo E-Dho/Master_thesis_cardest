@@ -275,12 +275,25 @@ def _train(args: argparse.Namespace) -> None:
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
 
+def _timing():
+    directory = str(Path(__file__).resolve().parent)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import _timing
+
+    return _timing
+
+
 def _evaluate(args: argparse.Namespace) -> None:
+    timing = _timing()
+    session = timing.session_from_environment("mscn_bridge", device=args.device)
     runtime = _load_upstream(
         Path(args.source_root), args.device, args.cpu_threads,
         Path(args.runtime_root) if args.runtime_root else None,
     )
     torch = runtime["torch"]
+    if session is not None:
+        session.configure(torch=torch)
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA inference requested but CUDA is unavailable")
     device = torch.device(args.device)
@@ -323,7 +336,11 @@ def _evaluate(args: argparse.Namespace) -> None:
 
     dictionaries = _dictionaries(runtime["util"], metadata)
     failures: dict[int, str] = {}
-    with torch.inference_mode():
+    if session is not None:
+        session.configure_torch(torch)
+        session.note(cli_cpu_threads=args.cpu_threads, query_count=query_count)
+        session.verify("pre_timing")
+    with torch.inference_mode(), timing.measured(session, "mscn_workload"):
         for _ in range(warmup_passes):
             for query_id in range(query_count):
                 try:
@@ -341,11 +358,13 @@ def _evaluate(args: argparse.Namespace) -> None:
                 if query_id in failures:
                     continue
                 try:
+                    core: dict[str, float] = {}
                     _synchronize(torch, device)
                     started = time.perf_counter()
                     estimate = _estimate_one(
                         runtime, model, device, metadata, dictionaries,
-                        joins[query_id], predicates[query_id], tables[query_id], samples[query_id]
+                        joins[query_id], predicates[query_id], tables[query_id], samples[query_id],
+                        core_timer=core,
                     )
                     _synchronize(torch, device)
                     latency_ms = (time.perf_counter() - started) * 1_000.0
@@ -364,9 +383,13 @@ def _evaluate(args: argparse.Namespace) -> None:
                             if device.type == "cuda"
                             else "CPU"
                         ),
+                        "model_core_ms": core.get("model_core_ms", ""),
                     })
                 except Exception as exc:
                     failures[query_id] = f"{type(exc).__name__}: {exc}"
+    if session is not None:
+        session.verify("post_timing")
+        session.write()
 
     prediction_rows = [
         {
@@ -383,7 +406,7 @@ def _evaluate(args: argparse.Namespace) -> None:
     )
     _write_csv(
         Path(args.latency), latency_rows,
-        ("query_id", "repetition", "latency_ms", "scope", "device", "device_name")
+        ("query_id", "repetition", "latency_ms", "scope", "device", "device_name", "model_core_ms")
     )
     payload = {
         "status": "ok" if not failures else "partial_failure",
@@ -478,7 +501,12 @@ def _dictionaries(util, metadata):
 
 
 def _estimate_one(runtime, model, device, metadata, dictionaries,
-                  joins, predicates, tables, samples) -> float:
+                  joins, predicates, tables, samples, core_timer=None) -> float:
+    """Encode one query, run SetConv, and de-normalize the estimate.
+
+    ``core_timer`` (optional dict) receives ``model_core_ms``: the SetConv
+    forward pass on already-transferred tensors, synchronized on CUDA.
+    """
     table2vec, column2vec, op2vec, join2vec = dictionaries
     encoded_samples = runtime["util"].encode_samples([tables], [samples], table2vec)
     encoded_predicates, encoded_joins = runtime["util"].encode_data(
@@ -495,7 +523,13 @@ def _estimate_one(runtime, model, device, metadata, dictionaries,
     )
     tensors = [tensor.to(device) for tensor in dataset.tensors]
     sample, predicate, join, _, sample_mask, predicate_mask, join_mask = tensors
+    if core_timer is not None:
+        _synchronize(runtime["torch"], device)
+        core_started = time.perf_counter()
     output = model(sample, predicate, join, sample_mask, predicate_mask, join_mask)
+    if core_timer is not None:
+        _synchronize(runtime["torch"], device)
+        core_timer["model_core_ms"] = (time.perf_counter() - core_started) * 1_000.0
     normalized = float(output.detach().cpu().reshape(-1)[0])
     log_cardinality = (
         normalized
