@@ -3,7 +3,7 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 
 import numpy as np
 
@@ -322,6 +322,7 @@ class PredicateTrainingContextGenerator:
                         metadata,
                         context.void_column_index,
                         cascade=self.null_sentinel.cascade,
+                        predicated_columns=predicated_data_columns(context, metadata),
                     )
                 )
                 source_row_indices.append(row_index)
@@ -503,6 +504,7 @@ class PredicateTrainingContextGenerator:
                         metadata,
                         context.void_column_index,
                         cascade=self.null_sentinel.cascade,
+                        predicated_columns=predicated_data_columns(context, metadata),
                     )
                 )
                 source_row_indices.append(row_index)
@@ -2176,16 +2178,23 @@ def void_target_row(
     void_column_index: int,
     *,
     cascade: bool = True,
+    predicated_columns: Collection[int] | None = None,
 ) -> np.ndarray:
     """Return the target row for a void context: sentinel at and after the break.
 
     The void column's head is supervised toward the sentinel because no row with
     this prefix can satisfy the void predicate.  With ``cascade`` the sentinel
-    also propagates to every later DATA column, which keeps the chain dead: a
-    single near-zero factor already zeroes the product, but supervising the tail
-    stops later heads from learning an arbitrary distribution over a context
-    they never otherwise see, and it makes several factors collapse together
-    rather than relying on one.
+    also propagates to later DATA columns so several factors collapse together
+    rather than the estimate resting on one.
+
+    ``predicated_columns`` restricts that cascade to columns the context
+    actually constrains, and passing it is strongly recommended.  A wildcard
+    column contributes exactly 1.0 to the estimate whatever its sentinel mass,
+    so supervising an unpredicated head toward the sentinel buys nothing at
+    inference while pulling its marginal away from the data.  On the 50M POL
+    benchmark the unrestricted cascade drove two mostly-wildcarded heads to
+    constant sentinel mass, and with the earlier ``1 - q(sentinel)`` wildcard
+    factor that constant multiplied a fixed ~1/16 into every estimate.
 
     Columns that carry no sentinel -- indicators and fanouts -- keep their real
     values, since their heads feed table-presence semantics and the inverse
@@ -2201,11 +2210,28 @@ def void_target_row(
         )
     targets[void_column_index] = sentinel
     if cascade:
+        allowed = None if predicated_columns is None else set(predicated_columns)
         for column_index in range(void_column_index + 1, len(metadata.columns)):
             later = sentinels[column_index]
-            if later is not None:
-                targets[column_index] = later
+            if later is None:
+                continue
+            if allowed is not None and column_index not in allowed:
+                continue
+            targets[column_index] = later
     return targets
+
+
+def predicated_data_columns(
+    context: GeneratedTrainingContext,
+    metadata: ModelMetadata,
+) -> frozenset[int]:
+    """Return DATA column indices this context constrains with a real predicate."""
+
+    return frozenset(
+        index
+        for index, (column, token) in enumerate(zip(metadata.columns, context.tokens))
+        if column.kind == ColumnKind.DATA and token.op != PredicateOp.WILDCARD
+    )
 
 
 def forced_predicate_for_stratum(

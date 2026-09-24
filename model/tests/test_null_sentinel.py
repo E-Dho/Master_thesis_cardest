@@ -137,10 +137,20 @@ class NullSentinelMaskTest(unittest.TestCase):
             with self.subTest(op=token.op.value):
                 self.assertEqual(predicate_mask(self.column, token)[self.sentinel], 0.0)
 
-    def test_wildcard_factor_drops_the_sentinel_mass(self) -> None:
-        distribution = np.array([0.1, 0.1, 0.1, 0.1, 0.6])
-        factor = column_factor(distribution, self.column, PredicateToken.wildcard())
-        self.assertAlmostEqual(factor, 0.4)
+    def test_wildcard_factor_is_one_however_much_sentinel_mass_there_is(self) -> None:
+        # A wildcard column must contribute exactly 1.0. Returning
+        # 1 - q(sentinel) here lets unpredicated heads vote on impossibility,
+        # and on the 50M POL benchmark two mostly-wildcarded heads settled on
+        # constant sentinel mass that multiplied a fixed ~1/16 into every
+        # estimate -- shrinking true zeros and true positives alike.
+        for sentinel_mass in (0.0, 0.1, 0.6, 0.99):
+            with self.subTest(sentinel_mass=sentinel_mass):
+                rest = (1.0 - sentinel_mass) / 4
+                distribution = np.array([rest] * 4 + [sentinel_mass])
+                self.assertAlmostEqual(
+                    column_factor(distribution, self.column, PredicateToken.wildcard()),
+                    1.0,
+                )
 
     def test_wildcard_factor_stays_one_without_a_sentinel(self) -> None:
         plain = _metadata().columns[0]
@@ -154,17 +164,21 @@ class NullSentinelMaskTest(unittest.TestCase):
         factor = column_factor(distribution, self.column, PredicateToken.equal(2))
         self.assertAlmostEqual(factor, 0.3)
 
-    def test_full_sentinel_mass_collapses_every_factor(self) -> None:
+    def test_full_sentinel_mass_collapses_every_predicated_factor(self) -> None:
         distribution = np.array([0.0, 0.0, 0.0, 0.0, 1.0])
         for token in (
-            PredicateToken.wildcard(),
             PredicateToken.equal(2),
             PredicateToken.range(1, 4),
+            PredicateToken(PredicateOp.GREATER_EQUAL, value=1),
         ):
             with self.subTest(op=token.op.value):
                 self.assertAlmostEqual(
                     column_factor(distribution, self.column, token), 0.0
                 )
+        # ... but a column the context does not constrain still contributes 1.0.
+        self.assertAlmostEqual(
+            column_factor(distribution, self.column, PredicateToken.wildcard()), 1.0
+        )
 
 
 class VoidPairCatalogTest(unittest.TestCase):
@@ -264,6 +278,28 @@ class VoidTargetRowTest(unittest.TestCase):
         # the inverse fanout weights have no meaningful void state.
         self.assertEqual(targets[2], 1)
         self.assertEqual(targets[3], 0)
+
+    def test_cascade_skips_columns_the_context_does_not_constrain(self) -> None:
+        # Column 1 carries no predicate here, so supervising it toward the
+        # sentinel would buy nothing at inference (a wildcard factor is 1.0)
+        # while pulling its marginal away from the data.
+        targets = void_target_row(
+            self.row, self.metadata, 0, cascade=True, predicated_columns={0}
+        )
+        self.assertEqual(targets[0], null_sentinel_index(self.metadata.columns[0]))
+        self.assertEqual(targets[1], 1)
+
+    def test_cascade_reaches_constrained_columns(self) -> None:
+        targets = void_target_row(
+            self.row, self.metadata, 0, cascade=True, predicated_columns={0, 1}
+        )
+        self.assertEqual(targets[1], null_sentinel_index(self.metadata.columns[1]))
+
+    def test_void_column_is_always_written_even_if_not_listed(self) -> None:
+        targets = void_target_row(
+            self.row, self.metadata, 1, cascade=True, predicated_columns=set()
+        )
+        self.assertEqual(targets[1], null_sentinel_index(self.metadata.columns[1]))
 
     def test_source_row_is_not_mutated(self) -> None:
         void_target_row(self.row, self.metadata, 0, cascade=True)
@@ -374,6 +410,30 @@ class VoidContextGenerationTest(unittest.TestCase):
         for context in contexts:
             self.assertTrue(context_satisfies_row(context, row, self.metadata))
 
+    def test_cascade_never_targets_an_unpredicated_column(self) -> None:
+        self.generator.attach_void_catalog(self.catalog, self.config)
+        contexts, targets, _ = self.generator.generate_batch(
+            encoded_rows=self.rows,
+            metadata=self.metadata,
+            rng=np.random.default_rng(3),
+        )
+        checked = 0
+        for context, target, row in zip(contexts, targets, self.rows):
+            if context.void_column_index is None:
+                continue
+            checked += 1
+            for index, column in enumerate(self.metadata.columns):
+                sentinel = null_sentinel_index(column)
+                if sentinel is None or index == context.void_column_index:
+                    continue
+                if target[index] == sentinel:
+                    self.assertNotEqual(
+                        context.tokens[index].op,
+                        PredicateOp.WILDCARD,
+                        f"column {index} got a sentinel target while unpredicated",
+                    )
+        self.assertTrue(checked, "no void context was produced")
+
     def test_diagnostics_count_generated_voids(self) -> None:
         self.generator.attach_void_catalog(self.catalog, self.config)
         self.generator.generate_batch(
@@ -421,7 +481,7 @@ class TorchSentinelExclusionTest(unittest.TestCase):
             output_embeddings=None,
         )
 
-    def test_identity_wildcard_factor_drops_sentinel_mass(self) -> None:
+    def test_identity_wildcard_factor_is_one_despite_sentinel_mass(self) -> None:
         from model.src.model.output_adapter import TorchIdentityOutputAdapter
 
         outputs = self._outputs([0.1, 0.1, 0.1, 0.1, 0.6])
@@ -431,7 +491,7 @@ class TorchSentinelExclusionTest(unittest.TestCase):
             metadata=self.metadata,
             predicate_token=PredicateToken.wildcard(),
         )
-        self.assertAlmostEqual(float(factor[0]), 0.4, places=6)
+        self.assertAlmostEqual(float(factor[0]), 1.0, places=6)
 
     def test_identity_equality_factor_ignores_sentinel_mass(self) -> None:
         from model.src.model.output_adapter import TorchIdentityOutputAdapter
