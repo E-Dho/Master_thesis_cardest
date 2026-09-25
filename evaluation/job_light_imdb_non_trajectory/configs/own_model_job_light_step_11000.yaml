@@ -1,0 +1,54 @@
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: own_model
+  variant_id: duet_neurocard_distjoin_rare_aux_step_11000
+  display_name: Own model rare-auxiliary checkpoint step 11,000
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/E-Dho/Master_thesis_cardest.git
+  revision: 8b15b6ca761e4460bcc18c23450a864fb835b058
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation
+paths:
+  results_root: ../results
+workloads:
+  job_light:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv
+    expected_query_count: 70
+timing:
+  device: cuda
+  synchronize_cuda: true
+  comparison_basis: neural_gpu_inference_with_cpu_supplement
+  published_reference_hardware: Actual cluster CPU and NVIDIA L40S are reported
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+  primary_profile: cpu_1core
+  profiles: [cpu_1core, gpu_single_query]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-4
+    absolute_tolerance: 1.0e-6
+resources:
+  profile: pretrained_checkpoint_gpu_inference
+  cpu_threads: 4
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+  checkpoint_template: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt
+  training_config_template: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml
+adapter:
+  type: own_model
+  working_directory: ../../..
+  environment:
+    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation
+  require_smoke_before_build: true
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory}
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --device cpu
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py build --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory}
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cuda
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cpu
+    gpu_single_query: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cuda
