@@ -451,6 +451,7 @@ def _aggregate_profile(
         )
         for summary in summaries
     })
+    hardware_declared = all(bool(summary.get("hardware_class")) for summary in summaries)
     model_core = _aggregate_model_core(workloads)
     result: dict[str, Any] = {
         "available": True,
@@ -469,10 +470,13 @@ def _aggregate_profile(
         "gpu_names": gpu_names,
         "nodes": nodes,
         "declared_hardware": [json.loads(item) for item in declared],
-        "hardware_declared": all(summary.get("hardware_class") for summary in summaries),
-        # identical observed CPU model, at most one GPU model, one declared class
+        "hardware_declared": hardware_declared,
+        # Every timing run must have passed hardware-class enforcement. Legacy
+        # summaries with matching observed names are not equivalent because
+        # their allocation was not checked against the declared profile class.
         "hardware_consistent": (
-            len(cpu_models) == 1 and "unknown" not in cpu_models
+            hardware_declared
+            and len(cpu_models) == 1 and "unknown" not in cpu_models
             and len(gpu_names) <= 1 and len(declared) == 1
         ),
         "guard_warning_count": sum(len(guard.get("warnings", [])) for guard in guards),

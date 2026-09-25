@@ -14,21 +14,21 @@
   "schema_version": 1,
   "profiles": {
     "cpu_1core": {
-      "cpu_model": "",
-      "slurm_hint": "sbatch --constraint=<feature of the CPU node class>"
+      "cpu_model": "AMD EPYC 7313 16-Core Processor",
+      "slurm_hint": "sbatch --nodelist=n237 (or another verified AMD EPYC 7313 node)"
     },
     "cpu_postgres_2core": {
-      "cpu_model": "",
-      "slurm_hint": "same node class as cpu_1core"
+      "cpu_model": "AMD EPYC 7313 16-Core Processor",
+      "slurm_hint": "sbatch --nodelist=n237 (or another verified AMD EPYC 7313 node)"
     },
     "gpu_single_query": {
-      "cpu_model": "",
+      "cpu_model": "AMD EPYC 7313 16-Core Processor",
       "gpu_name": "NVIDIA L40S",
-      "slurm_hint": "sbatch --gres=gpu:<L40S gres type>:1 or --constraint=<L40S feature>"
+      "slurm_hint": "sbatch --partition=gpu --constraint=L40 --gres=gpu:1"
     },
     "cpu_fullnode_exclusive": {
-      "cpu_model": "",
-      "slurm_hint": "same node class as cpu_1core"
+      "cpu_model": "AMD EPYC 7313 16-Core Processor",
+      "slurm_hint": "sbatch --nodelist=n237 (or another verified AMD EPYC 7313 node)"
     }
   }
 }

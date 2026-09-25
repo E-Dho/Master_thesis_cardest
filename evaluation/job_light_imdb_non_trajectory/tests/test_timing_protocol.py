@@ -472,6 +472,29 @@ class TimingStageIntegrationTests(unittest.TestCase):
                          sorted([guard.cpu_model()["model_name"], "Other CPU"]))
         self.assertIn("NOT COMPARABLE", (self.root / "compare" / "comparison.md").read_text())
 
+    def test_legacy_timing_without_hardware_declaration_is_rejected(self):
+        config_path = self._config()
+        runs = [self._accuracy_run(config_path, seed) for seed in (0, 1)]
+        config = load_experiment_config(config_path)
+        directories = [
+            run_timing_stage(config, seed, run, "cpu_1core")
+            for seed, run in zip((0, 1), runs)
+        ]
+        for directory in directories:
+            path = directory / "timing_summary.json"
+            summary = json.loads(path.read_text())
+            summary.pop("hardware_class")
+            path.write_text(json.dumps(summary))
+
+        with self.assertRaisesRegex(ValueError, "different hardware within one profile"):
+            aggregate_runs(runs, self.root / "aggregate")
+        aggregate = aggregate_runs(
+            runs, self.root / "legacy", allow_hardware_mismatch=True
+        )
+        timing = aggregate["workloads"]["job_light"]["standardized_timing"]["cpu_1core"]
+        self.assertFalse(timing["hardware_declared"])
+        self.assertFalse(timing["hardware_consistent"])
+
     def test_unpinned_launch_is_refused(self):
         run = self._accuracy_run(self._config(), 0)
         os.sched_setaffinity(0, self.original_affinity)
