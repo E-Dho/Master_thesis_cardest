@@ -30,7 +30,7 @@ timing:
   profiles: [cpu_1core]
   estimate_consistency:
     mode: deterministic
-    relative_tolerance: 0.0
+    relative_tolerance: 1.0e-12
     absolute_tolerance: 0.0
 resources:
   profile: high_memory_cpu

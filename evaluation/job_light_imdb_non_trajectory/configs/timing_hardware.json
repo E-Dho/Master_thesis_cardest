@@ -5,7 +5,8 @@
     "timing stage (pre-flight in the launcher and runner, and inside every",
     "measuring process).  cpu_model is compared with /proc/cpuinfo 'model name',",
     "gpu_name with torch.cuda.get_device_name() / nvidia-smi: case-insensitive",
-    "after collapsing whitespace, 'regex:<pattern>' for a full regex match, or",
+    "after collapsing whitespace, 'regex:<pattern>' for a full regex match,",
+    "'allocated' to bind to the exact CPU selected by Slurm for that job, or",
     "'any' to disable one check explicitly.  An empty value blocks timing runs of",
     "that profile until the class is declared; the error message prints the",
     "hardware detected on the allocated node.  slurm_hint is documentation for",
@@ -14,12 +15,12 @@
   "schema_version": 1,
   "profiles": {
     "cpu_1core": {
-      "cpu_model": "AMD EPYC 7313 16-Core Processor",
-      "slurm_hint": "sbatch --nodelist=n237 (or another verified AMD EPYC 7313 node)"
+      "cpu_model": "allocated",
+      "slurm_hint": "scheduler-selected base node; exact CPU model is fixed and recorded after allocation"
     },
     "cpu_postgres_2core": {
-      "cpu_model": "AMD EPYC 7313 16-Core Processor",
-      "slurm_hint": "sbatch --nodelist=n237 (or another verified AMD EPYC 7313 node)"
+      "cpu_model": "allocated",
+      "slurm_hint": "scheduler-selected base node; exact CPU model is fixed and recorded after allocation"
     },
     "gpu_single_query": {
       "cpu_model": "AMD EPYC 7313 16-Core Processor",
@@ -27,8 +28,8 @@
       "slurm_hint": "sbatch --partition=gpu --constraint=L40 --gres=gpu:1"
     },
     "cpu_fullnode_exclusive": {
-      "cpu_model": "AMD EPYC 7313 16-Core Processor",
-      "slurm_hint": "sbatch --nodelist=n237 (or another verified AMD EPYC 7313 node)"
+      "cpu_model": "allocated",
+      "slurm_hint": "scheduler-selected exclusive base node; exact CPU model is fixed and recorded after allocation"
     }
   }
 }

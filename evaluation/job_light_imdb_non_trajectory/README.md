@@ -434,13 +434,14 @@ apart between processes before this change.
    consistency), keep the evaluate-stage table separately labelled, and write
    `timing.<profile>.*` CSV columns. Profiles missing for some seeds are listed
    as incomplete instead of being averaged.
-6. Hardware classes are enforced, not only recorded. `configs/timing_hardware.json`
-   declares one CPU model per profile and the GPU model of `gpu_single_query`
-   (`NVIDIA L40S`), shared by every method. The launcher and the runner check
-   the node before anything is measured, every measuring process checks again
-   (`cpu_model_matches`, `gpu_model_matches`), and the guard reports are
-   checked afterwards. All profiles currently declare
-   `AMD EPYC 7313 16-Core Processor` (CPU node n237). A profile whose class is left empty refuses to run, and the error prints
+6. Hardware classes are enforced, not only recorded. CPU profiles use the
+   allocation-bound class `allocated`: Slurm may choose any base node, after
+   which the launcher resolves and fixes its exact `/proc/cpuinfo` model for
+   every entry in that timing plan. `gpu_single_query` remains fixed to
+   `AMD EPYC 7313 16-Core Processor` plus `NVIDIA L40S`. The launcher and the
+   runner check the node before anything is measured, every measuring process
+   checks again (`cpu_model_matches`, `gpu_model_matches`), and guard reports
+   are checked afterwards. A profile whose class is left empty refuses to run, and the error prints
    the model detected on the allocated node. Values match case-insensitively;
    use `regex:<pattern>` for a family, or `any` to disable one check
    explicitly. `aggregate` rejects seeds timed on different hardware and
@@ -465,13 +466,12 @@ does not pass the batch value to `srun`). The launcher checks the step's CPU
 set, splits it into physical cores, and runs every entry of a plan file
 (`configs/timing_plan.example.txt`) back to back on the same node; for
 PostgreSQL it starts the server pinned to the second core and refuses if a
-server is already running outside the allocation. The node class is fixed in
-the scripts: the CPU profiles request `--nodelist=n237` (override on the
-command line with another verified EPYC 7313 node, e.g.
-`PLAN=plan.tsv sbatch --nodelist=<node> slurm/timing_cpu_1core.sbatch`), and
-the GPU profile requests `--constraint=L40` with an untyped `--gres=gpu:1`
-(see `slurm_hint` in `configs/timing_hardware.json`). A wrong node still fails
-in the pre-flight check within seconds.
+server is already running outside the allocation. CPU profiles let Slurm pick
+one base node and bind to its exact CPU model after allocation; every method
+listed in the plan therefore runs on the same fixed node. Aggregation and
+comparison still reject results whose resolved CPU models differ. The GPU
+profile requests `--constraint=L40` with an untyped `--gres=gpu:1` (see
+`slurm_hint` in `configs/timing_hardware.json`).
 
 **Shared PostgreSQL data directory.** `PGDATA` is on BeeGFS and visible from
 every node, but `pg_ctl status` and PostgreSQL's `postmaster.pid` check only

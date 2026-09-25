@@ -430,6 +430,7 @@ EXPECTED_HARDWARE_ENV = "JOBLIGHT_TIMING_EXPECTED_HARDWARE"
 HARDWARE_SPEC_ENV = "JOBLIGHT_TIMING_HARDWARE_SPEC"
 DEFAULT_HARDWARE_SPEC = Path(__file__).resolve().parents[1] / "configs" / "timing_hardware.json"
 ANY_HARDWARE = "any"
+ALLOCATED_HARDWARE = "allocated"
 
 
 class HardwareClassError(ValueError):
@@ -450,6 +451,9 @@ def expected_hardware(profile_id: str, path: Optional[Path] = None,
     ``cpu_model`` (and ``gpu_name`` for CUDA profiles) must be declared; a value
     is compared case-insensitively after collapsing whitespace, ``regex:<p>``
     must match fully, and ``any`` explicitly disables that check (recorded).
+    ``allocated`` binds the profile to the exact CPU model detected after Slurm
+    allocates one node. The resolved exact model is passed to every measuring
+    process and retained for aggregate/compare consistency checks.
     """
     import hashlib
 
@@ -471,19 +475,32 @@ def expected_hardware(profile_id: str, path: Optional[Path] = None,
     entry = (spec.get("profiles") or {}).get(profile_id)
     if not isinstance(entry, dict):
         raise HardwareClassError(f"{spec_path} declares no hardware class for {profile_id}{hint}")
-    cpu = str(entry.get("cpu_model") or "").strip()
+    configured_cpu = str(entry.get("cpu_model") or "").strip()
     gpu = str(entry.get("gpu_name") or "").strip()
-    missing = [] if cpu else ["cpu_model"]
+    missing = [] if configured_cpu else ["cpu_model"]
     if profile.device == "cuda" and not gpu:
         missing.append("gpu_name")
     if missing:
         raise HardwareClassError(
             f"{spec_path}: declare {', '.join(missing)} for profile {profile_id} "
-            f"(exact model string, 'regex:<pattern>', or 'any'){hint}"
+            f"(exact model string, 'regex:<pattern>', 'allocated', or 'any'){hint}"
         )
+    allocation_bound = _normalized(configured_cpu) == ALLOCATED_HARDWARE
+    if allocation_bound:
+        observed_cpu = str((detected or {}).get("cpu_model") or "").strip()
+        if not observed_cpu:
+            raise HardwareClassError(
+                f"{spec_path}: profile {profile_id} uses cpu_model 'allocated' but no "
+                "allocated-node CPU model was supplied"
+            )
+        cpu = observed_cpu
+    else:
+        cpu = configured_cpu
     return {
         "profile": profile_id,
         "cpu_model": cpu,
+        "configured_cpu_model": configured_cpu,
+        "allocation_bound_cpu_model": allocation_bound,
         "gpu_name": gpu if profile.device == "cuda" else None,
         "slurm_hint": entry.get("slurm_hint"),
         "spec_path": str(spec_path.resolve()),
@@ -657,6 +674,12 @@ class TimingSession:
             self._limiter = threadpoolctl.threadpool_limits(limits=self.compute_threads)
         except ImportError:
             pass
+        # Some adapters do not use PyTorch directly, but lazily imported model
+        # metadata can still load it after the timing session was configured.
+        # Configure that late import before the first guarded measurement.
+        torch = sys.modules.get("torch")
+        if torch is not None and self._torch is None:
+            self.configure_torch(torch)
 
     def note(self, **values: Any) -> None:
         self.notes.update(values)

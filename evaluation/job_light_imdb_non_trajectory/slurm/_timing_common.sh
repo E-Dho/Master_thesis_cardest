@@ -1,7 +1,7 @@
 # Shared settings for the profile-controlled timing launchers (sourced).
-# Every run of a table must use the same node class: the CPU scripts request
-# --nodelist=n237 and the GPU script --constraint=L40 (override on the command
-# line with another node of the declared class).
+# Every entry in one timing plan runs on the same allocated node. CPU profiles
+# let Slurm select a base node, then bind the profile to that node's exact CPU
+# model. The GPU profile requests --constraint=L40.
 # The class itself is declared in ../configs/timing_hardware.json and enforced
 # by the launcher; a node of another class fails before anything is timed.
 # and PLAN=<timing plan file>; see ../configs/timing_plan.example.txt.

@@ -146,6 +146,15 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertIn("cpu_to_wall_ratio", report["measurements"][0])
 
+    def test_verify_configures_torch_loaded_after_session_setup(self):
+        torch = _FakeTorch(threads=32, interop=32)
+        session = guard.TimingSession("cpu_1core")
+        session.configure()
+        with mock.patch.dict(sys.modules, {"torch": torch}):
+            self.assertTrue(session.verify("pre_timing")["passed"])
+        self.assertEqual(torch.get_num_threads(), 1)
+        self.assertEqual(torch.get_num_interop_threads(), 1)
+
     def test_oversized_blas_pool_is_a_hard_failure(self):
         with mock.patch.object(guard, "threadpool_snapshot",
                                return_value={"available": True, "pools": [{"internal_api": "mkl", "num_threads": 8}]}):
@@ -644,6 +653,25 @@ class ConfigProfileTests(unittest.TestCase):
         self.assertEqual(guard.hardware_violations(expected, "x", ["NVIDIA L40S"]), [])
         self.assertEqual(len(guard.hardware_violations(expected, "x", ["NVIDIA A100"])), 1)
         self.assertEqual(len(guard.hardware_violations(expected, "x", [])), 1)
+
+    def test_allocated_cpu_model_resolves_to_the_selected_node(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "hardware.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "profiles": {"cpu_1core": {"cpu_model": "allocated"}},
+            }))
+            expected = guard.expected_hardware(
+                "cpu_1core", path=path,
+                detected={"cpu_model": "Selected CPU", "gpu_names": []},
+            )
+            self.assertEqual(expected["cpu_model"], "Selected CPU")
+            self.assertEqual(expected["configured_cpu_model"], "allocated")
+            self.assertTrue(expected["allocation_bound_cpu_model"])
+            self.assertEqual(guard.hardware_violations(expected, "Selected CPU", None), [])
+            self.assertEqual(len(guard.hardware_violations(expected, "Other CPU", None)), 1)
+            with self.assertRaisesRegex(guard.HardwareClassError, "no allocated-node CPU"):
+                guard.expected_hardware("cpu_1core", path=path)
 
     def test_every_shipped_config_declares_compliant_profiles(self):
         from model.src.config import load_simple_yaml
