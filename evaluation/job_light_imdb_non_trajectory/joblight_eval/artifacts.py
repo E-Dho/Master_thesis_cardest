@@ -99,6 +99,7 @@ def run_manifest(config: ExperimentConfig, seed: int, run_directory: Path) -> di
         "adaptation": config.adaptation,
         "seed": seed,
         "config_hash": config.config_hash,
+        "accuracy_config_hash": config.accuracy_config_hash,
         "config_path": str(config.source_path),
         "source": config.source,
         "resource_profile": config.resources,

@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "One hardware class per timing profile, shared by every method so that a",
+    "profile table compares methods on identical hardware.  Enforced by the",
+    "timing stage (pre-flight in the launcher and runner, and inside every",
+    "measuring process).  cpu_model is compared with /proc/cpuinfo 'model name',",
+    "gpu_name with torch.cuda.get_device_name() / nvidia-smi: case-insensitive",
+    "after collapsing whitespace, 'regex:<pattern>' for a full regex match, or",
+    "'any' to disable one check explicitly.  An empty value blocks timing runs of",
+    "that profile until the class is declared; the error message prints the",
+    "hardware detected on the allocated node.  slurm_hint is documentation for",
+    "the matching sbatch --constraint/--gres (cluster specific)."
+  ],
+  "schema_version": 1,
+  "profiles": {
+    "cpu_1core": {
+      "cpu_model": "",
+      "slurm_hint": "sbatch --constraint=<feature of the CPU node class>"
+    },
+    "cpu_postgres_2core": {
+      "cpu_model": "",
+      "slurm_hint": "same node class as cpu_1core"
+    },
+    "gpu_single_query": {
+      "cpu_model": "",
+      "gpu_name": "NVIDIA L40S",
+      "slurm_hint": "sbatch --gres=gpu:<L40S gres type>:1 or --constraint=<L40S feature>"
+    },
+    "cpu_fullnode_exclusive": {
+      "cpu_model": "",
+      "slurm_hint": "same node class as cpu_1core"
+    }
+  }
+}

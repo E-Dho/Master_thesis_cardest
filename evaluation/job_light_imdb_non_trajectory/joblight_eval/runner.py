@@ -18,7 +18,7 @@ from .artifacts import (
     write_predictions,
     write_resolved_config,
 )
-from .config import ExperimentConfig
+from .config import ExperimentConfig, accuracy_config_hash
 from .metrics import attach_q_errors, summarize_latency, summarize_predictions
 from .records import LatencyRecord, PredictionRecord
 from .workloads import load_workload, sha256_file, workload_statistics
@@ -150,6 +150,14 @@ def run_stage(
     adapter = create_adapter(config, seed, run_directory)
     manifest_path = run_directory / "run_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("config_hash") != config.config_hash:
+        manifest.setdefault("timing_only_config_updates", []).append({
+            "stage": stage,
+            "config_hash": config.config_hash,
+            "accuracy_config_hash": config.accuracy_config_hash,
+            "config_path": str(config.source_path),
+            "at_utc": datetime.now(timezone.utc).isoformat(),
+        })
     if stage == "prepare":
         write_json(run_directory / "prepare_metrics.json", adapter.prepare().to_dict())
         manifest["status"] = "prepared"
@@ -238,8 +246,23 @@ def _assert_run_identity(
         manifest.get("variant_id"),
         int(manifest.get("seed")),
     )
-    if observed != expected or manifest.get("config_hash") != config.config_hash:
+    if observed != expected:
         raise ValueError("run directory identity does not match config and seed")
+    if manifest.get("config_hash") == config.config_hash:
+        return
+    # Timing-only config changes (e.g. timing profiles added after seed 0) do
+    # not change estimates; stages may continue under the updated config.
+    resolved = run_directory / "resolved_config.json"
+    run_accuracy_hash = (
+        accuracy_config_hash(json.loads(resolved.read_text(encoding="utf-8")))
+        if resolved.exists()
+        else manifest.get("accuracy_config_hash")
+    )
+    if run_accuracy_hash != config.accuracy_config_hash:
+        raise ValueError(
+            "run directory was created with a different non-timing configuration "
+            "(accuracy config hash differs); start a new run"
+        )
 
 
 def _read_stage_metrics(path: Path) -> dict[str, Any]:
@@ -266,6 +289,7 @@ def summarize_run(
         "adaptation": config.adaptation,
         "seed": seed,
         "config_hash": config.config_hash,
+        "accuracy_config_hash": config.accuracy_config_hash,
         "evaluation_detail": evaluation_detail or {},
         "workloads": {},
     }

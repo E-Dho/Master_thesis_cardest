@@ -263,8 +263,19 @@ class TimingStageIntegrationTests(unittest.TestCase):
         # One whole physical core: the first CPU and its SMT siblings.
         self.core = set(guard.thread_siblings(first)) & self.original_affinity
         os.sched_setaffinity(0, self.core)
-        self.environment = mock.patch.dict(os.environ, {guard.ALLOW_MISSING_THREADPOOLCTL_ENV: "1"})
+        self.hardware_spec = self.root / "timing_hardware.json"
+        self._declare_hardware(guard.cpu_model()["model_name"])
+        self.environment = mock.patch.dict(os.environ, {
+            guard.ALLOW_MISSING_THREADPOOLCTL_ENV: "1",
+            guard.HARDWARE_SPEC_ENV: str(self.hardware_spec),
+        })
         self.environment.start()
+
+    def _declare_hardware(self, cpu_model: str) -> None:
+        self.hardware_spec.write_text(json.dumps({"schema_version": 1, "profiles": {
+            "cpu_1core": {"cpu_model": cpu_model},
+            "gpu_single_query": {"cpu_model": cpu_model, "gpu_name": "NVIDIA L40S"},
+        }}))
 
     def tearDown(self):
         self.environment.stop()
@@ -367,6 +378,100 @@ class TimingStageIntegrationTests(unittest.TestCase):
         self.assertEqual(json.loads((directory / "timing_summary.json").read_text())["config_drift"],
                          ["adapter.evaluate_command"])
 
+    def test_timing_only_config_changes_still_aggregate(self):
+        config_path = self._config()
+        runs = [self._accuracy_run(config_path, seed) for seed in (0, 1)]
+        # seed 0 stands for a run made before the timing profiles existed
+        raw = json.loads((runs[0] / "resolved_config.json").read_text())
+        raw["timing"] = {"device": "cpu", "repetitions": 5}
+        raw["adapter"].pop("timing_commands")
+        (runs[0] / "resolved_config.json").write_text(json.dumps(raw))
+        summary = json.loads((runs[0] / "summary.json").read_text())
+        summary["config_hash"] = "pre-profile-hash"
+        (runs[0] / "summary.json").write_text(json.dumps(summary))
+        aggregate = aggregate_runs(runs, self.root / "aggregate")
+        self.assertIsNone(aggregate["config_hash"])
+        self.assertEqual(len(aggregate["config_hashes"]), 2)
+        self.assertEqual(aggregate["accuracy_config_hash"],
+                         load_experiment_config(config_path).accuracy_config_hash)
+        self.assertIn("timing.repetitions", aggregate["timing_only_config_differences"])
+        self.assertIn("adapter.timing_commands", aggregate["timing_only_config_differences"])
+        raw["adapter"]["evaluate_command"] = "echo other"
+        (runs[0] / "resolved_config.json").write_text(json.dumps(raw))
+        with self.assertRaisesRegex(ValueError, "adapter.evaluate_command"):
+            aggregate_runs(runs, self.root / "aggregate")
+
+    def test_stages_continue_under_timing_only_config_changes(self):
+        from evaluation.job_light_imdb_non_trajectory.joblight_eval.runner import (
+            _assert_run_identity, initialize_staged_run)
+
+        run = initialize_staged_run(load_experiment_config(self._config()), 0)
+        other = self.root / "retimed.yaml"
+        other.write_text(self._config().read_text().replace("repetitions: 2", "repetitions: 7"))
+        _assert_run_identity(load_experiment_config(other), 0, run)
+        other.write_text(self._config().read_text().replace("checkpoint: none", "checkpoint: other"))
+        with self.assertRaisesRegex(ValueError, "non-timing configuration"):
+            _assert_run_identity(load_experiment_config(other), 0, run)
+
+    def test_accuracy_hash_ignores_only_timing_keys(self):
+        base = load_experiment_config(self._config())
+        timed_differently = self._config().read_text().replace("repetitions: 2", "repetitions: 7")
+        other = self.root / "other.yaml"
+        other.write_text(timed_differently)
+        changed = load_experiment_config(other)
+        self.assertNotEqual(base.config_hash, changed.config_hash)
+        self.assertEqual(base.accuracy_config_hash, changed.accuracy_config_hash)
+        other.write_text(timed_differently.replace("checkpoint: none", "checkpoint: other"))
+        self.assertNotEqual(base.accuracy_config_hash, load_experiment_config(other).accuracy_config_hash)
+
+    def test_hardware_class_must_be_declared_and_matched(self):
+        run = self._accuracy_run(self._config(), 0)
+        config = load_experiment_config(self._config())
+        self._declare_hardware("")
+        with self.assertRaisesRegex(guard.HardwareClassError, "declare cpu_model.*detected here"):
+            run_timing_stage(config, 0, run, "cpu_1core")
+        self._declare_hardware("Imaginary CPU 9000")
+        with self.assertRaisesRegex(TimingProtocolError, "hardware class violated"):
+            run_timing_stage(config, 0, run, "cpu_1core")
+        self._declare_hardware("regex:.*")
+        directory = run_timing_stage(config, 0, run, "cpu_1core")
+        summary = json.loads((directory / "timing_summary.json").read_text())
+        self.assertEqual(summary["hardware_class"]["cpu_model"], "regex:.*")
+        checks = json.loads(next(directory.glob("*_timing_environment.json")).read_text())["checks"]
+        self.assertTrue(any(item["name"] == "cpu_model_matches" and item["passed"] for item in checks))
+
+    def test_hardware_mismatches_are_rejected_in_reports(self):
+        config_path = self._config()
+        runs = [self._accuracy_run(config_path, seed) for seed in (0, 1)]
+        config = load_experiment_config(config_path)
+        directories = [run_timing_stage(config, seed, run, "cpu_1core") for seed, run in zip((0, 1), runs)]
+        # seeds of one method on different CPUs
+        path = directories[1] / "timing_summary.json"
+        original = path.read_text()
+        summary = json.loads(original)
+        summary["workloads"]["job_light"]["guard"]["cpu_model"] = "Other CPU"
+        path.write_text(json.dumps(summary))
+        with self.assertRaisesRegex(ValueError, "different hardware within one profile"):
+            aggregate_runs(runs, self.root / "aggregate")
+        mixed = aggregate_runs(runs, self.root / "mixed", allow_hardware_mismatch=True)
+        self.assertIn("cpu_1core", mixed["hardware_mismatches"])
+        path.write_text(original)
+        aggregate_runs(runs, self.root / "aggregate")
+        # two methods measured on different CPUs
+        other = json.loads((self.root / "aggregate" / "comparison.json").read_text())
+        other["method_id"] = "other"
+        for workload in other["workloads"].values():
+            workload["standardized_timing"]["cpu_1core"]["cpu_models"] = ["Other CPU"]
+        other_path = self.root / "other.json"
+        other_path.write_text(json.dumps(other))
+        inputs = [self.root / "aggregate" / "comparison.json", other_path]
+        with self.assertRaisesRegex(ValueError, "different hardware"):
+            compare_aggregates(inputs, self.root / "compare")
+        comparison = compare_aggregates(inputs, self.root / "compare", allow_hardware_mismatch=True)
+        self.assertEqual(sorted(comparison["hardware_mismatches"]["cpu_1core"]),
+                         sorted([guard.cpu_model()["model_name"], "Other CPU"]))
+        self.assertIn("NOT COMPARABLE", (self.root / "compare" / "comparison.md").read_text())
+
     def test_unpinned_launch_is_refused(self):
         run = self._accuracy_run(self._config(), 0)
         os.sched_setaffinity(0, self.original_affinity)
@@ -374,6 +479,46 @@ class TimingStageIntegrationTests(unittest.TestCase):
             self.skipTest("needs at least two physical cores")
         with self.assertRaises(TimingProtocolError):
             run_timing_stage(load_experiment_config(self._config()), 0, run, "cpu_1core")
+
+
+class ModelCoreCoverageTests(unittest.TestCase):
+    @staticmethod
+    def _workload(latencies: int, core: int | None):
+        summary = {"inference": {"observation_count": latencies}}
+        if core is not None:
+            summary["model_core"] = {"observation_count": core, "coverage_fraction": core / latencies,
+                                     "mean_ms": 2.0, "p50_ms": 2.0, "p95_ms": 3.0, "p99_ms": 4.0}
+        return summary
+
+    def test_complete_coverage_is_reported(self):
+        from evaluation.job_light_imdb_non_trajectory.joblight_eval import report
+
+        core = report._aggregate_model_core([self._workload(10, 10), self._workload(10, 10)])
+        self.assertTrue(core["complete"])
+        self.assertEqual(core["metrics"]["mean_ms"]["mean"], 2.0)
+        self.assertTrue(report._model_core_cell({"model_core": core}).startswith("2 +/-"))
+
+    def test_partial_coverage_suppresses_the_mean(self):
+        from evaluation.job_light_imdb_non_trajectory.joblight_eval import report
+
+        core = report._aggregate_model_core([self._workload(1000, 197), self._workload(1000, 1000)])
+        self.assertFalse(core["complete"])
+        self.assertIsNone(core["metrics"])
+        self.assertAlmostEqual(core["coverage_fraction_min"], 0.197)
+        self.assertEqual(core["observation_counts"], [197, 1000])
+        self.assertEqual(report._model_core_cell({"model_core": core}), "suppressed: coverage 19.7%")
+        columns = report._timing_columns({"cpu_1core": {
+            "available": True, "metrics": {}, "model_core": core, "model_core_metrics": core["metrics"],
+            "cpu_models": ["c"], "gpu_names": [], "hardware_consistent": True}})
+        self.assertFalse(columns["timing.cpu_1core.model_core.complete"])
+        self.assertNotIn("timing.cpu_1core.model_core.mean_ms.mean", columns)
+
+    def test_missing_boundary_is_not_applicable(self):
+        from evaluation.job_light_imdb_non_trajectory.joblight_eval import report
+
+        core = report._aggregate_model_core([self._workload(10, None)])
+        self.assertFalse(core["exposed"])
+        self.assertEqual(report._model_core_cell({"model_core": core}), "n/a")
 
 
 class DeterminismTests(unittest.TestCase):
@@ -431,6 +576,19 @@ class ConfigProfileTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, message):
                     load_experiment_config(self._write(root, timing, adapter))
+
+    def test_shipped_hardware_classes_cover_every_profile(self):
+        spec = json.loads((ROOT / "configs" / "timing_hardware.json").read_text())
+        self.assertEqual(set(spec["profiles"]), set(guard.PROFILES))
+        self.assertTrue(spec["profiles"]["gpu_single_query"]["gpu_name"])
+        self.assertTrue(guard.hardware_matches("NVIDIA  l40s", "NVIDIA L40S"))
+        self.assertTrue(guard.hardware_matches("regex:.*EPYC.*", "AMD EPYC 7763 64-Core Processor"))
+        self.assertTrue(guard.hardware_matches("any", "whatever"))
+        self.assertFalse(guard.hardware_matches("NVIDIA L40S", "NVIDIA A100-SXM4-80GB"))
+        expected = {"profile": "gpu_single_query", "cpu_model": "any", "gpu_name": "NVIDIA L40S"}
+        self.assertEqual(guard.hardware_violations(expected, "x", ["NVIDIA L40S"]), [])
+        self.assertEqual(len(guard.hardware_violations(expected, "x", ["NVIDIA A100"])), 1)
+        self.assertEqual(len(guard.hardware_violations(expected, "x", [])), 1)
 
     def test_every_shipped_config_declares_compliant_profiles(self):
         from model.src.config import load_simple_yaml

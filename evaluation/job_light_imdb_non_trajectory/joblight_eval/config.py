@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -14,6 +15,16 @@ _SLUG = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 # "native": the method's published configuration.  "adapted": an explicitly
 # project-modified variant (e.g. extended schema); reports label it as such.
 PROTOCOLS = ("native", "adapted")
+# Config paths that only control latency measurement or presentation.  They are
+# removed before computing the accuracy hash, so runs whose configs differ only
+# here (e.g. a pre-profile seed-0 run and later seeds) share accuracy identity.
+TIMING_ONLY_CONFIG_PATHS = (
+    "timing",
+    "resources",
+    "adapter.timing_commands",
+    "adapter.supplementary_evaluate_commands",
+    "experiment.display_name",
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,8 @@ class ExperimentConfig:
     config_hash: str
     protocol: str = "native"
     adaptation: str = ""
+    #: hash of ``raw`` without TIMING_ONLY_CONFIG_PATHS (see accuracy_config_hash)
+    accuracy_config_hash: str = ""
 
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
@@ -131,8 +144,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     if timing_device == "cuda" and timing.get("synchronize_cuda") is not True:
         raise ValueError("CUDA timing must set timing.synchronize_cuda: true")
     _validate_timing_profiles(timing, _mapping(raw, "adapter"))
-    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
-    config_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    config_hash = canonical_hash(raw)
     return ExperimentConfig(
         source_path=source_path,
         experiment_id=experiment_id,
@@ -152,7 +164,38 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         config_hash=config_hash,
         protocol=protocol,
         adaptation=adaptation,
+        accuracy_config_hash=accuracy_config_hash(raw),
     )
+
+
+def canonical_hash(raw: Any) -> str:
+    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def strip_paths(raw: dict[str, Any], paths: Any = TIMING_ONLY_CONFIG_PATHS) -> dict[str, Any]:
+    """Deep copy of ``raw`` without the dotted ``paths``."""
+    stripped = copy.deepcopy(raw)
+    for path in paths:
+        node: Any = stripped
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict):
+            node.pop(parts[-1], None)
+    return stripped
+
+
+def accuracy_config_hash(raw: dict[str, Any]) -> str:
+    """Hash of everything that can influence estimates (timing-only keys removed).
+
+    ``raw`` is the resolved config (``ExperimentConfig.raw`` or a run's
+    ``resolved_config.json``), so the value can be recomputed for runs created
+    before this hash was recorded.
+    """
+    return canonical_hash(strip_paths(raw))
 
 
 IN_PROCESS_TIMING_ADAPTERS = ("postgres", "foj_sampling")

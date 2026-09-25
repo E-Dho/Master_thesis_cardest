@@ -19,7 +19,6 @@ Reuse is checked, not assumed:
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import math
@@ -27,31 +26,28 @@ import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from .adapters.registry import create_adapter
 from .artifacts import git_identity, read_predictions, write_json, write_latencies, write_predictions
-from .config import ExperimentConfig
+from .config import TIMING_ONLY_CONFIG_PATHS, ExperimentConfig, accuracy_config_hash, strip_paths  # noqa: F401 (re-exported)
 from .metrics import attach_q_errors, summarize_latency, summarize_model_core
 from .records import LatencyRecord, PredictionRecord
 from .timing_guard import (
+    EXPECTED_HARDWARE_ENV,
     LATENCY_DEFINITION,
     PROFILES,
     UNPINNED_DEBUG_ENV,
     environment_snapshot,
+    expected_hardware,
     get_profile,
+    hardware_violations,
     launch_violations,
+    nvidia_smi_gpu_names,
     profile_environment,
 )
 
 
-TIMING_ONLY_CONFIG_PATHS = (
-    "timing",
-    "resources",
-    "adapter.timing_commands",
-    "adapter.supplementary_evaluate_commands",
-    "experiment.display_name",
-)
 DEFAULT_CONSISTENCY = {"mode": "deterministic", "relative_tolerance": 1e-9, "absolute_tolerance": 0.0}
 ACCURACY_STATUSES = {"evaluated", "complete"}
 
@@ -83,20 +79,6 @@ def consistency_settings(config: ExperimentConfig) -> dict[str, Any]:
     settings["relative_tolerance"] = float(settings["relative_tolerance"])
     settings["absolute_tolerance"] = float(settings["absolute_tolerance"])
     return settings
-
-
-def strip_paths(raw: dict[str, Any], paths: Iterable[str] = TIMING_ONLY_CONFIG_PATHS) -> dict[str, Any]:
-    stripped = copy.deepcopy(raw)
-    for path in paths:
-        node: Any = stripped
-        parts = path.split(".")
-        for part in parts[:-1]:
-            node = node.get(part) if isinstance(node, dict) else None
-            if node is None:
-                break
-        if isinstance(node, dict):
-            node.pop(parts[-1], None)
-    return stripped
 
 
 def config_drift(before: Any, after: Any, prefix: str = "") -> list[str]:
@@ -229,6 +211,19 @@ def run_timing_stage(
     if violations and not debug_unpinned:
         raise TimingProtocolError("; ".join(violations))
 
+    # Hardware class: one declared CPU/GPU model per profile for all methods.
+    # Checked here before measuring, inside every measuring process, and again
+    # on the guard reports below.
+    launcher_snapshot = environment_snapshot()
+    cuda_profile = PROFILES[profile].device == "cuda"
+    smi_names = nvidia_smi_gpu_names() if cuda_profile else None
+    detected = {"cpu_model": launcher_snapshot["cpu"]["model_name"], "gpu_names": smi_names or []}
+    hardware = expected_hardware(profile, detected=detected)
+    preflight_expected = dict(hardware) if smi_names else {**hardware, "gpu_name": None}
+    hardware_problems = hardware_violations(preflight_expected, detected["cpu_model"], smi_names)
+    if hardware_problems and not debug_unpinned:
+        raise TimingProtocolError("hardware class violated: " + "; ".join(hardware_problems))
+
     commands = config.adapter.get("timing_commands", {}) or {}
     identity = json.dumps(
         {"profile": profile, "timing": config.timing,
@@ -247,16 +242,20 @@ def run_timing_stage(
         "latency_definition": LATENCY_DEFINITION,
         "timing_hash": timing_hash,
         "accuracy_run": str(run_directory),
-        "accuracy_config_hash": manifest.get("config_hash"),
+        "accuracy_run_config_hash": manifest.get("config_hash"),
+        "accuracy_config_hash": accuracy_config_hash(accuracy_raw),
         "current_config_hash": config.config_hash,
+        "current_accuracy_config_hash": config.accuracy_config_hash,
         "config_path": str(config.source_path),
         "config_drift": drift,
         "allowed_config_drift": list(allow_config_drift),
         "timing_config": config.timing,
         "timing_command": commands.get(profile) if isinstance(commands, dict) else None,
         "launch_violations": violations,
-        "debug_unpinned": bool(violations and debug_unpinned),
-        "launcher_snapshot": environment_snapshot(),
+        "hardware_class": hardware,
+        "hardware_violations": hardware_problems,
+        "debug_unpinned": bool((violations or hardware_problems) and debug_unpinned),
+        "launcher_snapshot": launcher_snapshot,
         "git": git_identity(config.source_path.parent),
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
     }
@@ -264,7 +263,19 @@ def run_timing_stage(
     failures: list[str] = []
     try:
         adapter = create_adapter(config, seed, run_directory)
-        outcome = adapter.time(profile, config.workloads, directory, profile_environment(profile))
+        expected_json = json.dumps(
+            {key: hardware[key] for key in ("profile", "cpu_model", "gpu_name")}, sort_keys=True
+        )
+        environment = {**profile_environment(profile), EXPECTED_HARDWARE_ENV: expected_json}
+        previous = os.environ.get(EXPECTED_HARDWARE_ENV)
+        os.environ[EXPECTED_HARDWARE_ENV] = expected_json  # in-process adapters
+        try:
+            outcome = adapter.time(profile, config.workloads, directory, environment)
+        finally:
+            if previous is None:
+                os.environ.pop(EXPECTED_HARDWARE_ENV, None)
+            else:
+                os.environ[EXPECTED_HARDWARE_ENV] = previous
         guards: dict[str, Any] = {}
         for workload_id, path in outcome.guard_reports.items():
             if not Path(path).exists():
@@ -277,6 +288,13 @@ def run_timing_stage(
                 failures.append(f"{workload_id}: guard ran profile {digest['profile']!r}")
             if not digest["passed"]:
                 failures.append(f"{workload_id}: timing guard failed {digest['hard_failures']}")
+            observed_problems = hardware_violations(
+                hardware, digest["cpu_model"], digest["gpu_names"] if cuda_profile else None
+            )
+            if observed_problems:
+                hardware_problems.extend(f"{workload_id}: {item}" for item in observed_problems)
+                if not debug_unpinned:
+                    failures.append(f"{workload_id}: hardware class violated: {observed_problems}")
         accuracy = read_predictions(run_directory / "predictions.csv")
         consistency = estimate_consistency(accuracy, outcome.predictions, consistency_settings(config))
         if not consistency["passed"] and not allow_estimate_drift:
@@ -311,10 +329,14 @@ def run_timing_stage(
             "report_table": PROFILES[profile].report_table,
             "latency_definition": LATENCY_DEFINITION,
             "status": status,
-            "reportable": status == "complete" and not timing_manifest["debug_unpinned"],
+            "reportable": (status == "complete" and not timing_manifest["debug_unpinned"]
+                           and not hardware_problems),
             "accuracy_run": str(run_directory),
-            "accuracy_config_hash": manifest.get("config_hash"),
+            "accuracy_run_config_hash": manifest.get("config_hash"),
+            "accuracy_config_hash": timing_manifest["accuracy_config_hash"],
             "config_drift": drift,
+            "hardware_class": hardware,
+            "hardware_violations": hardware_problems,
             "estimate_consistency": consistency,
             "estimate_drift_allowed": bool(allow_estimate_drift),
             "warmup_passes": int(config.timing.get("warmup_passes", 1)),

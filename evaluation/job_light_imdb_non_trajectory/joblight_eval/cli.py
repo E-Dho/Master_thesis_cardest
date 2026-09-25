@@ -43,16 +43,28 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--config", required=True, type=Path)
     aggregate.add_argument("--run-directory", action="append", type=Path)
     aggregate.add_argument("--output", type=Path)
+    aggregate.add_argument(
+        "--allow-hardware-mismatch", action="store_true",
+        help="aggregate seeds timed on different hardware (flagged in the report)",
+    )
     compare = subparsers.add_parser("compare", help="compare method/variant aggregates")
     compare.add_argument("--aggregate-json", action="append", required=True, type=Path)
     compare.add_argument("--output", required=True, type=Path)
+    compare.add_argument(
+        "--allow-hardware-mismatch", action="store_true",
+        help="write the comparison although methods were timed on different "
+        "hardware; affected tables are marked NOT COMPARABLE",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "compare":
-        compare_aggregates(args.aggregate_json, args.output)
+        compare_aggregates(
+            args.aggregate_json, args.output,
+            allow_hardware_mismatch=args.allow_hardware_mismatch,
+        )
         print(args.output)
         return 0
     config = load_experiment_config(args.config)
@@ -104,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     paths = args.run_directory or discover_latest_complete_runs(base, config.seeds)
     output = args.output or base / "aggregate"
-    aggregate_runs(paths, output)
+    aggregate_runs(paths, output, allow_hardware_mismatch=args.allow_hardware_mismatch)
     print(output)
     return 0
 

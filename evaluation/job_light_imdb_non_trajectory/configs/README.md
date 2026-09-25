@@ -86,3 +86,7 @@ commands receive the usual placeholders plus `{timing_directory}`,
 `{timing_environment_json}`, and `{profile}`; they must request the profile's
 device and one CPU thread. `timing_plan.example.txt` shows the plan format
 used by `../slurm/timing_*.sbatch`.
+`timing_hardware.json` declares the hardware class of each profile (one CPU
+model per profile, the GPU model of `gpu_single_query`) for all methods;
+timing runs refuse to start until the CPU models are filled in with the
+model the error message reports for the chosen node class.

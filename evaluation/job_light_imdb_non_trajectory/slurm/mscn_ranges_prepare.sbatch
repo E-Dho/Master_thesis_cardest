@@ -21,31 +21,12 @@ QUERY_COUNT=${QUERY_COUNT:-100000}
 
 cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
-STARTED_POSTGRES=0
-if "$PG_BIN/pg_ctl" -D "$PGDATA" -o "-k $SOCKET -p $PORT -c listen_addresses=''" -w start 2>/dev/null; then
-  STARTED_POSTGRES=1
-else
-  "$PG_BIN/pg_ctl" -D "$PGDATA" status
-fi
-cleanup() {
-  if [[ "$STARTED_POSTGRES" -eq 1 ]]; then
-    "$PG_BIN/pg_ctl" -D "$PGDATA" -m fast -w stop || true
-  fi
-}
-trap cleanup EXIT
+# Shared PGDATA: start/stop only under the cluster-visible lock.
+PG_LOCK_PYTHON=$PYTHON
+source "$REPO/evaluation/job_light_imdb_non_trajectory/slurm/_pg_lock.sh"
+trap stop_postgres_locked EXIT
+start_postgres_locked
 
-# pg_ctl can return after its fixed startup timeout while crash recovery is still
-# finishing on BeeGFS.  Do not hand work to psycopg until it accepts queries.
-for attempt in $(seq 1 180); do
-  if "$PG_BIN/pg_isready" -h "$SOCKET" -p "$PORT" -d imdb_joblight >/dev/null 2>&1; then
-    break
-  fi
-  if [[ "$attempt" -eq 180 ]]; then
-    echo "PostgreSQL did not become ready within 15 minutes" >&2
-    exit 1
-  fi
-  sleep 5
-done
 
 "$PYTHON" evaluation/job_light_imdb_non_trajectory/scripts/mscn_ranges_prepare.py \
   --dataset-root "$ROOT/datasets/job" \

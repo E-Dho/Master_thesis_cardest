@@ -4,8 +4,12 @@ import argparse
 import csv
 import json
 import subprocess
+import sys
 from itertools import islice
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pg_cluster_lock  # noqa: E402
 
 
 def main() -> int:
@@ -26,15 +30,28 @@ def main() -> int:
     initialize.add_argument("--row-limit", type=int)
     args = parser.parse_args()
 
-    _ensure_server(args)
-    if args.command == "initialize":
-        _initialize(args)
-    else:
-        _analyze(args)
+    # The data directory is shared between nodes: hold the cluster-visible lock
+    # while the server runs and stop the server this command started.
+    args.pgdata.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with pg_cluster_lock.held(args.pgdata, label=f"postgres_admin {args.command}"):
+            started = _ensure_server(args)
+            try:
+                if args.command == "initialize":
+                    _initialize(args)
+                else:
+                    _analyze(args)
+            finally:
+                if started:
+                    _run(args.pg_bin / "pg_ctl", "-D", args.pgdata, "-m", "fast", "-w", "stop")
+    except pg_cluster_lock.LockError as exc:
+        print(f"cannot lock {args.pgdata}: {exc}", file=sys.stderr)
+        return exc.exit_code
     return 0
 
 
-def _ensure_server(args) -> None:
+def _ensure_server(args) -> bool:
+    """Start the server if it is not running; True if this call started it."""
     args.pgdata.parent.mkdir(parents=True, exist_ok=True)
     args.socket_dir.mkdir(parents=True, exist_ok=True)
     if not (args.pgdata / "PG_VERSION").exists():
@@ -55,6 +72,8 @@ def _ensure_server(args) -> None:
             "-w",
             "start",
         )
+        return True
+    return False
 
 
 def _initialize(args) -> None:

@@ -16,6 +16,7 @@ first.  Plan format, one run per line (``#`` starts a comment)::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shlex
@@ -32,6 +33,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import _timing  # noqa: E402
+import pg_cluster_lock  # noqa: E402
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -64,6 +66,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     cores = guard.split_physical_cores(cpus)
     debug_unpinned = os.environ.get(guard.UNPINNED_DEBUG_ENV) == "1"
     client_cpus, server_cpus = _assign_cores(profile, cpus, cores, debug_unpinned)
+    hardware = _check_hardware(guard, profile, debug_unpinned)
     entries = _read_plan(args.plan)
     report_path = args.report or args.plan.with_name(
         f"{args.plan.stem}_{args.profile}_{os.environ.get('SLURM_JOB_ID', 'local')}.launch.json"
@@ -76,6 +79,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "client_cpus": guard.format_cpu_list(client_cpus),
         "server_cpus": guard.format_cpu_list(server_cpus) if server_cpus else None,
         "debug_unpinned": debug_unpinned,
+        "hardware_class": hardware,
         "snapshot": guard.environment_snapshot(),
         "entries": [],
     }
@@ -83,12 +87,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     environment.update(guard.profile_environment(args.profile, cpus=client_cpus))
     server = None
     exit_code = 0
+    locks = contextlib.ExitStack()
     try:
         if profile.server_physical_cores:
             if args.pg_log is None:
                 args.pg_log = report_path.with_suffix(".postgres.log")
             server = _PinnedPostgres(args, server_cpus)
             if not args.dry_run:
+                # PGDATA is shared (BeeGFS); pg_ctl status cannot see servers on
+                # other nodes, so the server is started only under the
+                # cluster-visible lock, held until it is stopped again.
+                try:
+                    lock = locks.enter_context(pg_cluster_lock.held(
+                        args.pgdata, label=f"timing_launch {args.profile}"))
+                except pg_cluster_lock.LockError as exc:
+                    raise SystemExit(f"cannot lock {args.pgdata}: {exc}")
+                if lock["mode"] != "owner":
+                    raise SystemExit("timing_launch must start its own pinned server; it cannot "
+                                     "run under another launcher's PostgreSQL lock")
+                report["postgres_lock"] = {key: lock["owner"].get(key) for key in
+                                           ("host", "holder_pid", "slurm_job_id", "acquired_at_utc",
+                                            "postmaster_note", "broke_stale_lock")}
                 server.start()
                 report["postgres"] = server.describe()
         for entry in entries:
@@ -124,8 +143,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     exit_code = 1
             report["entries"].append(result)
     finally:
-        if server is not None and server.started:
-            server.stop()
+        try:
+            if server is not None and server.started:
+                server.stop()
+        finally:
+            if server is None or not server.started:
+                locks.close()  # release only once the server is really down
+            else:
+                print("PostgreSQL did not stop; keeping the PGDATA lock until this job ends",
+                      file=sys.stderr)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n",
                                encoding="utf-8")
@@ -150,6 +176,24 @@ def _assign_cores(profile, cpus: List[int], cores: List[List[int]], debug_unpinn
     server_groups = cores[profile.client_physical_cores: required]
     server = [cpu for group in server_groups for cpu in group]
     return client, server
+
+
+def _check_hardware(guard, profile, debug_unpinned: bool) -> Dict[str, Any]:
+    """Fail before any server start or timing run if the node is not the declared class."""
+    gpu_names = guard.nvidia_smi_gpu_names() if profile.device == "cuda" else None
+    detected = {"cpu_model": guard.cpu_model()["model_name"], "gpu_names": gpu_names or []}
+    try:
+        expected = guard.expected_hardware(profile.profile_id, detected=detected)
+    except guard.HardwareClassError as exc:
+        raise SystemExit(str(exc))
+    checked = dict(expected) if gpu_names else {**expected, "gpu_name": None}
+    problems = guard.hardware_violations(checked, detected["cpu_model"], gpu_names)
+    if problems:
+        message = "hardware class violated: " + "; ".join(problems)
+        if not debug_unpinned:
+            raise SystemExit(message)
+        print(f"WARNING (debug, not reportable): {message}", file=sys.stderr)
+    return {**expected, "detected": detected, "violations": problems}
 
 
 def _affinity_setter(cpus: List[int]):
@@ -204,8 +248,14 @@ class _PinnedPostgres:
         options = [f"-k {self.args.socket_dir}", f"-p {self.args.port}", "-c listen_addresses=''",
                    "-c autovacuum=off", *[f"-c {option}" for option in self.args.pg_option]]
         self.args.pg_log.parent.mkdir(parents=True, exist_ok=True)
-        self._ctl("-o", " ".join(options), "-l", str(self.args.pg_log), "-w", "start", pinned=True)
+        # Marked started first: a start that times out may still be recovering
+        # and must be stopped before the lock is released.
         self.started = True
+        if self._ctl("-o", " ".join(options), "-l", str(self.args.pg_log), "-w", "-t", "900",
+                     "start", pinned=True, check=False).returncode:
+            if self._ctl("status", check=False).returncode:
+                self.started = False
+                raise SystemExit(f"PostgreSQL failed to start; see {self.args.pg_log}")
         for _ in range(120):
             ready = subprocess.run(
                 [str(self.args.pg_bin / "pg_isready"), "-h", str(self.args.socket_dir),
@@ -231,8 +281,11 @@ class _PinnedPostgres:
                 "options": ["autovacuum=off", *self.args.pg_option], "log": str(self.args.pg_log)}
 
     def stop(self) -> None:
-        self._ctl("-m", "fast", "-w", "stop", check=False)
-        self.started = False
+        if self._ctl("status", check=False).returncode:
+            self.started = False  # not running (any more)
+            return
+        if self._ctl("-m", "fast", "-w", "-t", "900", "stop", check=False).returncode == 0:
+            self.started = False
 
 
 if __name__ == "__main__":

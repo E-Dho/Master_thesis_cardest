@@ -14,6 +14,12 @@
 # GPU latency (profile gpu_single_query): one GPU (L40S), four pinned support
 # physical cores, PyTorch/BLAS CPU threads limited to one, synchronized CUDA
 # timing.  Reported in its own table, never mixed with CPU latency.
+#
+# --gres=gpu:1 does not select a GPU model.  Request the L40S at submission
+# (cluster-specific names; see slurm_hint in configs/timing_hardware.json):
+#   PLAN=... sbatch --gres=gpu:<l40s-type>:1 slurm/timing_gpu_single_query.sbatch
+# (or --constraint=<feature>).  The declared class (gpu_name "NVIDIA L40S"
+# and the node's cpu_model) is enforced: any other node fails before timing.
 
 set -euo pipefail
 source /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/slurm/_timing_common.sh

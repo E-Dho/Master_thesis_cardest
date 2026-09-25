@@ -8,7 +8,8 @@ from typing import Any, Iterable
 import numpy as np
 
 from .artifacts import write_json
-from .timing import load_timing_summaries
+from .config import accuracy_config_hash, strip_paths
+from .timing import config_drift, load_timing_summaries
 from .timing_guard import PROFILES
 
 
@@ -50,22 +51,39 @@ EVALUATE_STAGE_TIMING_NOTE = (
 )
 
 
-def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> dict[str, Any]:
+def aggregate_runs(
+    run_directories: Iterable[Path],
+    output_directory: Path,
+    *,
+    allow_hardware_mismatch: bool = False,
+) -> dict[str, Any]:
     directories = tuple(Path(path).resolve() for path in run_directories)
     if not directories:
         raise ValueError("at least one run directory is required")
     summaries = [_load_complete_summary(path) for path in directories]
+    resolved = [_resolved_config(path) for path in directories]
+    accuracy_hashes = [
+        _accuracy_hash(path, summary, raw)
+        for path, summary, raw in zip(directories, summaries, resolved)
+    ]
     identities = {
-        (item["experiment_id"], item["method_id"], item["variant_id"], item["config_hash"])
-        for item in summaries
+        (item["experiment_id"], item["method_id"], item["variant_id"], accuracy_hash)
+        for item, accuracy_hash in zip(summaries, accuracy_hashes)
     }
     if len(identities) != 1:
-        raise ValueError("only runs with identical method, variant, and config hash may aggregate")
+        raise ValueError(_identity_mismatch_message(directories, summaries, resolved, accuracy_hashes))
     seeds = [int(item["seed"]) for item in summaries]
     if len(set(seeds)) != len(seeds):
         raise ValueError("duplicate seed in aggregate input")
 
-    experiment_id, method_id, variant_id, config_hash = identities.pop()
+    experiment_id, method_id, variant_id, accuracy_hash = identities.pop()
+    config_hashes = sorted({str(item["config_hash"]) for item in summaries})
+    timing_only_differences = sorted({
+        path
+        for raw in resolved[1:]
+        if raw is not None and resolved[0] is not None
+        for path in config_drift(resolved[0], raw)
+    })
     timings = [load_timing_summaries(path) for path in directories]
     all_profiles = sorted({profile for timing in timings for profile in timing})
     complete_profiles = [
@@ -82,7 +100,12 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
         "display_name": summaries[0]["display_name"],
         "protocol": summaries[0].get("protocol", "native"),
         "adaptation": summaries[0].get("adaptation", ""),
-        "config_hash": config_hash,
+        # Seeds aggregate on the accuracy-only hash; full hashes may differ in
+        # timing-only keys (TIMING_ONLY_CONFIG_PATHS), which are listed here.
+        "accuracy_config_hash": accuracy_hash,
+        "config_hash": config_hashes[0] if len(config_hashes) == 1 else None,
+        "config_hashes": config_hashes,
+        "timing_only_config_differences": timing_only_differences,
         "seeds": sorted(seeds),
         "seed_count": len(seeds),
         "runs": [str(path) for path in directories],
@@ -99,6 +122,7 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
         "workloads": {},
     }
     rows: list[dict[str, Any]] = []
+    seed_hardware_mismatches: dict[str, list[dict[str, Any]]] = {}
     for workload_id in sorted(workload_ids):
         workload_result: dict[str, Any] = {
             "coverage_complete_all_seeds": True,
@@ -182,6 +206,12 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
             for profile in complete_profiles
         }
         aggregate["workloads"][workload_id] = workload_result
+        for profile, result in workload_result["standardized_timing"].items():
+            if result.get("available") and not result["hardware_consistent"]:
+                seed_hardware_mismatches.setdefault(profile, []).append(
+                    {"workload": workload_id, "cpu_models": result["cpu_models"],
+                     "gpu_names": result["gpu_names"], "declared_hardware": result["declared_hardware"]}
+                )
         row: dict[str, Any] = {
             "experiment_id": experiment_id,
             "method_id": method_id,
@@ -208,6 +238,14 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
         row.update(_timing_columns(workload_result["standardized_timing"]))
         rows.append(row)
 
+    if seed_hardware_mismatches and not allow_hardware_mismatch:
+        raise ValueError(
+            "seeds were timed on different hardware within one profile: "
+            + json.dumps(seed_hardware_mismatches, sort_keys=True)
+            + "; rerun timing on the declared class or pass --allow-hardware-mismatch"
+        )
+    aggregate["hardware_mismatches"] = seed_hardware_mismatches
+    aggregate["hardware_mismatch_allowed"] = bool(seed_hardware_mismatches)
     output_directory.mkdir(parents=True, exist_ok=True)
     write_json(output_directory / "comparison.json", aggregate)
     _write_csv(output_directory / "comparison.csv", rows)
@@ -218,7 +256,10 @@ def aggregate_runs(run_directories: Iterable[Path], output_directory: Path) -> d
 
 
 def compare_aggregates(
-    aggregate_paths: Iterable[Path], output_directory: Path
+    aggregate_paths: Iterable[Path],
+    output_directory: Path,
+    *,
+    allow_hardware_mismatch: bool = False,
 ) -> dict[str, Any]:
     paths = tuple(Path(path).resolve() for path in aggregate_paths)
     if not paths:
@@ -260,19 +301,50 @@ def compare_aggregates(
             row["standardized_timing"] = workload.get("standardized_timing", {})
             row.update(_timing_columns(row["standardized_timing"]))
             rows.append(row)
+    mismatches = hardware_mismatches(rows)
+    if mismatches and not allow_hardware_mismatch:
+        raise ValueError(
+            "standardized latency of different methods was measured on different hardware: "
+            + json.dumps(mismatches, sort_keys=True)
+            + "; time every method on the declared hardware class "
+            "(configs/timing_hardware.json) or pass --allow-hardware-mismatch "
+            "to write a report that marks these tables as not comparable"
+        )
     comparison = {
         "schema_version": 1,
         "aggregate_count": len(aggregates),
         "inputs": [str(path) for path in paths],
+        "hardware_mismatches": mismatches,
+        "hardware_mismatch_allowed": bool(mismatches),
         "results": rows,
     }
     output_directory.mkdir(parents=True, exist_ok=True)
     write_json(output_directory / "comparison.json", comparison)
     _write_csv(output_directory / "comparison.csv", rows)
     (output_directory / "comparison.md").write_text(
-        _multi_method_markdown(rows), encoding="utf-8"
+        _multi_method_markdown(rows, mismatches), encoding="utf-8"
     )
     return comparison
+
+
+def hardware_mismatches(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[str]]]:
+    """Per profile: observed hardware -> rows, when rows do not share one class."""
+    result: dict[str, dict[str, list[str]]] = {}
+    for profile in PROFILES:
+        classes: dict[str, list[str]] = {}
+        for row in rows:
+            timing = (row.get("standardized_timing") or {}).get(profile)
+            if not (timing and timing.get("available")):
+                continue
+            key = "; ".join(timing["cpu_models"] + timing["gpu_names"]) or "unknown"
+            if not timing.get("hardware_consistent", False):
+                key += " (MIXED across seeds)"
+            classes.setdefault(key, []).append(
+                f"{row['method_id']}/{row['variant_id']}/{row['workload']}"
+            )
+        if len(classes) > 1 or any(key.endswith("(MIXED across seeds)") for key in classes):
+            result[profile] = classes
+    return result
 
 
 def discover_latest_complete_runs(config_root: Path, seeds: Iterable[int]) -> list[Path]:
@@ -285,6 +357,46 @@ def discover_latest_complete_runs(config_root: Path, seeds: Iterable[int]) -> li
             raise FileNotFoundError(f"no complete run found under {parent}")
         result.append(selected)
     return result
+
+
+def _resolved_config(path: Path) -> dict[str, Any] | None:
+    resolved = path / "resolved_config.json"
+    if not resolved.exists():
+        return None
+    return json.loads(resolved.read_text(encoding="utf-8"))
+
+
+def _accuracy_hash(path: Path, summary: dict[str, Any], raw: dict[str, Any] | None) -> str:
+    """Accuracy-only config hash of a run, recomputed from its resolved config.
+
+    Recomputing (rather than trusting the recorded value) applies the current
+    TIMING_ONLY_CONFIG_PATHS uniformly to runs created before the hash existed.
+    """
+    if raw is not None:
+        return accuracy_config_hash(raw)
+    recorded = summary.get("accuracy_config_hash")
+    if recorded:
+        return str(recorded)
+    # Neither available: fall back to the full hash, i.e. the strict pre-hash rule.
+    return f"full:{summary['config_hash']}"
+
+
+def _identity_mismatch_message(
+    directories: tuple[Path, ...],
+    summaries: list[dict[str, Any]],
+    resolved: list[dict[str, Any] | None],
+    accuracy_hashes: list[str],
+) -> str:
+    lines = ["only runs with identical method, variant, and accuracy config hash may aggregate"]
+    reference = resolved[0]
+    for path, summary, raw, accuracy_hash in zip(directories, summaries, resolved, accuracy_hashes):
+        identity = (summary["experiment_id"], summary["method_id"], summary["variant_id"])
+        detail = f"  {path}: {identity} accuracy_hash={accuracy_hash[:16]}"
+        if reference is not None and raw is not None and accuracy_hash != accuracy_hashes[0]:
+            differing = config_drift(strip_paths(reference), strip_paths(raw))
+            detail += " non-timing differences to the first run: " + ", ".join(differing[:20])
+        lines.append(detail)
+    return "\n".join(lines)
 
 
 def _load_complete_summary(path: Path) -> dict[str, Any]:
@@ -332,6 +444,14 @@ def _aggregate_profile(
     cpu_models = sorted({guard.get("cpu_model") or "unknown" for guard in guards})
     gpu_names = sorted({name for guard in guards for name in guard.get("gpu_names", [])})
     nodes = sorted({guard.get("node") or "unknown" for guard in guards})
+    declared = sorted({
+        json.dumps(
+            {key: (summary.get("hardware_class") or {}).get(key) for key in ("cpu_model", "gpu_name")},
+            sort_keys=True,
+        )
+        for summary in summaries
+    })
+    model_core = _aggregate_model_core(workloads)
     result: dict[str, Any] = {
         "available": True,
         "report_table": PROFILES[profile].report_table,
@@ -340,19 +460,21 @@ def _aggregate_profile(
             name: _mean_std([workload["inference"].get(name) for workload in workloads])
             for name in LATENCY_METRICS
         },
-        "model_core_metrics": (
-            {
-                name: _mean_std([workload["model_core"].get(name) for workload in workloads])
-                for name in MODEL_CORE_METRICS
-            }
-            if all(workload.get("model_core") for workload in workloads)
-            else None
-        ),
+        "model_core": model_core,
+        # Only populated when every timed query of every seed has a model-core
+        # observation; partial coverage would silently average a subset.
+        "model_core_metrics": model_core["metrics"],
         "scopes": sorted({scope for workload in workloads for scope in workload.get("scopes", [])}),
         "cpu_models": cpu_models,
         "gpu_names": gpu_names,
         "nodes": nodes,
-        "hardware_consistent": len(cpu_models) == 1 and len(gpu_names) <= 1,
+        "declared_hardware": [json.loads(item) for item in declared],
+        "hardware_declared": all(summary.get("hardware_class") for summary in summaries),
+        # identical observed CPU model, at most one GPU model, one declared class
+        "hardware_consistent": (
+            len(cpu_models) == 1 and "unknown" not in cpu_models
+            and len(gpu_names) <= 1 and len(declared) == 1
+        ),
         "guard_warning_count": sum(len(guard.get("warnings", [])) for guard in guards),
         "estimate_consistency": [
             {
@@ -369,6 +491,58 @@ def _aggregate_profile(
     return result
 
 
+def _aggregate_model_core(workloads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Model-core latency across seeds, with its query coverage.
+
+    Means are reported only when coverage is complete in every seed (each
+    latency observation has a model-core value); otherwise the metric is
+    suppressed and only the coverage is shown.
+    """
+    cores = [workload.get("model_core") or None for workload in workloads]
+    latency_counts = [int(workload["inference"].get("observation_count") or 0) for workload in workloads]
+    core_counts = [int(core.get("observation_count") or 0) if core else 0 for core in cores]
+    coverage = [
+        (count / total) if total else 0.0 for count, total in zip(core_counts, latency_counts)
+    ]
+    exposed = any(core is not None for core in cores)
+    complete = exposed and all(
+        core is not None and total > 0 and count == total
+        for core, count, total in zip(cores, core_counts, latency_counts)
+    )
+    if not exposed:
+        reason = "method exposes no model-core boundary"
+    elif not complete:
+        reason = f"partial coverage (min {min(coverage):.1%} of timed queries); mean suppressed"
+    else:
+        reason = None
+    return {
+        "exposed": exposed,
+        "complete": complete,
+        "coverage_fraction_min": min(coverage) if coverage else 0.0,
+        "coverage_fraction_mean": float(np.mean(coverage)) if coverage else 0.0,
+        "observation_counts": core_counts,
+        "latency_observation_counts": latency_counts,
+        "metrics": (
+            {name: _mean_std([core.get(name) for core in cores]) for name in MODEL_CORE_METRICS}
+            if complete
+            else None
+        ),
+        "suppressed_reason": reason,
+    }
+
+
+def _model_core_cell(result: dict[str, Any]) -> str:
+    core = result.get("model_core")
+    if core is None:  # aggregates written before coverage was tracked
+        metrics = result.get("model_core_metrics")
+        return _format_mean_std(metrics["mean_ms"]) + " (coverage unknown)" if metrics else "n/a"
+    if core["complete"]:
+        return _format_mean_std(core["metrics"]["mean_ms"])
+    if not core["exposed"]:
+        return "n/a"
+    return f"suppressed: coverage {core['coverage_fraction_min']:.1%}"
+
+
 def _timing_columns(standardized: dict[str, Any]) -> dict[str, Any]:
     columns: dict[str, Any] = {}
     for profile, result in sorted(standardized.items()):
@@ -377,6 +551,10 @@ def _timing_columns(standardized: dict[str, Any]) -> dict[str, Any]:
         for name, metric in result["metrics"].items():
             columns[f"timing.{profile}.{name}.mean"] = metric["mean"]
             columns[f"timing.{profile}.{name}.std"] = metric["std"]
+        core = result.get("model_core") or {}
+        if core.get("exposed"):
+            columns[f"timing.{profile}.model_core.complete"] = core["complete"]
+            columns[f"timing.{profile}.model_core.coverage_fraction_min"] = core["coverage_fraction_min"]
         if result.get("model_core_metrics"):
             for name, metric in result["model_core_metrics"].items():
                 columns[f"timing.{profile}.model_core.{name}.mean"] = metric["mean"]
@@ -398,7 +576,6 @@ def _profile_table_lines(entries: list[tuple[list[str], dict[str, Any]]], identi
         hardware = "; ".join(result["cpu_models"] + result["gpu_names"])
         if not result["hardware_consistent"]:
             hardware += " (MIXED)"
-        core = result.get("model_core_metrics")
         checks = result["estimate_consistency"]
         consistency = (
             f"{checks[0]['mode']}, max rel. diff "
@@ -409,7 +586,7 @@ def _profile_table_lines(entries: list[tuple[list[str], dict[str, Any]]], identi
             identity
             + [hardware]
             + [_format_mean_std(result["metrics"][name]) for name in LATENCY_METRICS]
-            + [_format_mean_std(core["mean_ms"]) if core else "n/a", consistency]
+            + [_model_core_cell(result), consistency]
         ) + " |")
     return lines
 
@@ -444,6 +621,13 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
     if aggregate.get("adaptation"):
         lines.extend(["", f"Adaptation: {aggregate['adaptation']}"])
     lines.extend(["", "Values are mean +/- sample standard deviation across seed-level summaries."])
+    lines.extend(["", f"Accuracy config hash: `{str(aggregate.get('accuracy_config_hash', ''))[:16]}`"])
+    if aggregate.get("timing_only_config_differences"):
+        lines.extend(["", "Seed configs differ only in timing-only keys: "
+                      + ", ".join(f"`{path}`" for path in aggregate["timing_only_config_differences"])])
+    if aggregate.get("hardware_mismatches"):
+        lines.extend(["", "**WARNING:** seeds were timed on different hardware in profiles "
+                      + ", ".join(sorted(aggregate["hardware_mismatches"])) + "."])
     for workload_id, workload in aggregate["workloads"].items():
         metrics = workload["metrics"]
         coverage = "complete" if workload["coverage_complete_all_seeds"] else "incomplete"
@@ -521,7 +705,10 @@ def _format_mean_std(metric: dict[str, float | None]) -> str:
     return f"{metric['mean']:.4g} +/- {metric['std']:.3g}"
 
 
-def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
+def _multi_method_markdown(
+    rows: list[dict[str, Any]], mismatches: dict[str, dict[str, list[str]]] | None = None
+) -> str:
+    mismatches = mismatches or {}
     lines = [
         "# JOB-light method comparison",
         "",
@@ -568,6 +755,13 @@ def _multi_method_markdown(rows: list[dict[str, Any]]) -> str:
                 absent.append(" / ".join(identity[:2] + identity[4:]))
         lines.extend(["", f"## Standardized latency: {PROFILES[profile].report_table} (`{profile}`)", "",
                       PROFILES[profile].description + ".", ""])
+        if profile in mismatches:
+            lines.extend([
+                "**WARNING: NOT COMPARABLE.** Rows of this table were measured on different "
+                "hardware (report written with --allow-hardware-mismatch):", "",
+                *[f"- {hardware}: {', '.join(names)}" for hardware, names in sorted(mismatches[profile].items())],
+                "",
+            ])
         lines.extend(_profile_table_lines(entries, ["Method", "Variant", "Display name", "Protocol", "Workload"]))
         if absent:
             lines.extend(["", "Not measured under this profile: " + "; ".join(absent)])

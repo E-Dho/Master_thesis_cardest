@@ -402,9 +402,15 @@ apart between processes before this change.
 2. `cli time --config C --seed S --run-directory RUN --profile P` re-measures an
    evaluated run without rebuilding. It refuses if the run's resolved config
    differs from `C` outside timing-only keys (`timing`, `resources`,
-   `adapter.timing_commands`, `experiment.display_name`) unless each
+   `adapter.timing_commands`, `adapter.supplementary_evaluate_commands`,
+   `experiment.display_name`; `config.TIMING_ONLY_CONFIG_PATHS`) unless each
    difference is passed via `--allow-config-drift` (recorded), and refuses an
-   allocation that does not match the profile.
+   allocation that does not match the profile or the declared hardware class.
+   The hash of the config without these keys is the *accuracy config hash*
+   (`accuracy_config_hash` in manifests and summaries); staged stages
+   (`evaluate`, `summarize`, ...) of an existing run also accept a config that
+   differs only in timing-only keys and log it under
+   `timing_only_config_updates` in the run manifest.
 3. The runner exports the profile's thread-limit environment before the
    measuring process starts. The measuring process (bridge, eval runner, or the
    in-process PostgreSQL/FOJ adapter) loads `joblight_eval/timing_guard.py`,
@@ -412,19 +418,40 @@ apart between processes before this change.
    before and after the timed region. Hard checks: thread-limit variables,
    threadpoolctl BLAS pools, PyTorch threads, CPU affinity in physical cores,
    SMT sibling ownership by the Slurm job cgroup, CUDA visibility, unexpected
-   child processes, and for PostgreSQL the backend's pinning and disjointness
-   from the client. The raw OS thread count (with thread names) and the
+   child processes, the declared CPU/GPU model, and for PostgreSQL the
+   backend's pinning and disjointness from the client. The raw OS thread count (with thread names) and the
    CPU-time/wall-time ratio are recorded and only warn.
 4. Results go to `RUN/timing/<profile>/<utc>-<hash>/` (`timing_manifest.json`,
    `timing_summary.json`, `latency.csv` with a `profile` column,
    `predictions.csv`, per-workload guard reports, logs). The timing run's
    estimates are compared with the accuracy run; a deterministic method that
    disagrees fails unless `--allow-estimate-drift` is given.
-5. `aggregate` and `compare` add one table per profile (with CPU/GPU model,
-   a `MIXED` flag when seeds ran on different hardware, and the estimate
+5. `aggregate` groups seeds by method, variant, and accuracy config hash
+   (recomputed from each run's `resolved_config.json`), so a pre-profile seed-0
+   run aggregates with later seeds; the full hashes and the timing-only keys in
+   which the seed configs differ are listed in the aggregate. `aggregate` and
+   `compare` add one table per profile (with CPU/GPU model and the estimate
    consistency), keep the evaluate-stage table separately labelled, and write
    `timing.<profile>.*` CSV columns. Profiles missing for some seeds are listed
    as incomplete instead of being averaged.
+6. Hardware classes are enforced, not only recorded. `configs/timing_hardware.json`
+   declares one CPU model per profile and the GPU model of `gpu_single_query`
+   (`NVIDIA L40S`), shared by every method. The launcher and the runner check
+   the node before anything is measured, every measuring process checks again
+   (`cpu_model_matches`, `gpu_model_matches`), and the guard reports are
+   checked afterwards. The CPU models are intentionally left empty: timing
+   refuses to run until they are declared, and the error prints the model
+   detected on the allocated node. Values match case-insensitively; use
+   `regex:<pattern>` for a family, or `any` to disable one check explicitly.
+   `aggregate` rejects seeds timed on different hardware, and `compare`
+   rejects a profile table whose methods were timed on different hardware;
+   `--allow-hardware-mismatch` writes the report anyway with the table marked
+   **NOT COMPARABLE**.
+7. Model-core latency is shown only with complete coverage. Its query coverage
+   (`model_core.coverage_fraction_min`, observation counts) is aggregated;
+   when any seed lacks a model-core value for some timed queries (e.g. native
+   DeepDB's unsupported queries) the mean is suppressed and the table shows
+   `suppressed: coverage x%`.
 
 **Launching.** `slurm/timing_{cpu_1core,cpu_postgres_2core,gpu_single_query,cpu_fullnode_exclusive}.sbatch`
 run `scripts/timing_launch.py` under `srun --cpu-bind=cores` (with
@@ -434,7 +461,28 @@ set, splits it into physical cores, and runs every entry of a plan file
 (`configs/timing_plan.example.txt`) back to back on the same node; for
 PostgreSQL it starts the server pinned to the second core and refuses if a
 server is already running outside the allocation. Fix the node class at
-submission, e.g. `PLAN=plan.tsv sbatch --constraint=<feature> slurm/timing_cpu_1core.sbatch`.
+submission, e.g. `PLAN=plan.tsv sbatch --constraint=<feature> slurm/timing_cpu_1core.sbatch`,
+and for the GPU profile request the L40S explicitly
+(`sbatch --gres=gpu:<L40S gres type>:1 ...` or its `--constraint`; the names
+are cluster specific, see `slurm_hint` in `configs/timing_hardware.json`). A
+wrong node fails in the pre-flight check within seconds.
+
+**Shared PostgreSQL data directory.** `PGDATA` is on BeeGFS and visible from
+every node, but `pg_ctl status` and PostgreSQL's `postmaster.pid` check only
+see local processes, so a server on another node looks stopped. Every launcher
+(`timing_launch.py`, `postgres_admin.py`, and the sbatch scripts through
+`slurm/_pg_lock.sh`) therefore starts, uses, and stops the server only while
+holding `scripts/pg_cluster_lock.py`'s lock: an atomic `mkdir` of
+`.<pgdata>.joblight-lock` beside `PGDATA` with an `owner.json` (host, PID and
+start time, Slurm job, token). A lock is broken only when its holder is
+provably gone (same host and PID dead, or its Slurm job no longer in
+`squeue`); an existing `postmaster.pid` is accepted only when left by such a
+dead holder, otherwise the launcher refuses (exit 4) and explains how to
+verify and override (`JOBLIGHT_PG_ASSUME_STALE_POSTMASTER=1`). Jobs that find
+the lock held fail fast (exit 3) unless `JOBLIGHT_PG_LOCK_WAIT_SECONDS` is set;
+`pg_cluster_lock.py status --pgdata ...` shows the holder. Child processes
+inherit `JOBLIGHT_PG_LOCK_TOKEN` and re-enter the lock. If a server cannot be
+stopped the lock is kept until the job ends (Slurm then kills the server).
 Every interpreter that measures needs `threadpoolctl` (present in the DeepDB
 environment through scikit-learn; install `threadpoolctl==3.5.0` into the
 learned-gpu environment and into `python_packages` for the geo-mlp CLI, which
@@ -443,9 +491,11 @@ measures PostgreSQL and FOJ sampling in-process). Setting
 allocation, but such results are marked not reportable.
 
 **Reusing completed runs.** Accuracy runs and checkpoints are reused; only
-timing is rerun. DeepDB (native and adapted) additionally needs its
-`evaluate` and `summarize` stages rerun once, because the expectation-cache
-and hash-seed fixes change a small number of its estimates (no rebuild).
+timing is rerun, and seeds whose configs differ only in timing-only keys
+aggregate together. DeepDB (native and adapted) additionally needs its
+`evaluate` and `summarize` stages rerun once in the existing run directories,
+because the expectation-cache and hash-seed fixes change a small number of its
+estimates (no rebuild).
 
 ### Evaluate-stage device context (hardware-aligned)
 

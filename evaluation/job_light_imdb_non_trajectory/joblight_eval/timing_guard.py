@@ -19,8 +19,9 @@ measuring process starts (so thread limits exist before numpy/torch load),
 and the measuring process calls ``TimingSession`` to re-apply, verify, and
 record everything.  Hard checks: thread-limit variables, threadpoolctl BLAS
 pools, PyTorch intra-/inter-op threads, CPU affinity in physical cores, SMT
-sibling ownership, CUDA visibility, and unexpected child processes.  The raw
-OS thread count and the CPU-time/wall-time ratio are recorded and only warn.
+sibling ownership, CUDA visibility, unexpected child processes, and the
+declared hardware class (CPU model, GPU model; ``configs/timing_hardware.json``).
+The raw OS thread count and the CPU-time/wall-time ratio are recorded and only warn.
 
 This module is deliberately standalone (standard library only at import
 time, Python >= 3.7) because it is loaded by file path from legacy method
@@ -33,7 +34,9 @@ import contextlib
 import json
 import os
 import platform
+import re
 import socket
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -417,6 +420,129 @@ def profile_environment(profile_id: str, cpus: Optional[Sequence[int]] = None,
 UNPINNED_DEBUG_ENV = "JOBLIGHT_TIMING_ALLOW_UNPINNED"
 
 
+# ---------------------------------------------------------------------------
+# hardware class
+# ---------------------------------------------------------------------------
+
+#: JSON {"profile": ..., "cpu_model": ..., "gpu_name": ...} exported by the runner
+EXPECTED_HARDWARE_ENV = "JOBLIGHT_TIMING_EXPECTED_HARDWARE"
+#: overrides the default hardware-class file
+HARDWARE_SPEC_ENV = "JOBLIGHT_TIMING_HARDWARE_SPEC"
+DEFAULT_HARDWARE_SPEC = Path(__file__).resolve().parents[1] / "configs" / "timing_hardware.json"
+ANY_HARDWARE = "any"
+
+
+class HardwareClassError(ValueError):
+    """The hardware class of a profile is not declared or malformed."""
+
+
+def hardware_spec_path(path: Optional[Path] = None) -> Path:
+    if path is not None:
+        return Path(path)
+    override = os.environ.get(HARDWARE_SPEC_ENV)
+    return Path(override) if override else DEFAULT_HARDWARE_SPEC
+
+
+def expected_hardware(profile_id: str, path: Optional[Path] = None,
+                      detected: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Declared hardware class of one profile (one class per profile, all methods).
+
+    ``cpu_model`` (and ``gpu_name`` for CUDA profiles) must be declared; a value
+    is compared case-insensitively after collapsing whitespace, ``regex:<p>``
+    must match fully, and ``any`` explicitly disables that check (recorded).
+    """
+    import hashlib
+
+    profile = get_profile(profile_id)
+    spec_path = hardware_spec_path(path)
+    hint = ""
+    if detected:
+        hint = f" (detected here: cpu_model={detected.get('cpu_model')!r}"
+        if detected.get("gpu_names"):
+            hint += f", gpu_names={list(detected['gpu_names'])!r}"
+        hint += ")"
+    if not spec_path.exists():
+        raise HardwareClassError(f"hardware class file {spec_path} is missing{hint}")
+    data = spec_path.read_bytes()
+    try:
+        spec = json.loads(data.decode("utf-8"))
+    except ValueError as exc:
+        raise HardwareClassError(f"{spec_path} is not valid JSON: {exc}") from exc
+    entry = (spec.get("profiles") or {}).get(profile_id)
+    if not isinstance(entry, dict):
+        raise HardwareClassError(f"{spec_path} declares no hardware class for {profile_id}{hint}")
+    cpu = str(entry.get("cpu_model") or "").strip()
+    gpu = str(entry.get("gpu_name") or "").strip()
+    missing = [] if cpu else ["cpu_model"]
+    if profile.device == "cuda" and not gpu:
+        missing.append("gpu_name")
+    if missing:
+        raise HardwareClassError(
+            f"{spec_path}: declare {', '.join(missing)} for profile {profile_id} "
+            f"(exact model string, 'regex:<pattern>', or 'any'){hint}"
+        )
+    return {
+        "profile": profile_id,
+        "cpu_model": cpu,
+        "gpu_name": gpu if profile.device == "cuda" else None,
+        "slurm_hint": entry.get("slurm_hint"),
+        "spec_path": str(spec_path.resolve()),
+        "spec_sha256": hashlib.sha256(data).hexdigest(),
+        "enforced": {
+            "cpu_model": cpu.lower() != ANY_HARDWARE,
+            "gpu_name": profile.device == "cuda" and gpu.lower() != ANY_HARDWARE,
+        },
+    }
+
+
+def _normalized(text: str) -> str:
+    return " ".join(str(text).split()).casefold()
+
+
+def hardware_matches(expected: Optional[str], observed: Optional[str]) -> bool:
+    if expected is None or _normalized(expected) == ANY_HARDWARE:
+        return True
+    if observed is None:
+        return False
+    if expected.startswith("regex:"):
+        return re.fullmatch(expected[len("regex:"):], str(observed).strip(), re.IGNORECASE) is not None
+    return _normalized(expected) == _normalized(observed)
+
+
+def hardware_violations(expected: Mapping[str, Any], cpu_model_name: Optional[str],
+                        gpu_names: Optional[Sequence[str]]) -> List[str]:
+    """Differences between a declared hardware class and observed hardware."""
+    problems: List[str] = []
+    if not hardware_matches(expected.get("cpu_model"), cpu_model_name):
+        problems.append(f"CPU model {cpu_model_name!r} is not the declared "
+                        f"{expected.get('cpu_model')!r} for {expected.get('profile')}")
+    if expected.get("gpu_name") is not None:
+        names = list(gpu_names or [])
+        if not names:
+            problems.append(f"no GPU observed; {expected.get('profile')} declares "
+                            f"{expected.get('gpu_name')!r}")
+        for name in names:
+            if not hardware_matches(expected["gpu_name"], name):
+                problems.append(f"GPU {name!r} is not the declared {expected['gpu_name']!r} "
+                                f"for {expected.get('profile')}")
+    return problems
+
+
+def nvidia_smi_gpu_names() -> Optional[List[str]]:
+    """GPU names visible to this allocation via nvidia-smi, or None if unavailable."""
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
+            check=False, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode:
+        return None
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
 def launch_violations(profile_id: str, cpus: Optional[Sequence[int]] = None,
                       sysfs_cpu: Path = SYSFS_CPU) -> List[str]:
     """Allocation problems detectable before starting a measuring process."""
@@ -607,6 +733,8 @@ class TimingSession:
             count = int(torch.cuda.device_count()) if available else 0
             self._check(stage, "single_cuda_device", available and count == 1, count, 1)
 
+        self._verify_hardware(stage, torch)
+
         names = thread_names()
         total = sum(names.values())
         expected_threads = threads + 1
@@ -622,6 +750,27 @@ class TimingSession:
                             for item in failures)
             )
         return result
+
+    def _verify_hardware(self, stage: str, torch: Any) -> None:
+        text = os.environ.get(EXPECTED_HARDWARE_ENV)
+        if not text:
+            self._check(stage, "hardware_class_declared", False, None,
+                        f"{EXPECTED_HARDWARE_ENV} exported by the timing runner", hard=False)
+            return
+        expected = json.loads(text)
+        self.notes["expected_hardware"] = expected
+        observed_cpu = cpu_model()["model_name"]
+        self._check(stage, "cpu_model_matches", hardware_matches(expected.get("cpu_model"), observed_cpu),
+                    observed_cpu, expected.get("cpu_model"))
+        if self.profile.device == "cuda":
+            names: List[str] = []
+            if torch is not None and torch.cuda.is_available():
+                names = [str(torch.cuda.get_device_name(index))
+                         for index in range(torch.cuda.device_count())]
+            self._check(stage, "gpu_model_matches",
+                        bool(names) and all(hardware_matches(expected.get("gpu_name"), name)
+                                            for name in names),
+                        names, expected.get("gpu_name"))
 
     def verify_process_affinity(self, pid: int, *, stage: str, label: str,
                                 expected_physical_cores: int,

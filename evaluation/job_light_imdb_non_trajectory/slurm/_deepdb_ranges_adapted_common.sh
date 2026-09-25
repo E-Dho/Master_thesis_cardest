@@ -32,23 +32,10 @@ echo "host=$(hostname)"
 echo "start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "repo_commit=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
 
-STARTED_POSTGRES=0
-start_postgres() {
-  if "$PG_BIN/pg_ctl" -D "$PGDATA" -o "-k $SOCKET -p $PORT -c listen_addresses=''" -w start 2>/dev/null; then
-    STARTED_POSTGRES=1
-  else
-    "$PG_BIN/pg_ctl" -D "$PGDATA" status
-  fi
-  for attempt in $(seq 1 180); do
-    "$PG_BIN/pg_isready" -h "$SOCKET" -p "$PORT" -d "$DATABASE" >/dev/null 2>&1 && return 0
-    sleep 5
-  done
-  echo "PostgreSQL readiness timeout" >&2
-  return 1
-}
-stop_postgres() {
-  if [[ "$STARTED_POSTGRES" -eq 1 ]]; then
-    "$PG_BIN/pg_ctl" -D "$PGDATA" -m fast -w stop || true
-  fi
-}
+# Shared PGDATA: start/stop only under the cluster-visible lock.
+PG_LOCK_PYTHON=$CLI_PYTHON
+PG_READY_DATABASE=$DATABASE
+source "$REPO/evaluation/job_light_imdb_non_trajectory/slurm/_pg_lock.sh"
+start_postgres() { start_postgres_locked; }
+stop_postgres() { stop_postgres_locked; }
 trap stop_postgres EXIT
