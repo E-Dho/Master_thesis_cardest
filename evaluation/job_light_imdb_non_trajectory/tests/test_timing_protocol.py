@@ -465,7 +465,7 @@ class TimingStageIntegrationTests(unittest.TestCase):
         other_path = self.root / "other.json"
         other_path.write_text(json.dumps(other))
         inputs = [self.root / "aggregate" / "comparison.json", other_path]
-        with self.assertRaisesRegex(ValueError, "different hardware"):
+        with self.assertRaisesRegex(ValueError, "different or undeclared hardware"):
             compare_aggregates(inputs, self.root / "compare")
         comparison = compare_aggregates(inputs, self.root / "compare", allow_hardware_mismatch=True)
         self.assertEqual(sorted(comparison["hardware_mismatches"]["cpu_1core"]),
@@ -486,7 +486,7 @@ class TimingStageIntegrationTests(unittest.TestCase):
             summary.pop("hardware_class")
             path.write_text(json.dumps(summary))
 
-        with self.assertRaisesRegex(ValueError, "different hardware within one profile"):
+        with self.assertRaisesRegex(ValueError, "predate hardware-class enforcement"):
             aggregate_runs(runs, self.root / "aggregate")
         aggregate = aggregate_runs(
             runs, self.root / "legacy", allow_hardware_mismatch=True
@@ -494,6 +494,38 @@ class TimingStageIntegrationTests(unittest.TestCase):
         timing = aggregate["workloads"]["job_light"]["standardized_timing"]["cpu_1core"]
         self.assertFalse(timing["hardware_declared"])
         self.assertFalse(timing["hardware_consistent"])
+        self.assertEqual(aggregate["hardware_mismatches"]["cpu_1core"][0]["reason"], "undeclared")
+        markdown = (self.root / "legacy" / "comparison.md").read_text()
+        self.assertIn("(UNDECLARED)", markdown)
+        self.assertNotIn("MIXED", markdown)
+
+    def test_compare_rejects_aggregates_without_hardware_declaration(self):
+        config_path = self._config()
+        runs = [self._accuracy_run(config_path, seed) for seed in (0, 1)]
+        config = load_experiment_config(config_path)
+        for seed, run in zip((0, 1), runs):
+            run_timing_stage(config, seed, run, "cpu_1core")
+        aggregate_runs(runs, self.root / "aggregate")
+        declared = self.root / "aggregate" / "comparison.json"
+        # an aggregate written before hardware_declared existed (2cf5ea3): the
+        # stored hardware_consistent flag is true, but nothing was enforced
+        legacy = json.loads(declared.read_text())
+        legacy["method_id"] = "legacy"
+        for workload in legacy["workloads"].values():
+            timing = workload["standardized_timing"]["cpu_1core"]
+            timing.pop("hardware_declared")
+            timing["hardware_consistent"] = True
+        legacy_path = self.root / "legacy.json"
+        legacy_path.write_text(json.dumps(legacy))
+        with self.assertRaisesRegex(ValueError, "different or undeclared hardware"):
+            compare_aggregates([declared, legacy_path], self.root / "compare")
+        comparison = compare_aggregates([declared, legacy_path], self.root / "compare",
+                                        allow_hardware_mismatch=True)
+        labels = comparison["hardware_mismatches"]["cpu_1core"]
+        self.assertEqual(labels[guard.cpu_model()["model_name"] + " (UNDECLARED)"],
+                         ["legacy/v/job_light"])
+        self.assertIn("(UNDECLARED)", (self.root / "compare" / "comparison.md").read_text())
+        compare_aggregates([declared], self.root / "declared_only")
 
     def test_unpinned_launch_is_refused(self):
         run = self._accuracy_run(self._config(), 0)

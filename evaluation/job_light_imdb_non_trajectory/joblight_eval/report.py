@@ -207,10 +207,12 @@ def aggregate_runs(
         }
         aggregate["workloads"][workload_id] = workload_result
         for profile, result in workload_result["standardized_timing"].items():
-            if result.get("available") and not result["hardware_consistent"]:
+            status = hardware_status(result)
+            if result.get("available") and status != "consistent":
                 seed_hardware_mismatches.setdefault(profile, []).append(
-                    {"workload": workload_id, "cpu_models": result["cpu_models"],
-                     "gpu_names": result["gpu_names"], "declared_hardware": result["declared_hardware"]}
+                    {"workload": workload_id, "reason": status,
+                     "cpu_models": result["cpu_models"], "gpu_names": result["gpu_names"],
+                     "declared_hardware": result["declared_hardware"]}
                 )
         row: dict[str, Any] = {
             "experiment_id": experiment_id,
@@ -239,10 +241,21 @@ def aggregate_runs(
         rows.append(row)
 
     if seed_hardware_mismatches and not allow_hardware_mismatch:
+        reasons = {item["reason"] for items in seed_hardware_mismatches.values() for item in items}
+        problems = []
+        if "undeclared" in reasons:
+            problems.append(
+                "timing summaries predate hardware-class enforcement (no hardware_class); "
+                "rerun `cli time` on the declared class"
+            )
+        if "mixed" in reasons:
+            problems.append(
+                "seeds were timed on different hardware within one profile; rerun timing "
+                "on the declared class"
+            )
         raise ValueError(
-            "seeds were timed on different hardware within one profile: "
-            + json.dumps(seed_hardware_mismatches, sort_keys=True)
-            + "; rerun timing on the declared class or pass --allow-hardware-mismatch"
+            "; ".join(problems) + ": " + json.dumps(seed_hardware_mismatches, sort_keys=True)
+            + " (or pass --allow-hardware-mismatch to report them as not comparable)"
         )
     aggregate["hardware_mismatches"] = seed_hardware_mismatches
     aggregate["hardware_mismatch_allowed"] = bool(seed_hardware_mismatches)
@@ -304,7 +317,7 @@ def compare_aggregates(
     mismatches = hardware_mismatches(rows)
     if mismatches and not allow_hardware_mismatch:
         raise ValueError(
-            "standardized latency of different methods was measured on different hardware: "
+            "standardized latency was measured on different or undeclared hardware: "
             + json.dumps(mismatches, sort_keys=True)
             + "; time every method on the declared hardware class "
             "(configs/timing_hardware.json) or pass --allow-hardware-mismatch "
@@ -327,22 +340,52 @@ def compare_aggregates(
     return comparison
 
 
+HARDWARE_STATUS_LABELS = {"undeclared": "UNDECLARED", "mixed": "MIXED across seeds"}
+
+
+def hardware_status(timing: dict[str, Any]) -> str:
+    """"consistent", "undeclared", or "mixed" for one aggregated profile result.
+
+    Recomputed from the aggregate's fields instead of trusting its stored
+    ``hardware_consistent`` flag, so aggregates written by older versions
+    (without ``hardware_declared``, i.e. timing never checked against a
+    declared hardware class) are recognised as undeclared.
+    """
+    if not timing.get("hardware_declared", False):
+        return "undeclared"
+    cpu_models = timing.get("cpu_models") or []
+    mixed = (
+        len(cpu_models) != 1 or "unknown" in cpu_models
+        or len(timing.get("gpu_names") or []) > 1
+        or len(timing.get("declared_hardware") or []) != 1
+        or not timing.get("hardware_consistent", False)
+    )
+    return "mixed" if mixed else "consistent"
+
+
+def _hardware_label(timing: dict[str, Any]) -> str:
+    hardware = "; ".join(timing["cpu_models"] + timing["gpu_names"]) or "unknown"
+    status = hardware_status(timing)
+    if status != "consistent":
+        hardware += f" ({HARDWARE_STATUS_LABELS[status]})"
+    return hardware
+
+
 def hardware_mismatches(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[str]]]:
-    """Per profile: observed hardware -> rows, when rows do not share one class."""
+    """Per profile: hardware -> rows, when rows do not share one declared class."""
     result: dict[str, dict[str, list[str]]] = {}
     for profile in PROFILES:
         classes: dict[str, list[str]] = {}
+        flagged = False
         for row in rows:
             timing = (row.get("standardized_timing") or {}).get(profile)
             if not (timing and timing.get("available")):
                 continue
-            key = "; ".join(timing["cpu_models"] + timing["gpu_names"]) or "unknown"
-            if not timing.get("hardware_consistent", False):
-                key += " (MIXED across seeds)"
-            classes.setdefault(key, []).append(
+            flagged |= hardware_status(timing) != "consistent"
+            classes.setdefault(_hardware_label(timing), []).append(
                 f"{row['method_id']}/{row['variant_id']}/{row['workload']}"
             )
-        if len(classes) > 1 or any(key.endswith("(MIXED across seeds)") for key in classes):
+        if len(classes) > 1 or flagged:
             result[profile] = classes
     return result
 
@@ -566,6 +609,7 @@ def _timing_columns(standardized: dict[str, Any]) -> dict[str, Any]:
         columns[f"timing.{profile}.cpu_models"] = "; ".join(result["cpu_models"])
         columns[f"timing.{profile}.gpu_names"] = "; ".join(result["gpu_names"])
         columns[f"timing.{profile}.hardware_consistent"] = result["hardware_consistent"]
+        columns[f"timing.{profile}.hardware_status"] = hardware_status(result)
     return columns
 
 
@@ -577,9 +621,7 @@ def _profile_table_lines(entries: list[tuple[list[str], dict[str, Any]]], identi
     lines = ["| " + " | ".join(header) + " |",
              "| " + " | ".join(["---"] * len(identity_header) + ["---"] + ["---:"] * 6 + ["---"]) + " |"]
     for identity, result in entries:
-        hardware = "; ".join(result["cpu_models"] + result["gpu_names"])
-        if not result["hardware_consistent"]:
-            hardware += " (MIXED)"
+        hardware = _hardware_label(result)
         checks = result["estimate_consistency"]
         consistency = (
             f"{checks[0]['mode']}, max rel. diff "
@@ -630,8 +672,11 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
         lines.extend(["", "Seed configs differ only in timing-only keys: "
                       + ", ".join(f"`{path}`" for path in aggregate["timing_only_config_differences"])])
     if aggregate.get("hardware_mismatches"):
-        lines.extend(["", "**WARNING:** seeds were timed on different hardware in profiles "
-                      + ", ".join(sorted(aggregate["hardware_mismatches"])) + "."])
+        lines.extend(["", "**WARNING: NOT COMPARABLE.** Timing on different or undeclared "
+                      "hardware in profiles: " + ", ".join(
+                          f"{profile} ({', '.join(sorted({item['reason'] for item in items}))})"
+                          for profile, items in sorted(aggregate["hardware_mismatches"].items())
+                      ) + "."])
     for workload_id, workload in aggregate["workloads"].items():
         metrics = workload["metrics"]
         coverage = "complete" if workload["coverage_complete_all_seeds"] else "incomplete"
@@ -762,7 +807,7 @@ def _multi_method_markdown(
         if profile in mismatches:
             lines.extend([
                 "**WARNING: NOT COMPARABLE.** Rows of this table were measured on different "
-                "hardware (report written with --allow-hardware-mismatch):", "",
+                "or undeclared hardware (report written with --allow-hardware-mismatch):", "",
                 *[f"- {hardware}: {', '.join(names)}" for hardware, names in sorted(mismatches[profile].items())],
                 "",
             ])

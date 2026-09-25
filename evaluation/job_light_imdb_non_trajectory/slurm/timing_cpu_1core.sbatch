@@ -2,6 +2,9 @@
 #SBATCH --job-name=joblight_timing_cpu_1core
 #SBATCH --partition=base
 #SBATCH --nodes=1
+# Declared CPU class (configs/timing_hardware.json); override with
+# sbatch --nodelist=<another verified AMD EPYC 7313 node>.
+#SBATCH --nodelist=n237
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --hint=nomultithread
@@ -13,7 +16,7 @@
 # Primary CPU latency (profile cpu_1core): one physical core with its SMT
 # sibling reserved, one thread for BLAS/OpenMP/PyTorch.  Runs every plan
 # entry back to back on this node.  Submit e.g.
-#   PLAN=... sbatch --constraint=<node-feature> slurm/timing_cpu_1core.sbatch
+#   PLAN=... sbatch slurm/timing_cpu_1core.sbatch
 
 set -euo pipefail
 source /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/slurm/_timing_common.sh

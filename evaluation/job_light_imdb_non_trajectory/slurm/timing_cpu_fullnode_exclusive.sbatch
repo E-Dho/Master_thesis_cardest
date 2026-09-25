@@ -2,6 +2,9 @@
 #SBATCH --job-name=joblight_timing_cpu_fullnode
 #SBATCH --partition=base
 #SBATCH --nodes=1
+# Declared CPU class (configs/timing_hardware.json); override with
+# sbatch --nodelist=<another verified AMD EPYC 7313 node>.
+#SBATCH --nodelist=n237
 #SBATCH --ntasks=1
 #SBATCH --exclusive
 #SBATCH --mem=0

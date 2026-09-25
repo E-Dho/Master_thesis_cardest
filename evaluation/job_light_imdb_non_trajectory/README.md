@@ -439,14 +439,19 @@ apart between processes before this change.
    (`NVIDIA L40S`), shared by every method. The launcher and the runner check
    the node before anything is measured, every measuring process checks again
    (`cpu_model_matches`, `gpu_model_matches`), and the guard reports are
-   checked afterwards. The CPU models are intentionally left empty: timing
-   refuses to run until they are declared, and the error prints the model
-   detected on the allocated node. Values match case-insensitively; use
-   `regex:<pattern>` for a family, or `any` to disable one check explicitly.
-   `aggregate` rejects seeds timed on different hardware, and `compare`
-   rejects a profile table whose methods were timed on different hardware;
-   `--allow-hardware-mismatch` writes the report anyway with the table marked
-   **NOT COMPARABLE**.
+   checked afterwards. All profiles currently declare
+   `AMD EPYC 7313 16-Core Processor` (CPU node n237). A profile whose class is left empty refuses to run, and the error prints
+   the model detected on the allocated node. Values match case-insensitively;
+   use `regex:<pattern>` for a family, or `any` to disable one check
+   explicitly. `aggregate` rejects seeds timed on different hardware and
+   timing summaries without a declared hardware class (written before
+   enforcement existed; rerun `cli time`), and `compare` rejects a profile
+   table whose methods were timed on different or undeclared hardware. It
+   re-derives this from each aggregate instead of trusting the stored
+   `hardware_consistent` flag, so aggregates written by older versions are
+   caught too. `--allow-hardware-mismatch` writes the report anyway with the
+   table marked **NOT COMPARABLE** and the rows labelled `MIXED across seeds`
+   or `UNDECLARED`.
 7. Model-core latency is shown only with complete coverage. Its query coverage
    (`model_core.coverage_fraction_min`, observation counts) is aggregated;
    when any seed lacks a model-core value for some timed queries (e.g. native
@@ -460,12 +465,13 @@ does not pass the batch value to `srun`). The launcher checks the step's CPU
 set, splits it into physical cores, and runs every entry of a plan file
 (`configs/timing_plan.example.txt`) back to back on the same node; for
 PostgreSQL it starts the server pinned to the second core and refuses if a
-server is already running outside the allocation. Fix the node class at
-submission, e.g. `PLAN=plan.tsv sbatch --constraint=<feature> slurm/timing_cpu_1core.sbatch`,
-and for the GPU profile request the L40S explicitly
-(`sbatch --gres=gpu:<L40S gres type>:1 ...` or its `--constraint`; the names
-are cluster specific, see `slurm_hint` in `configs/timing_hardware.json`). A
-wrong node fails in the pre-flight check within seconds.
+server is already running outside the allocation. The node class is fixed in
+the scripts: the CPU profiles request `--nodelist=n237` (override on the
+command line with another verified EPYC 7313 node, e.g.
+`PLAN=plan.tsv sbatch --nodelist=<node> slurm/timing_cpu_1core.sbatch`), and
+the GPU profile requests `--constraint=L40` with an untyped `--gres=gpu:1`
+(see `slurm_hint` in `configs/timing_hardware.json`). A wrong node still fails
+in the pre-flight check within seconds.
 
 **Shared PostgreSQL data directory.** `PGDATA` is on BeeGFS and visible from
 every node, but `pg_ctl status` and PostgreSQL's `postmaster.pid` check only
