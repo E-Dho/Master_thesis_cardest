@@ -6,6 +6,7 @@ This directory contains the practical dataset pipeline for the thesis benchmark.
 
 - `pol_runs/`: Slurm scripts and run helpers for POL trajectory simulations.
 - `mobilitydb_loader/`: scripts for building/running MobilityDB on the CAU cluster and loading POL outputs into PostgreSQL/MobilityDB.
+- `porto_taxi_loader/`: isolated Porto taxi CSV staging and MobilityDB loading scripts.
 
 Generated raw POL logs, staging files, database directories, and local POL source mirrors are ignored by Git. The tracked files here are only the reproducible scripts and documentation needed to regenerate or load the benchmark data.
 
