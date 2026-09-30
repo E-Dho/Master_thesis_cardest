@@ -457,6 +457,24 @@ class VoidTargetRowTest(unittest.TestCase):
         self.assertEqual(targets[1], null_sentinel_index(self.metadata.columns[1]))
         self.assertEqual(targets[2], 0)
 
+    def test_non_cascading_still_supervises_the_carrier(self) -> None:
+        # The break point may be wildcarded, in which case its factor is exactly
+        # 1.0 and nothing collapses. Without supervising the carrier too,
+        # cascade=false would silently do nothing whenever the two differ.
+        targets = void_target_row(
+            self.row, self.metadata, 1, cascade=False, carrier_column_index=2
+        )
+        self.assertEqual(targets[1], null_sentinel_index(self.metadata.columns[1]))
+        self.assertEqual(targets[2], null_sentinel_index(self.metadata.columns[2]))
+
+    def test_non_cascading_leaves_other_columns_alone(self) -> None:
+        targets = void_target_row(
+            self.row, self.metadata, 0, cascade=False, carrier_column_index=2
+        )
+        self.assertEqual(targets[0], null_sentinel_index(self.metadata.columns[0]))
+        self.assertEqual(targets[1], 1)
+        self.assertEqual(targets[2], null_sentinel_index(self.metadata.columns[2]))
+
     def test_source_row_is_not_mutated(self) -> None:
         void_target_row(self.row, self.metadata, 0, cascade=True)
         self.assertEqual(list(self.row), [2, 1, 0, 1, 0])

@@ -51,6 +51,10 @@ class GeneratedTrainingContext:
     # relationship that caused it, and so the unsatisfied predicate is
     # identifiable without re-deriving it.
     void_pair_columns: tuple[int, int] | None = None
+    # The first predicated column at or after ``void_column_index`` -- the head
+    # whose factor actually carries the collapse into the estimate. Kept so
+    # non-cascading supervision can still reach it.
+    void_carrier_column_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -683,6 +687,9 @@ class PredicateTrainingContextGenerator:
                 if sentinel_column_index is None
                 else (anchor_column_index, other_column_index)
             ),
+            void_carrier_column_index=(
+                None if sentinel_column_index is None else carrier_column_index
+            ),
         )
 
     def _void_and_hard_negative(
@@ -853,6 +860,7 @@ class PredicateTrainingContextGenerator:
                         metadata,
                         context.void_column_index,
                         cascade=self.null_sentinel.cascade,
+                        carrier_column_index=context.void_carrier_column_index,
                     ),
                 )
             )
@@ -2358,6 +2366,7 @@ def void_target_row(
     void_column_index: int,
     *,
     cascade: bool = True,
+    carrier_column_index: int | None = None,
 ) -> np.ndarray:
     """Return the target row for a void context: sentinel from the break onward.
 
@@ -2394,6 +2403,14 @@ def void_target_row(
             later = sentinels[column_index]
             if later is not None:
                 targets[column_index] = later
+    elif carrier_column_index is not None and carrier_column_index != void_column_index:
+        # Without the cascade only the break point is supervised, and that head
+        # may be wildcarded -- its factor is then exactly 1.0 and nothing
+        # collapses. The carrier is the head whose factor reaches the estimate,
+        # so it has to be supervised too or cascade=false silently does nothing.
+        carrier_sentinel = sentinels[carrier_column_index]
+        if carrier_sentinel is not None:
+            targets[carrier_column_index] = carrier_sentinel
     return targets
 
 
