@@ -49,13 +49,20 @@ def column_factor(
 
     distribution = np.asarray(distribution, dtype=float)
     if token.op == PredicateOp.WILDCARD:
-        sentinel = null_sentinel_index(column)
-        if sentinel is None:
-            return 1.0
-        # An unpredicated column still excludes the void sentinel, so a context
-        # the model believes is impossible keeps collapsing the product past the
-        # bottleneck head instead of being rescued by a wildcard factor of one.
-        return float(1.0 - distribution[sentinel])
+        # An unpredicated column contributes exactly 1.0, sentinel mass included.
+        #
+        # Letting a wildcard column return 1 - q(sentinel) was tried and is a
+        # trap: it gives every unpredicated head a vote on whether the query is
+        # impossible, and on the 50M POL benchmark two heads that are wildcarded
+        # in ~90% of queries settled on constant sentinel mass (0.579 and 0.914,
+        # identical at p10 and p50 -- context-independent). Their product
+        # multiplied a fixed ~1/16 into every estimate, which shrank true zeros
+        # and true positives by the same factor: zeros looked 17.8x better while
+        # positives got 16.1x worse, with no discrimination anywhere in it.
+        #
+        # The void is only ever proven about columns the context constrains, so
+        # only those may express it.
+        return 1.0
     if token.op == PredicateOp.INV_FANOUT:
         mask = reciprocal_fanout_mask(column)
     else:
