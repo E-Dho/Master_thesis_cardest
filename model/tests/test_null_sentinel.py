@@ -21,6 +21,7 @@ from model.src.model.factorization import (
 )
 from model.src.predicates.encoding import column_factor, predicate_mask
 from model.src.predicates.generation import (
+    GeneratedTrainingContext,
     PredicateTrainingContextGenerator,
     context_satisfies_row,
     void_target_row,
@@ -737,6 +738,77 @@ class VoidContextGenerationTest(unittest.TestCase):
             )
             self.assertLessEqual(len(emitted), 1)
 
+    def test_wildcard_between_pair_and_carrier_does_not_drop_the_context(self) -> None:
+        # Four DATA columns so the positional sentinel head (2) can be
+        # wildcarded while a later head (3) still carries the collapse. Only the
+        # carrier needs a predicate; requiring it of the positional head made
+        # void coverage depend on that head's own predicate state, which it
+        # cannot observe.
+        metadata = apply_null_sentinel_to_metadata(
+            ModelMetadata(
+                columns=(
+                    ColumnMetadata("t:a", ColumnKind.DATA, tuple(range(4)), table="t"),
+                    ColumnMetadata("t:b", ColumnKind.DATA, tuple(range(4)), table="t"),
+                    ColumnMetadata("t:c", ColumnKind.DATA, tuple(range(3)), table="t"),
+                    ColumnMetadata("t:d", ColumnKind.DATA, tuple(range(3)), table="t"),
+                    ColumnMetadata("I_t", ColumnKind.INDICATOR, (0, 1), table="t"),
+                ),
+                full_join_cardinality=1000.0,
+            ),
+            self.config,
+        )
+        rows = np.array(
+            [[a, b, a % 3, b % 3, 1] for a in range(4) for b in range(a + 1)],
+            dtype=int,
+        )
+        catalog = build_void_pair_catalog(rows, metadata, self.config)
+        self.assertIsNotNone(catalog)
+        generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "wildcard_probability": 0.0,
+                "equality_probability": 1.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "seed": 0,
+            }
+        )
+        generator.attach_void_catalog(catalog, self.config)
+        rng = np.random.default_rng(0)
+        compiled = generator._compiled(metadata)
+        produced = wildcard_positional = 0
+        for _ in range(60):
+            for row in rows:
+                base = generator._generate_one(row, metadata, rng)
+                # Drop the predicate on column 2 so it is wildcarded, keeping 3.
+                thinned = {
+                    name: token
+                    for name, token in base.ordinary_predicates.items()
+                    if name != "t:c"
+                }
+                if "t:d" not in thinned:
+                    continue
+                stripped = GeneratedTrainingContext(
+                    tokens=base.tokens,
+                    included_tables=base.included_tables,
+                    inverse_fanout_columns=base.inverse_fanout_columns,
+                    ordinary_predicates=thinned,
+                )
+                for context in generator._void_and_hard_negative(
+                    row, metadata, rng, compiled, stripped
+                ):
+                    if context.void_column_index is None:
+                        continue
+                    produced += 1
+                    if context.tokens[context.void_column_index].op is PredicateOp.WILDCARD:
+                        wildcard_positional += 1
+        self.assertGreater(produced, 0, "no void context was produced at all")
+        self.assertGreater(
+            wildcard_positional,
+            0,
+            "a wildcarded positional head must not drop the context",
+        )
+
     def test_diagnostics_count_generated_voids(self) -> None:
         self.generator.attach_void_catalog(self.catalog, self.config)
         self.generator.generate_batch(
@@ -969,6 +1041,64 @@ class JoinPathClosureTest(unittest.TestCase):
         self.assertEqual(
             _root_path_closure_mask({"__not_a_table__"}, compiled, compiled.graph), 0
         )
+
+
+class AlternatePathClosureTest(unittest.TestCase):
+    """Closure must search the row-present graph, not a precomputed tree."""
+
+    def _diamond(self):
+        from model.src.predicates.generation import (
+            JoinGraphMetadata,
+            _CompiledGenerationMetadata,
+        )
+
+        # A-B-D and A-C-D: two routes from the root to D.
+        tables = ("A", "B", "C", "D")
+        graph = JoinGraphMetadata(
+            root_table="A",
+            tables=tables,
+            edges=(("A", "B"), ("B", "D"), ("A", "C"), ("C", "D")),
+        )
+        table_to_bit = {table: 1 << index for index, table in enumerate(tables)}
+        compiled = _CompiledGenerationMetadata.__new__(_CompiledGenerationMetadata)
+        object.__setattr__(compiled, "graph", graph)
+        object.__setattr__(compiled, "table_to_bit", table_to_bit)
+        object.__setattr__(
+            compiled, "bit_to_table", {bit: t for t, bit in table_to_bit.items()}
+        )
+        return compiled, graph, table_to_bit
+
+    def test_closure_uses_a_route_the_row_can_supply(self) -> None:
+        from model.src.predicates.generation import _root_path_closure_mask
+
+        compiled, graph, bits = self._diamond()
+        available = bits["A"] | bits["C"] | bits["D"]
+        closed = _root_path_closure_mask(
+            {"D"}, compiled, graph, available_mask=available
+        )
+        self.assertTrue(closed, "a usable route exists and must be found")
+        # It must pick A-C-D, never pull in the absent B.
+        self.assertEqual(closed & bits["B"], 0)
+        for table in ("A", "C", "D"):
+            self.assertEqual(closed & bits[table], bits[table])
+
+    def test_unavailable_route_yields_no_subset(self) -> None:
+        from model.src.predicates.generation import _root_path_closure_mask
+
+        compiled, graph, bits = self._diamond()
+        # D is present but neither intermediate is, so no route exists.
+        available = bits["A"] | bits["D"]
+        self.assertEqual(
+            _root_path_closure_mask({"D"}, compiled, graph, available_mask=available), 0
+        )
+
+    def test_without_a_mask_any_route_is_acceptable(self) -> None:
+        from model.src.predicates.generation import _root_path_closure_mask
+
+        compiled, graph, bits = self._diamond()
+        closed = _root_path_closure_mask({"D"}, compiled, graph)
+        self.assertEqual(closed & bits["A"], bits["A"])
+        self.assertEqual(closed & bits["D"], bits["D"])
 
 
 class CausalVisibilityTest(unittest.TestCase):

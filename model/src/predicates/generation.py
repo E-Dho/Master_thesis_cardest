@@ -577,6 +577,7 @@ class PredicateTrainingContextGenerator:
         other_column_index: int,
         other_value_id: int,
         sentinel_column_index: int | None,
+        carrier_column_index: int | None,
         extensions: tuple[tuple[str, PredicateToken], ...],
     ) -> GeneratedTrainingContext | None:
         """Build a context constraining one column pair, plus shared extensions.
@@ -619,8 +620,14 @@ class PredicateTrainingContextGenerator:
             for column in (anchor_column, other_column)
             if column.table is not None
         }
-        included_mask |= _root_path_closure_mask(required, compiled, compiled.graph)
-        included_mask &= self._present_table_mask_for_row(encoded_row, metadata, compiled)
+        present_mask = self._present_table_mask_for_row(encoded_row, metadata, compiled)
+        closure = _root_path_closure_mask(
+            required, compiled, compiled.graph, available_mask=present_mask
+        )
+        if required and not closure:
+            return None
+        included_mask |= closure
+        included_mask &= present_mask
         included_mask = _root_connected_component_mask(
             included_mask, compiled, compiled.graph
         )
@@ -636,11 +643,21 @@ class PredicateTrainingContextGenerator:
         inverse_fanouts = self._inverse_fanouts_for_table_mask(
             metadata, compiled, included_mask
         )
-        sentinel_column = metadata.columns[sentinel_column_index] if sentinel_column_index is not None else None
-        if sentinel_column is not None and sentinel_column.name not in predicates:
-            return None
-        if sentinel_column is not None and sentinel_column.table is not None:
-            if sentinel_column.table not in included_tables:
+        # Only the head that CARRIES the collapse needs a predicate and an
+        # included table. Requiring it of the positional sentinel head instead
+        # dropped every context whose first later column happened to be
+        # wildcarded, which made void coverage depend on that head's own
+        # predicate state -- hidden from it, and the thing this construction
+        # exists to avoid. A wildcard head between the pair and the carrier is
+        # supervised all the same; its factor is 1.0, so it costs nothing.
+        if carrier_column_index is not None:
+            carrier_column = metadata.columns[carrier_column_index]
+            if carrier_column.name not in predicates:
+                return None
+            if (
+                carrier_column.table is not None
+                and carrier_column.table not in included_tables
+            ):
                 return None
 
         tokens, encoded_two_slot_row = self._tokens_and_two_slot_for_query_tables(
@@ -740,7 +757,8 @@ class PredicateTrainingContextGenerator:
         if not predicated_after:
             self._void_no_observable_head += 1
             return []
-        sentinel_name = metadata.columns[predicated_after[0]].name
+        carrier_index = predicated_after[0]
+        sentinel_name = metadata.columns[carrier_index].name
 
         # Draw the extra row-satisfied conjuncts ONCE and hand the same tuple to
         # both sides, so the only thing separating the pair is the void value.
@@ -769,6 +787,7 @@ class PredicateTrainingContextGenerator:
             other_column_index=void_index,
             other_value_id=pair.void_value_id,
             sentinel_column_index=sentinel_index,
+            carrier_column_index=carrier_index,
             extensions=extensions,
         )
         if void_context is None:
@@ -786,6 +805,7 @@ class PredicateTrainingContextGenerator:
                 other_column_index=void_index,
                 other_value_id=int(encoded_row[void_index]),
                 sentinel_column_index=None,
+                carrier_column_index=carrier_index,
                 extensions=extensions,
             )
             if negative is not None:
@@ -2690,6 +2710,7 @@ def _root_path_closure_mask(
     required_tables: frozenset[str] | set[str],
     compiled: "_CompiledGenerationMetadata",
     graph: JoinGraphMetadata,
+    available_mask: int | None = None,
 ) -> int:
     """Return the union of root-to-table join paths for every required table.
 
@@ -2699,17 +2720,34 @@ def _root_path_closure_mask(
     {A} and the context is discarded, silently losing every cross-table void
     whose two columns are not already adjacent in the sampled subset.
 
-    This walks the FULL join graph from the root and pulls in the tables along
-    the way, so {A, C} becomes {A, B, C}. Returns 0 when some required table is
+    This walks the join graph from the root and pulls in the tables along the
+    way, so {A, C} becomes {A, B, C}. Returns 0 when some required table is
     unreachable, which the caller treats as "no void for this row".
+
+    ``available_mask`` restricts the search to tables the sampled row actually
+    has. Without it the search could commit to a path the row cannot supply and
+    report failure even though another path exists: in a cyclic schema with
+    A-B-D and A-C-D, a row holding {A, C, D} would be rejected whenever the
+    traversal happened to reach D through B. The known JOB-light and POL graphs
+    are trees, where the path is unique and this cannot arise, but the helper
+    should not depend on that.
     """
 
     root = graph.root_table
     required = set(required_tables)
     if not required:
         return compiled.table_to_bit.get(root, 0)
+    def _available(table: str) -> bool:
+        if available_mask is None:
+            return True
+        return bool(available_mask & compiled.table_to_bit.get(table, 0))
+
+    if not _available(root):
+        return 0
     adjacency: dict[str, set[str]] = {}
     for left, right in graph.edges:
+        if not (_available(left) and _available(right)):
+            continue
         adjacency.setdefault(left, set()).add(right)
         adjacency.setdefault(right, set()).add(left)
     parents: dict[str, str | None] = {root: None}
