@@ -609,6 +609,17 @@ class PredicateTrainingContextGenerator:
         for column in (anchor_column, other_column):
             if column.table is not None:
                 included_mask |= compiled.table_to_bit.get(column.table, 0)
+        # Pull in the join path from the root to each table the pair needs, then
+        # keep only tables this row actually has, then drop anything the
+        # trimming disconnected. Closure must come first: the pruning helper can
+        # only remove tables, so without it a pair spanning a gap in the sampled
+        # subset would be discarded rather than completed.
+        required = {
+            column.table
+            for column in (anchor_column, other_column)
+            if column.table is not None
+        }
+        included_mask |= _root_path_closure_mask(required, compiled, compiled.graph)
         included_mask &= self._present_table_mask_for_row(encoded_row, metadata, compiled)
         included_mask = _root_connected_component_mask(
             included_mask, compiled, compiled.graph
@@ -698,22 +709,38 @@ class PredicateTrainingContextGenerator:
         anchor_name = metadata.columns[anchor_index].name
         void_name = metadata.columns[void_index].name
 
-        # The sentinel head must come after both constrained columns AND carry a
-        # predicate, since an unpredicated column contributes exactly 1.0 and
-        # could not express the collapse at inference.
-        later = sorted(
-            index
-            for index, column in enumerate(metadata.columns)
-            if index > void_index
-            and column.kind == ColumnKind.DATA
-            and column.name in base_context.ordinary_predicates
-            and null_sentinel_index(column) is not None
+        # Supervision starts at the first sentinel-bearing DATA column after both
+        # constrained columns -- a position, not a choice, so a head's target
+        # never depends on its own predicate state, which it cannot observe.
+        sentinel_index = next(
+            (
+                index
+                for index, column in enumerate(metadata.columns)
+                if index > void_index
+                and column.kind == ColumnKind.DATA
+                and null_sentinel_index(column) is not None
+            ),
+            None,
         )
-        if not later:
+        if sentinel_index is None:
             self._void_no_observable_head += 1
             return []
-        sentinel_index = later[0]
-        sentinel_name = metadata.columns[sentinel_index].name
+        # At least one column from there on must carry a predicate, or the
+        # collapse could never reach the estimate: a wildcard factor is exactly
+        # 1.0 whatever the sentinel mass behind it. This is a filter on which
+        # contexts are worth generating, not on any head's target -- and it
+        # cannot create conflicting supervision, because an impossible pair
+        # never appears in a row-satisfied context to disagree with.
+        predicated_after = [
+            index
+            for index in range(sentinel_index, len(metadata.columns))
+            if metadata.columns[index].kind == ColumnKind.DATA
+            and metadata.columns[index].name in base_context.ordinary_predicates
+        ]
+        if not predicated_after:
+            self._void_no_observable_head += 1
+            return []
+        sentinel_name = metadata.columns[predicated_after[0]].name
 
         # Draw the extra row-satisfied conjuncts ONCE and hand the same tuple to
         # both sides, so the only thing separating the pair is the void value.
@@ -806,7 +833,6 @@ class PredicateTrainingContextGenerator:
                         metadata,
                         context.void_column_index,
                         cascade=self.null_sentinel.cascade,
-                        predicated_columns=predicated_data_columns(context, metadata),
                     ),
                 )
             )
@@ -2312,24 +2338,23 @@ def void_target_row(
     void_column_index: int,
     *,
     cascade: bool = True,
-    predicated_columns: Collection[int] | None = None,
 ) -> np.ndarray:
-    """Return the target row for a void context: sentinel at and after the break.
+    """Return the target row for a void context: sentinel from the break onward.
 
-    ``void_column_index`` is the supervised head, which sits after both columns
-    the void constrains so that it can actually observe them.  With ``cascade``
-    the sentinel also propagates to later predicated DATA columns, which see the
-    same tokens, so several factors collapse together rather than the estimate
-    resting on one.
+    ``void_column_index`` is the first sentinel-bearing DATA column after both
+    columns the void constrains -- the earliest head that can observe the
+    impossible combination, since a head never sees its own token.
 
-    ``predicated_columns`` restricts that cascade to columns the context
-    actually constrains, and passing it is strongly recommended.  A wildcard
-    column contributes exactly 1.0 to the estimate whatever its sentinel mass,
-    so supervising an unpredicated head toward the sentinel buys nothing at
-    inference while pulling its marginal away from the data.  On the 50M POL
-    benchmark the unrestricted cascade drove two mostly-wildcarded heads to
-    constant sentinel mass, and with the earlier ``1 - q(sentinel)`` wildcard
-    factor that constant multiplied a fixed ~1/16 into every estimate.
+    Every later sentinel-bearing DATA column is supervised too, and crucially
+    WITHOUT regard to whether it carries a predicate. Skipping unpredicated
+    heads looks like a saving -- a wildcard column contributes exactly 1.0, so
+    supervising it changes no estimate directly -- but it makes a head's target
+    depend on its own predicate state, which that head cannot observe. Two void
+    contexts sharing a prefix would then hand head k the sentinel in one and a
+    real value in the other, and the head could only fit the frequency with
+    which predicate generation happened to constrain it. That is the same
+    conflicting-target failure as supervising the void column itself, one layer
+    out.
 
     Columns that carry no sentinel -- indicators and fanouts -- keep their real
     values, since their heads feed table-presence semantics and the inverse
@@ -2345,14 +2370,10 @@ def void_target_row(
         )
     targets[void_column_index] = sentinel
     if cascade:
-        allowed = None if predicated_columns is None else set(predicated_columns)
         for column_index in range(void_column_index + 1, len(metadata.columns)):
             later = sentinels[column_index]
-            if later is None:
-                continue
-            if allowed is not None and column_index not in allowed:
-                continue
-            targets[column_index] = later
+            if later is not None:
+                targets[column_index] = later
     return targets
 
 
@@ -2663,6 +2684,51 @@ def _table_mask_from_tables(
     for table in tables:
         mask |= compiled.table_to_bit.get(table, 0)
     return mask
+
+
+def _root_path_closure_mask(
+    required_tables: frozenset[str] | set[str],
+    compiled: "_CompiledGenerationMetadata",
+    graph: JoinGraphMetadata,
+) -> int:
+    """Return the union of root-to-table join paths for every required table.
+
+    ``_root_connected_component_mask`` prunes: it builds adjacency only over
+    tables already in the mask and keeps the root's component, so it can never
+    ADD an intermediate. For a chain A-B-C that means asking for {A, C} yields
+    {A} and the context is discarded, silently losing every cross-table void
+    whose two columns are not already adjacent in the sampled subset.
+
+    This walks the FULL join graph from the root and pulls in the tables along
+    the way, so {A, C} becomes {A, B, C}. Returns 0 when some required table is
+    unreachable, which the caller treats as "no void for this row".
+    """
+
+    root = graph.root_table
+    required = set(required_tables)
+    if not required:
+        return compiled.table_to_bit.get(root, 0)
+    adjacency: dict[str, set[str]] = {}
+    for left, right in graph.edges:
+        adjacency.setdefault(left, set()).add(right)
+        adjacency.setdefault(right, set()).add(left)
+    parents: dict[str, str | None] = {root: None}
+    queue = [root]
+    while queue:
+        table = queue.pop(0)
+        for neighbor in sorted(adjacency.get(table, set())):
+            if neighbor not in parents:
+                parents[neighbor] = table
+                queue.append(neighbor)
+    keep = {root}
+    for table in required:
+        if table not in parents:
+            return 0
+        node: str | None = table
+        while node is not None:
+            keep.add(node)
+            node = parents[node]
+    return _table_mask_from_tables(keep, compiled)
 
 
 def _root_connected_component_mask(

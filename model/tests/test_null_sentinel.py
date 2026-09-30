@@ -441,27 +441,20 @@ class VoidTargetRowTest(unittest.TestCase):
         self.assertEqual(targets[3], 1)
         self.assertEqual(targets[4], 0)
 
-    def test_cascade_skips_columns_the_context_does_not_constrain(self) -> None:
-        # Column 1 carries no predicate here, so supervising it toward the
-        # sentinel would buy nothing at inference (a wildcard factor is 1.0)
-        # while pulling its marginal away from the data.
-        targets = void_target_row(
-            self.row, self.metadata, 0, cascade=True, predicated_columns={0}
-        )
-        self.assertEqual(targets[0], null_sentinel_index(self.metadata.columns[0]))
-        self.assertEqual(targets[1], 1)
-
-    def test_cascade_reaches_constrained_columns(self) -> None:
-        targets = void_target_row(
-            self.row, self.metadata, 0, cascade=True, predicated_columns={0, 1}
-        )
+    def test_cascade_ignores_whether_a_later_column_is_predicated(self) -> None:
+        # A head cannot observe its own predicate token, so its target must not
+        # depend on it. Skipping unpredicated heads would hand head k the
+        # sentinel in one void context and a real value in another with the
+        # same visible prefix, and the head could only fit how often predicate
+        # generation happened to constrain it.
+        targets = void_target_row(self.row, self.metadata, 1, cascade=True)
         self.assertEqual(targets[1], null_sentinel_index(self.metadata.columns[1]))
+        self.assertEqual(targets[2], null_sentinel_index(self.metadata.columns[2]))
 
-    def test_void_column_is_always_written_even_if_not_listed(self) -> None:
-        targets = void_target_row(
-            self.row, self.metadata, 1, cascade=True, predicated_columns=set()
-        )
+    def test_cascade_can_be_disabled(self) -> None:
+        targets = void_target_row(self.row, self.metadata, 1, cascade=False)
         self.assertEqual(targets[1], null_sentinel_index(self.metadata.columns[1]))
+        self.assertEqual(targets[2], 0)
 
     def test_source_row_is_not_mutated(self) -> None:
         void_target_row(self.row, self.metadata, 0, cascade=True)
@@ -595,7 +588,11 @@ class VoidContextGenerationTest(unittest.TestCase):
         for context, row in zip(contexts, rows):
             self.assertTrue(context_satisfies_row(context, row, self.metadata))
 
-    def test_cascade_never_targets_an_unpredicated_column(self) -> None:
+    def test_sentinel_targets_are_positional_not_predicate_dependent(self) -> None:
+        # Every sentinel-bearing DATA column from the supervised head onward is
+        # targeted, whether or not it carries a predicate. Making that depend on
+        # a head's own token would give two void contexts with the same visible
+        # prefix different targets at that head, which it cannot tell apart.
         self.generator.attach_void_catalog(self.catalog, self.config)
         contexts, targets, _ = self.generator.generate_batch(
             encoded_rows=self.rows,
@@ -603,19 +600,25 @@ class VoidContextGenerationTest(unittest.TestCase):
             rng=np.random.default_rng(3),
         )
         checked = 0
-        for context, target, row in zip(contexts, targets, self.rows):
+        for context, target in zip(contexts, targets):
             if context.void_column_index is None:
                 continue
             checked += 1
             for index, column in enumerate(self.metadata.columns):
                 sentinel = null_sentinel_index(column)
-                if sentinel is None or index == context.void_column_index:
+                if sentinel is None:
                     continue
-                if target[index] == sentinel:
+                if index >= context.void_column_index:
+                    self.assertEqual(
+                        target[index],
+                        sentinel,
+                        f"column {index} at or after the break must be sentinel",
+                    )
+                else:
                     self.assertNotEqual(
-                        context.tokens[index].op,
-                        PredicateOp.WILDCARD,
-                        f"column {index} got a sentinel target while unpredicated",
+                        target[index],
+                        sentinel,
+                        f"column {index} before the break must keep its value",
                     )
         self.assertTrue(checked, "no void context was produced")
 
@@ -906,6 +909,68 @@ class TableSubsetConsistencyTest(unittest.TestCase):
             )
 
 
+class JoinPathClosureTest(unittest.TestCase):
+    """A pair spanning a gap must complete the path, not be discarded."""
+
+    def _compiled(self):
+        from model.src.data.full_join_sampler import SyntheticFullJoinSampleSource
+
+        source = SyntheticFullJoinSampleSource()
+        generator = PredicateTrainingContextGenerator({"enabled": True, "seed": 0})
+        metadata = apply_null_sentinel_to_metadata(source.metadata, _enabled_config())
+        return generator._compiled(metadata), metadata
+
+    def test_closure_adds_the_intermediate_table(self) -> None:
+        from model.src.predicates.generation import (
+            _root_connected_component_mask,
+            _root_path_closure_mask,
+            _table_mask_from_tables,
+        )
+
+        compiled, _ = self._compiled()
+        graph = compiled.graph
+        leaf = None
+        for table in graph.tables:
+            if table != graph.root_table and table not in {
+                left for left, _ in graph.edges if left == graph.root_table
+            }:
+                leaf = table
+        if leaf is None or len(graph.tables) < 3:
+            self.skipTest("fixture has no chain to close over")
+
+        # The pruning helper alone drops the far table, because it can only
+        # remove: it never adds the intermediate that would connect it.
+        sparse = _table_mask_from_tables({graph.root_table, leaf}, compiled)
+        pruned = _root_connected_component_mask(sparse, compiled, graph)
+        self.assertNotEqual(
+            pruned & compiled.table_to_bit[leaf],
+            compiled.table_to_bit[leaf],
+            "the pruning helper unexpectedly kept a disconnected table",
+        )
+
+        # Closure completes the path instead.
+        closed = _root_path_closure_mask({leaf}, compiled, graph)
+        self.assertEqual(
+            closed & compiled.table_to_bit[leaf], compiled.table_to_bit[leaf]
+        )
+        self.assertEqual(
+            closed & compiled.table_to_bit[graph.root_table],
+            compiled.table_to_bit[graph.root_table],
+        )
+        # And the result survives pruning, i.e. it really is connected.
+        self.assertEqual(
+            _root_connected_component_mask(closed, compiled, graph), closed
+        )
+
+    def test_unreachable_table_yields_no_subset(self) -> None:
+        from model.src.predicates.generation import _root_path_closure_mask
+
+        compiled, _ = self._compiled()
+        self.assertEqual(
+            _root_path_closure_mask({"__not_a_table__"}, compiled, compiled.graph), 0
+        )
+
+
 class CausalVisibilityTest(unittest.TestCase):
     """The supervised head must be able to see what makes the context void.
 
@@ -944,20 +1009,35 @@ class CausalVisibilityTest(unittest.TestCase):
 
     @staticmethod
     def _visible_columns(head_index: int) -> set[int]:
-        """Columns a ResMADE head can read, from the model's own mask rule."""
+        """Columns a ResMADE head can read.
 
-        from model.src.model.masked_layers import mask_from_degrees
-        import torch
+        Stated directly rather than through torch so this invariant is checked
+        even where the optional dependency is absent;
+        ``test_matches_the_models_own_mask`` pins it to the real rule wherever
+        torch is installed.
+        """
 
-        count = 8
-        degrees = torch.arange(count)
-        # Output layer and direct-IO both use strict=True: in_degree < out_degree.
-        mask = mask_from_degrees(degrees, degrees, strict=True)
-        return {index for index in range(count) if mask[head_index, index] > 0}
+        return set(range(head_index))
 
     def test_head_cannot_see_its_own_token(self) -> None:
         for head in range(6):
             self.assertNotIn(head, self._visible_columns(head))
+
+    def test_matches_the_models_own_mask(self) -> None:
+        try:
+            import torch
+        except ImportError:  # pragma: no cover - torch is an optional extra
+            self.skipTest("torch is not installed")
+        from model.src.model.masked_layers import mask_from_degrees
+
+        count = 8
+        degrees = torch.arange(count)
+        # Input degree of column i is i, output degree of head j is j, and the
+        # output layer and direct-IO both use strict=True.
+        mask = mask_from_degrees(degrees, degrees, strict=True)
+        for head in range(count):
+            from_mask = {index for index in range(count) if mask[head, index] > 0}
+            self.assertEqual(from_mask, self._visible_columns(head))
 
     def test_supervised_head_sees_both_constrained_columns(self) -> None:
         rng = np.random.default_rng(0)
