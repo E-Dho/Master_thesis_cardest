@@ -451,13 +451,11 @@ class VoidPairCatalog:
             if over_share:
                 self.share_cap_skips += 1
                 continue
-            # Either column of the pair may serve as the anchor; the other one
-            # becomes the void column.  Prefer the later column as the void so
-            # the bottleneck sits as deep in the chain as possible.
-            if bool(rng.integers(0, 2)):
-                anchor_index, void_index = left, right
-            else:
-                anchor_index, void_index = right, left
+            # The anchor is always the earlier column. The sentinel head must
+            # come after both constrained columns, and orienting the other way
+            # round would only shrink the set of heads that can follow -- the
+            # coin flip this replaces discarded half of all draws downstream.
+            anchor_index, void_index = left, right
             anchor_value = int(encoded_row[anchor_index])
             if anchor_value >= self.domain_sizes[anchor_index]:
                 continue
@@ -600,10 +598,29 @@ def build_void_pair_catalog(
         index: marginals[index] >= config.min_marginal_count
         for index in column_indices
     }
+    # A pair is only usable when some sentinel-bearing DATA column comes after
+    # its void column: that is where the supervised head must sit, since a head
+    # cannot see its own token. Keeping pairs without one would not just waste
+    # draws -- they would occupy catalog slots, inflate the share cap's
+    # 1/len(pairs) floor, and throttle the pairs that do work.
+    last_sentinel_column = max(
+        (
+            index
+            for index, column in enumerate(metadata.columns)
+            if null_sentinel_index(column) is not None
+        ),
+        default=-1,
+    )
     viable = {
         (left, right): matrix
         for (left, right), matrix in present.items()
-        if np.any(np.outer(supported[left], supported[right]) & ~matrix)
+        if right < last_sentinel_column
+        and _pair_is_sampleable(
+            matrix,
+            supported[left],
+            supported[right],
+            config.min_anchor_partners,
+        )
     }
     if not viable:
         return None
@@ -621,6 +638,33 @@ def build_void_pair_catalog(
     if catalog.void_cell_count == 0:
         return None
     return catalog
+
+
+def _pair_is_sampleable(
+    present: np.ndarray,
+    anchor_supported: np.ndarray,
+    void_supported: np.ndarray,
+    min_anchor_partners: int,
+) -> bool:
+    """Apply the sampler's full eligibility rule, not just "some absent cell".
+
+    ``sample_void_pair`` additionally requires the anchor value to keep at least
+    ``min_anchor_partners`` present partners. A filter that checked only for an
+    absent supported cell would leave pairs in the catalog that can never be
+    drawn, and those dead pairs still count toward the share cap's
+    1/len(pairs) floor -- depressing it and throttling the pairs that do work.
+
+    Only the anchor-before-void orientation is tested, because that is the only
+    one the sampler emits.
+    """
+
+    if not anchor_supported.any() or not void_supported.any():
+        return False
+    partners = (present & void_supported).sum(axis=1)
+    has_absent = (~present & void_supported).any(axis=1)
+    return bool(
+        (anchor_supported & (partners >= min_anchor_partners) & has_absent).any()
+    )
 
 
 def sample_chain_extension_count(

@@ -10,6 +10,7 @@ import numpy as np
 from model.src.data.null_sentinel import (
     NullSentinelConfig,
     VoidPairCatalog,
+    null_sentinel_index,
     null_sentinel_indices,
     sample_chain_extension_count,
 )
@@ -37,11 +38,19 @@ class GeneratedTrainingContext:
     ordinary_predicates: Mapping[str, PredicateToken]
     trajectory_query: Any | None = None
     encoded_two_slot_row: tuple[tuple[int, int, int, int], ...] | None = None
-    # Index of the column at which this context becomes provably unsatisfiable,
-    # or None for an ordinary row-satisfied context.  Set only by null-token
-    # void injection; row-satisfaction validation is skipped for such contexts
-    # because being unsatisfied by the source row is the whole point.
+    # Index of the head SUPERVISED toward the void sentinel, or None for an
+    # ordinary row-satisfied context. This is not one of the two columns the
+    # void constrains: because ResMADE masks head j from its own token, the
+    # sentinel sits on the first predicated column AFTER both of them, which is
+    # the earliest head that can observe the impossible combination. Set only by
+    # null-token void injection; row-satisfaction validation is skipped for such
+    # contexts because being unsatisfied by the source row is the whole point.
     void_column_index: int | None = None
+    # The two columns the void constrains, (anchor, void), both strictly before
+    # ``void_column_index``. Kept so diagnostics can attribute a collapse to the
+    # relationship that caused it, and so the unsatisfied predicate is
+    # identifiable without re-deriving it.
+    void_pair_columns: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +227,7 @@ class PredicateTrainingContextGenerator:
         self._void_contexts_generated = 0
         self._void_attempts_failed = 0
         self._hard_negatives_generated = 0
+        self._void_no_observable_head = 0
 
     def attach_void_catalog(
         self,
@@ -236,6 +246,9 @@ class PredicateTrainingContextGenerator:
             "void_contexts_generated": int(self._void_contexts_generated),
             "void_attempts_failed": int(self._void_attempts_failed),
             "hard_negatives_generated": int(self._hard_negatives_generated),
+            # Voids skipped because no predicated column followed the pair, so no
+            # head could observe both constrained tokens.
+            "void_no_observable_head": int(self._void_no_observable_head),
         }
         if self.void_catalog is not None:
             summary.update(self.void_catalog.summary())
@@ -556,7 +569,6 @@ class PredicateTrainingContextGenerator:
         self,
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
-        rng: np.random.Generator,
         compiled: _CompiledGenerationMetadata,
         base_context: GeneratedTrainingContext,
         *,
@@ -564,19 +576,14 @@ class PredicateTrainingContextGenerator:
         anchor_value_id: int,
         other_column_index: int,
         other_value_id: int,
-        void_column_index: int | None,
+        sentinel_column_index: int | None,
         extensions: tuple[tuple[str, PredicateToken], ...],
     ) -> GeneratedTrainingContext | None:
-        """Build a context constraining exactly one column pair, plus extensions.
+        """Build a context constraining one column pair, plus shared extensions.
 
-        Both the void context and its matched hard negative go through here with
-        the *same* ``extensions`` tuple, so they differ only in the value put on
-        the second column and in whether the target is the sentinel.  That is
-        the point: sampling the extensions separately for each side would let
-        the two differ in which further predicates they carry, and the model
-        could then separate them by the shape of the query instead of by the
-        values -- which is exactly the shortcut the hard negative exists to
-        close off.
+        The void context and its matched hard negative go through here with the
+        same ``extensions``, so they differ only in the value on the second
+        column of the pair and in whether the target is the sentinel.
         """
 
         anchor_column = metadata.columns[anchor_column_index]
@@ -593,39 +600,61 @@ class PredicateTrainingContextGenerator:
             if name not in predicates:
                 predicates[name] = token
 
-        included_tables = set(base_context.included_tables)
+        # Work in table-mask space and close the subset over the join path from
+        # the root. Plain set arithmetic can leave a hole -- {A, C} without the
+        # intermediate B -- which is not a query the sampler could ever produce.
+        included_mask = _table_mask_from_tables(
+            set(base_context.included_tables), compiled
+        )
         for column in (anchor_column, other_column):
             if column.table is not None:
-                included_tables.add(column.table)
-        if self._requires_root(metadata, compiled) and not included_tables:
+                included_mask |= compiled.table_to_bit.get(column.table, 0)
+        included_mask &= self._present_table_mask_for_row(encoded_row, metadata, compiled)
+        included_mask = _root_connected_component_mask(
+            included_mask, compiled, compiled.graph
+        )
+        if self._requires_root(metadata, compiled) and not included_mask:
             return None
-        # Predicates on columns whose table dropped out would never reach the
-        # token row, so keep only those the included subset actually carries.
-        present_tables = self._present_tables_for_row(encoded_row, metadata, compiled)
-        if not included_tables.issubset(present_tables):
-            included_tables &= set(present_tables)
-            for column in (anchor_column, other_column):
-                if column.table is not None and column.table not in included_tables:
-                    return None
+        included_tables = set(self._tables_from_mask(compiled, included_mask))
+        for column in (anchor_column, other_column):
+            if column.table is not None and column.table not in included_tables:
+                return None
+        # Fanouts must be derived from the final subset, never inherited: an
+        # inverse-fanout token into a table that the subset now includes would
+        # contradict that table's own indicator.
+        inverse_fanouts = self._inverse_fanouts_for_table_mask(
+            metadata, compiled, included_mask
+        )
+        sentinel_column = metadata.columns[sentinel_column_index] if sentinel_column_index is not None else None
+        if sentinel_column is not None and sentinel_column.name not in predicates:
+            return None
+        if sentinel_column is not None and sentinel_column.table is not None:
+            if sentinel_column.table not in included_tables:
+                return None
 
         tokens, encoded_two_slot_row = self._tokens_and_two_slot_for_query_tables(
             metadata,
             compiled,
             included_tables,
-            set(base_context.inverse_fanout_columns),
+            set(inverse_fanouts),
             predicates,
         )
         return GeneratedTrainingContext(
             tokens=tokens,
             included_tables=frozenset(included_tables),
-            inverse_fanout_columns=base_context.inverse_fanout_columns,
+            inverse_fanout_columns=inverse_fanouts,
             ordinary_predicates=predicates,
             # Neither member of the pair carries a physical trajectory query:
             # the spatial and temporal machinery assumes a satisfying segment,
             # and the void half has none.
             trajectory_query=None,
             encoded_two_slot_row=encoded_two_slot_row,
-            void_column_index=void_column_index,
+            void_column_index=sentinel_column_index,
+            void_pair_columns=(
+                None
+                if sentinel_column_index is None
+                else (anchor_column_index, other_column_index)
+            ),
         )
 
     def _void_and_hard_negative(
@@ -638,18 +667,20 @@ class PredicateTrainingContextGenerator:
     ) -> list[GeneratedTrainingContext]:
         """Return a provably empty conjunction and its matched valid twin.
 
-        The void is anchored on a value the sampled row actually carries, so the
-        prefix stays genuine, and its second column takes a value the catalog
-        proves never co-occurs with that anchor.
+        The sentinel is NOT placed on the void column. ResMADE is strictly
+        autoregressive: head j is masked to inputs from columns before j, so it
+        never observes its own predicate token. Supervising the void column
+        would hand that head identical visible input for the void and for its
+        twin -- the two differ only at token j -- with opposite targets, and the
+        only function it could fit is the marginal P(sentinel | prefix). That is
+        precisely the constant sentinel mass measured on the 50M run.
 
-        The hard negative constrains the same two columns with the values this
-        very row carries -- a combination the row itself witnesses, so it is
-        valid by construction and its targets are the real ones.  Without it the
-        model only ever sees those two columns constrained together in void
-        contexts and learns the marginal ("this column is constrained, so void
-        is plausible") instead of the discrimination.  On the 50M benchmark that
-        produced 140 false collapses against 37 correct ones, all of them on the
-        functionally dependent segment_idx / num_of_segments pair.
+        Voidness is observable only at a head that sees BOTH constrained
+        tokens, so the pair is oriented anchor < void and the sentinel goes to
+        the first predicated DATA column strictly after the void column. That
+        head sees (anchor=u, void=v), an impossible combination, in the void and
+        (anchor=u, void=row value), a combination this row witnesses, in the
+        twin -- a difference it can actually act on.
         """
 
         catalog = self.void_catalog
@@ -658,36 +689,59 @@ class PredicateTrainingContextGenerator:
         pair = catalog.sample_void_pair(encoded_row, rng)
         if pair is None:
             return []
-        anchor_name = metadata.columns[pair.anchor_column_index].name
-        void_name = metadata.columns[pair.void_column_index].name
-        # Draw the extra row-satisfied conjuncts ONCE, here, and hand the same
-        # tuple to both sides. For a void these can only shrink an already-empty
-        # result, so provability is preserved while the predicate count matches
-        # what real zero-cardinality queries look like -- and because the twin
-        # carries the identical set, the only thing separating the pair is the
-        # value on the void column.
+        anchor_index = pair.anchor_column_index
+        void_index = pair.void_column_index
+        if anchor_index > void_index:
+            # The sampler may orient either way; a void column before its anchor
+            # is unusable because no head sees both tokens in the right order.
+            return []
+        anchor_name = metadata.columns[anchor_index].name
+        void_name = metadata.columns[void_index].name
+
+        # The sentinel head must come after both constrained columns AND carry a
+        # predicate, since an unpredicated column contributes exactly 1.0 and
+        # could not express the collapse at inference.
+        later = sorted(
+            index
+            for index, column in enumerate(metadata.columns)
+            if index > void_index
+            and column.kind == ColumnKind.DATA
+            and column.name in base_context.ordinary_predicates
+            and null_sentinel_index(column) is not None
+        )
+        if not later:
+            self._void_no_observable_head += 1
+            return []
+        sentinel_index = later[0]
+        sentinel_name = metadata.columns[sentinel_index].name
+
+        # Draw the extra row-satisfied conjuncts ONCE and hand the same tuple to
+        # both sides, so the only thing separating the pair is the void value.
+        # The sentinel column's own predicate is always carried.
         spare = [
             (name, token)
             for name, token in base_context.ordinary_predicates.items()
-            if name not in (anchor_name, void_name)
+            if name not in (anchor_name, void_name, sentinel_name)
         ]
         extension_count = sample_chain_extension_count(rng, self.null_sentinel)
-        extensions: tuple[tuple[str, PredicateToken], ...] = ()
+        chosen: list[tuple[str, PredicateToken]] = [
+            (sentinel_name, base_context.ordinary_predicates[sentinel_name])
+        ]
         if extension_count and spare:
             order = rng.permutation(len(spare))
-            extensions = tuple(spare[int(position)] for position in order[:extension_count])
+            chosen.extend(spare[int(position)] for position in order[:extension_count])
+        extensions = tuple(chosen)
 
         void_context = self._pair_constrained_context(
             encoded_row,
             metadata,
-            rng,
             compiled,
             base_context,
-            anchor_column_index=pair.anchor_column_index,
+            anchor_column_index=anchor_index,
             anchor_value_id=pair.anchor_value_id,
-            other_column_index=pair.void_column_index,
+            other_column_index=void_index,
             other_value_id=pair.void_value_id,
-            void_column_index=pair.void_column_index,
+            sentinel_column_index=sentinel_index,
             extensions=extensions,
         )
         if void_context is None:
@@ -698,14 +752,13 @@ class PredicateTrainingContextGenerator:
             negative = self._pair_constrained_context(
                 encoded_row,
                 metadata,
-                rng,
                 compiled,
                 base_context,
-                anchor_column_index=pair.anchor_column_index,
+                anchor_column_index=anchor_index,
                 anchor_value_id=pair.anchor_value_id,
-                other_column_index=pair.void_column_index,
-                other_value_id=int(encoded_row[pair.void_column_index]),
-                void_column_index=None,
+                other_column_index=void_index,
+                other_value_id=int(encoded_row[void_index]),
+                sentinel_column_index=None,
                 extensions=extensions,
             )
             if negative is not None:
@@ -2263,10 +2316,11 @@ def void_target_row(
 ) -> np.ndarray:
     """Return the target row for a void context: sentinel at and after the break.
 
-    The void column's head is supervised toward the sentinel because no row with
-    this prefix can satisfy the void predicate.  With ``cascade`` the sentinel
-    also propagates to later DATA columns so several factors collapse together
-    rather than the estimate resting on one.
+    ``void_column_index`` is the supervised head, which sits after both columns
+    the void constrains so that it can actually observe them.  With ``cascade``
+    the sentinel also propagates to later predicated DATA columns, which see the
+    same tokens, so several factors collapse together rather than the estimate
+    resting on one.
 
     ``predicated_columns`` restricts that cascade to columns the context
     actually constrains, and passing it is strongly recommended.  A wildcard

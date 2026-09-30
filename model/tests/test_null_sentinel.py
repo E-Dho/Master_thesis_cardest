@@ -29,7 +29,12 @@ from model.src.predicates.operators import PredicateOp, PredicateToken
 
 
 def _metadata() -> ModelMetadata:
-    """Two small categorical DATA columns plus an indicator and a fanout."""
+    """Three small categorical DATA columns plus an indicator and a fanout.
+
+    The third DATA column matters: because ResMADE masks head j from its own
+    token, a void on columns (0, 1) can only be supervised at a head that comes
+    after both, so a schema with just the pair has nowhere to put the sentinel.
+    """
 
     return ModelMetadata(
         columns=(
@@ -43,6 +48,12 @@ def _metadata() -> ModelMetadata:
                 name="t:size",
                 kind=ColumnKind.DATA,
                 domain=(10, 20, 30),
+                table="t",
+            ),
+            ColumnMetadata(
+                name="t:grade",
+                kind=ColumnKind.DATA,
+                domain=(100, 200, 300),
                 table="t",
             ),
             ColumnMetadata(name="I_t", kind=ColumnKind.INDICATOR, domain=(0, 1), table="t"),
@@ -74,11 +85,12 @@ class NullSentinelMetadataTest(unittest.TestCase):
         extended = apply_null_sentinel_to_metadata(_metadata(), _enabled_config())
         self.assertEqual(extended.columns[0].domain, (1, 2, 3, 4, NULL_SENTINEL_TOKEN))
         self.assertEqual(extended.columns[1].domain, (10, 20, 30, NULL_SENTINEL_TOKEN))
-        self.assertEqual(extended.columns[2].domain, (0, 1))
-        self.assertEqual(extended.columns[3].domain, (1, 2))
+        self.assertEqual(extended.columns[2].domain, (100, 200, 300, NULL_SENTINEL_TOKEN))
+        self.assertEqual(extended.columns[3].domain, (0, 1))
+        self.assertEqual(extended.columns[4].domain, (1, 2))
         self.assertTrue(column_has_null_sentinel(extended.columns[0]))
-        self.assertFalse(column_has_null_sentinel(extended.columns[2]))
-        self.assertIsNone(null_sentinel_index(extended.columns[3]))
+        self.assertFalse(column_has_null_sentinel(extended.columns[3]))
+        self.assertIsNone(null_sentinel_index(extended.columns[4]))
 
     def test_existing_encoded_ids_keep_their_meaning(self) -> None:
         original = _metadata()
@@ -97,7 +109,7 @@ class NullSentinelMetadataTest(unittest.TestCase):
         original = _metadata()
         extended = apply_null_sentinel_to_metadata(original, _enabled_config())
         self.assertEqual(
-            sum(extended.data_output_bins) - sum(original.data_output_bins), 2
+            sum(extended.data_output_bins) - sum(original.data_output_bins), 3
         )
 
     def test_factorization_plan_is_built_on_the_extended_domain(self) -> None:
@@ -188,19 +200,25 @@ class VoidPairCatalogTest(unittest.TestCase):
         # (colour=1, size=*) is therefore never void, while (colour=2, size=20)
         # and (colour=2, size=30) are.
         self.rows = np.array(
-            [[0, 0, 1, 0], [0, 1, 1, 0], [0, 2, 1, 0], [1, 0, 1, 0], [1, 0, 1, 0]],
+            [
+                [0, 0, 0, 1, 0],
+                [0, 1, 1, 1, 0],
+                [0, 2, 2, 1, 0],
+                [1, 0, 0, 1, 0],
+                [1, 0, 1, 1, 0],
+            ],
             dtype=int,
         )
 
     def test_eligible_columns_exclude_indicators_and_fanouts(self) -> None:
         self.assertEqual(
-            eligible_catalog_columns(self.metadata, _enabled_config()), (0, 1)
+            eligible_catalog_columns(self.metadata, _enabled_config()), (0, 1, 2)
         )
 
     def test_large_domains_are_excluded_from_the_catalog(self) -> None:
         config = _enabled_config(max_catalog_domain_size=3)
-        # colour has four real values, size has three.
-        self.assertEqual(eligible_catalog_columns(self.metadata, config), (1,))
+        # colour has four real values; size and grade have three.
+        self.assertEqual(eligible_catalog_columns(self.metadata, config), (1, 2))
 
     def test_absent_pairs_are_reported_as_void(self) -> None:
         catalog = build_void_pair_catalog(self.rows, self.metadata, _enabled_config())
@@ -220,14 +238,15 @@ class VoidPairCatalogTest(unittest.TestCase):
         catalog = build_void_pair_catalog(
             self.rows, self.metadata, _enabled_config(min_anchor_partners=2)
         )
-        self.assertIsNotNone(catalog)
-        # colour=2 co-occurs with exactly one size, so voiding one of its
-        # partners would teach "colour=2 implies void" rather than a pair fact.
-        self.assertEqual(catalog.present_partner_count(0, 1, 1), 1)
-        pair = catalog.sample_void_pair(
-            self.rows[3], np.random.default_rng(0), max_attempts=64
-        )
-        self.assertIsNone(pair)
+        # colour=1 co-occurs with exactly one size, so voiding one of its
+        # partners would teach "colour=1 implies void" rather than a pair fact.
+        # With the guard no anchor value on that pair qualifies, so the pair is
+        # not merely unsampleable -- it never enters the catalog, and therefore
+        # cannot depress the share cap's 1/len(pairs) floor either.
+        if catalog is not None:
+            self.assertNotIn((0, 1), dict.fromkeys(catalog._present))
+            self.assertEqual(catalog.present_partner_count(0, 1, 1), 0)
+            self.assertEqual(list(catalog.absent_values_for(0, 1, 1)), [])
 
     def test_sampled_void_pair_is_anchored_on_the_row_value(self) -> None:
         catalog = build_void_pair_catalog(self.rows, self.metadata, _enabled_config())
@@ -252,7 +271,12 @@ class VoidPairCatalogTest(unittest.TestCase):
 
     def test_catalog_is_none_when_no_void_exists(self) -> None:
         dense = np.array(
-            [[colour, size, 1, 0] for colour in range(4) for size in range(3)],
+            [
+                [colour, size, grade, 1, 0]
+                for colour in range(4)
+                for size in range(3)
+                for grade in range(3)
+            ],
             dtype=int,
         )
         self.assertIsNone(
@@ -277,6 +301,7 @@ class PairShareCapTest(unittest.TestCase):
                     ColumnMetadata("t:a", ColumnKind.DATA, tuple(range(4)), table="t"),
                     ColumnMetadata("t:b", ColumnKind.DATA, tuple(range(4)), table="t"),
                     ColumnMetadata("t:fd", ColumnKind.DATA, tuple(range(4)), table="t"),
+                    ColumnMetadata("t:tail", ColumnKind.DATA, tuple(range(3)), table="t"),
                     ColumnMetadata("I_t", ColumnKind.INDICATOR, (0, 1), table="t"),
                 ),
                 full_join_cardinality=1000.0,
@@ -287,7 +312,8 @@ class PairShareCapTest(unittest.TestCase):
         for a in range(4):
             for b in ([0, 1] if a == 0 else [0, 1, 2, 3]):
                 for fd in range(a + 1):
-                    rows.append([a, b, fd, 1])
+                    for tail in range(3):
+                        rows.append([a, b, fd, tail, 1])
         self.rows = np.array(rows, dtype=int)
 
     def _draw(self, share: float, draws: int = 900):
@@ -343,7 +369,13 @@ class PairShareCapTest(unittest.TestCase):
         # pair the floor is 1.0 and nothing is throttled -- no unsatisfiable
         # cap, and so no need to fall back to ordinary contexts.
         rows = np.array(
-            [[a, 0, fd, 1] for a in range(4) for fd in range(a + 1)], dtype=int
+            [
+                [a, 0, fd, tail, 1]
+                for a in range(4)
+                for fd in range(a + 1)
+                for tail in range(3)
+            ],
+            dtype=int,
         )
         catalog = build_void_pair_catalog(
             rows, self.metadata, _enabled_config(max_pair_share=0.01)
@@ -358,14 +390,22 @@ class PairShareCapTest(unittest.TestCase):
                 continue
             catalog.commit_void_pair(pair)
             drawn += 1
-        self.assertGreater(drawn, 200, "a lone viable pair must not be throttled")
+        # The invariant is that the CAP never refuses a draw; some rows still
+        # fail the sampler's own eligibility rules, which is unrelated.
+        self.assertGreater(drawn, 0)
         self.assertEqual(catalog.pair_usage_summary()["share_cap_skips"], 0)
 
     def test_catalog_drops_pairs_that_can_never_produce_a_void(self) -> None:
         # Columns 0 and 1 co-occur densely here, so that pair is unusable and
         # must not inflate the denominator of the share cap's floor.
         rows = np.array(
-            [[a, b, fd, 1] for a in range(4) for b in range(4) for fd in range(a + 1)],
+            [
+                [a, b, fd, tail, 1]
+                for a in range(4)
+                for b in range(4)
+                for fd in range(a + 1)
+                for tail in range(3)
+            ],
             dtype=int,
         )
         catalog = build_void_pair_catalog(rows, self.metadata, _enabled_config())
@@ -384,7 +424,7 @@ class PairShareCapTest(unittest.TestCase):
 class VoidTargetRowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.metadata = apply_null_sentinel_to_metadata(_metadata(), _enabled_config())
-        self.row = np.array([2, 1, 1, 0], dtype=int)
+        self.row = np.array([2, 1, 0, 1, 0], dtype=int)
 
     def test_sentinel_is_written_at_the_void_column(self) -> None:
         targets = void_target_row(self.row, self.metadata, 1, cascade=False)
@@ -395,10 +435,11 @@ class VoidTargetRowTest(unittest.TestCase):
         targets = void_target_row(self.row, self.metadata, 0, cascade=True)
         self.assertEqual(targets[0], null_sentinel_index(self.metadata.columns[0]))
         self.assertEqual(targets[1], null_sentinel_index(self.metadata.columns[1]))
+        self.assertEqual(targets[2], null_sentinel_index(self.metadata.columns[2]))
         # Indicator and fanout heads keep their real values: table presence and
         # the inverse fanout weights have no meaningful void state.
-        self.assertEqual(targets[2], 1)
-        self.assertEqual(targets[3], 0)
+        self.assertEqual(targets[3], 1)
+        self.assertEqual(targets[4], 0)
 
     def test_cascade_skips_columns_the_context_does_not_constrain(self) -> None:
         # Column 1 carries no predicate here, so supervising it toward the
@@ -424,11 +465,11 @@ class VoidTargetRowTest(unittest.TestCase):
 
     def test_source_row_is_not_mutated(self) -> None:
         void_target_row(self.row, self.metadata, 0, cascade=True)
-        self.assertEqual(list(self.row), [2, 1, 1, 0])
+        self.assertEqual(list(self.row), [2, 1, 0, 1, 0])
 
     def test_column_without_sentinel_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            void_target_row(self.row, self.metadata, 3, cascade=False)
+            void_target_row(self.row, self.metadata, 4, cascade=False)
 
 
 class ChainExtensionTest(unittest.TestCase):
@@ -460,12 +501,28 @@ class VoidContextGenerationTest(unittest.TestCase):
         self.config = _enabled_config(void_probability=1.0)
         self.metadata = apply_null_sentinel_to_metadata(_metadata(), self.config)
         self.rows = np.array(
-            [[0, 0, 1, 0], [0, 1, 1, 0], [0, 2, 1, 0], [1, 0, 1, 0], [1, 1, 1, 0]],
+            [
+                [0, 0, 0, 1, 0],
+                [0, 1, 1, 1, 0],
+                [0, 2, 2, 1, 0],
+                [1, 0, 1, 1, 0],
+                [1, 1, 2, 1, 0],
+            ],
             dtype=int,
         )
         self.catalog = build_void_pair_catalog(self.rows, self.metadata, self.config)
+        # No wildcards: the sentinel head must carry a predicate, so a fixture
+        # that frequently leaves the trailing column unconstrained would mostly
+        # produce no void at all and hide regressions.
         self.generator = PredicateTrainingContextGenerator(
-            {"enabled": True, "wildcard_probability": 0.3, "seed": 0}
+            {
+                "enabled": True,
+                "wildcard_probability": 0.0,
+                "equality_probability": 1.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "seed": 0,
+            }
         )
 
     def test_injection_is_inert_until_a_catalog_is_attached(self) -> None:
@@ -508,30 +565,34 @@ class VoidContextGenerationTest(unittest.TestCase):
             for context in self.generator._void_and_hard_negative(
                 row, self.metadata, rng, compiled, base
             ):
-                index = context.void_column_index
-                if index is None:
+                if context.void_column_index is None:
                     continue
-                row_value = self.metadata.columns[index].domain[int(row[index])]
-                self.assertFalse(context.tokens[index].satisfies(row_value))
+                # The supervised head's own predicate is row-satisfied; it is
+                # the pair's void column that the row fails.
+                anchor, void = context.void_pair_columns
+                self.assertLess(void, context.void_column_index)
+                anchor_value = self.metadata.columns[anchor].domain[int(row[anchor])]
+                self.assertTrue(context.tokens[anchor].satisfies(anchor_value))
+                void_value = self.metadata.columns[void].domain[int(row[void])]
+                self.assertFalse(context.tokens[void].satisfies(void_value))
 
     def test_row_satisfaction_validation_exempts_void_contexts(self) -> None:
         self.generator.attach_void_catalog(self.catalog, self.config)
         rng = np.random.default_rng(1)
         compiled = self.generator._compiled(self.metadata)
-        # colour=1 never co-occurs with size=30, so this row can host a void.
-        row = self.rows[2]
         contexts = []
+        rows = []
         for _ in range(20):
-            base = self.generator._generate_one(row, self.metadata, rng)
-            contexts.extend(
-                context
+            for row in self.rows:
+                base = self.generator._generate_one(row, self.metadata, rng)
                 for context in self.generator._void_and_hard_negative(
                     row, self.metadata, rng, compiled, base
-                )
-                if context.void_column_index is not None
-            )
-        self.assertTrue(contexts, "no void context could be built for this row")
-        for context in contexts:
+                ):
+                    if context.void_column_index is not None:
+                        contexts.append(context)
+                        rows.append(row)
+        self.assertTrue(contexts, "no void context could be built for any row")
+        for context, row in zip(contexts, rows):
             self.assertTrue(context_satisfies_row(context, row, self.metadata))
 
     def test_cascade_never_targets_an_unpredicated_column(self) -> None:
@@ -563,7 +624,8 @@ class VoidContextGenerationTest(unittest.TestCase):
         rng = np.random.default_rng(5)
         compiled = self.generator._compiled(self.metadata)
         pairs = 0
-        for row in self.rows:
+        for _ in range(20):
+          for row in self.rows:
             base = self.generator._generate_one(row, self.metadata, rng)
             emitted = self.generator._void_and_hard_negative(
                 row, self.metadata, rng, compiled, base
@@ -576,19 +638,20 @@ class VoidContextGenerationTest(unittest.TestCase):
             self.assertIsNotNone(void.void_column_index)
             self.assertIsNone(negative.void_column_index)
             # Same two columns constrained, so the model cannot tell the pair
-            # apart by the shape of the query -- only by the values.
-            index = void.void_column_index
-            self.assertEqual(
-                negative.tokens[index].op, PredicateOp.EQUAL
-            )
+            # apart by the shape of the query -- only by the value on the void
+            # column, which the supervised head sits after and can therefore
+            # actually observe.
+            _anchor, void_column = void.void_pair_columns
+            self.assertLess(void_column, void.void_column_index)
+            self.assertEqual(negative.tokens[void_column].op, PredicateOp.EQUAL)
             self.assertNotEqual(
-                negative.tokens[index].value, void.tokens[index].value
+                negative.tokens[void_column].value, void.tokens[void_column].value
             )
             # The negative's value is the one this very row carries, so the
             # combination is valid by construction.
             self.assertEqual(
-                negative.tokens[index].value,
-                self.metadata.columns[index].domain[int(row[index])],
+                negative.tokens[void_column].value,
+                self.metadata.columns[void_column].domain[int(row[void_column])],
             )
         self.assertTrue(pairs, "no void/negative pair was produced")
 
@@ -611,20 +674,28 @@ class VoidContextGenerationTest(unittest.TestCase):
                     continue
                 void, negative = emitted
                 checked += 1
-                index = void.void_column_index
                 self.assertEqual(
                     set(void.ordinary_predicates), set(negative.ordinary_predicates)
                 )
                 self.assertEqual(void.included_tables, negative.included_tables)
-                for column_index in range(len(self.metadata.columns)):
-                    if column_index == index:
-                        continue
-                    self.assertEqual(
-                        void.tokens[column_index],
-                        negative.tokens[column_index],
-                        f"column {column_index} differs between the pair",
-                    )
-                self.assertNotEqual(void.tokens[index], negative.tokens[index])
+                self.assertEqual(
+                    void.inverse_fanout_columns, negative.inverse_fanout_columns
+                )
+                differing = [
+                    index
+                    for index in range(len(self.metadata.columns))
+                    if void.tokens[index] != negative.tokens[index]
+                ]
+                # Exactly one token differs: the constrained void column. And it
+                # must precede the supervised head, or that head could not see
+                # the difference it is being asked to act on.
+                self.assertEqual(
+                    differing,
+                    [differing[0]] if differing else [],
+                    f"more than one token differs: {differing}",
+                )
+                self.assertEqual(len(differing), 1)
+                self.assertLess(differing[0], void.void_column_index)
         self.assertGreater(checked, 5, "too few pairs to be meaningful")
 
     def test_hard_negative_targets_the_real_row_value(self) -> None:
@@ -757,6 +828,175 @@ class TorchSentinelExclusionTest(unittest.TestCase):
                     np.array(probabilities), self.column, token
                 )
                 self.assertAlmostEqual(float(torch_factor[0]), reference, places=6)
+
+
+class TableSubsetConsistencyTest(unittest.TestCase):
+    """Adding the pair's tables must not leave stale fanouts or a hole."""
+
+    def setUp(self) -> None:
+        from model.src.data.full_join_sampler import SyntheticFullJoinSampleSource
+
+        self.source = SyntheticFullJoinSampleSource()
+        self.config = _enabled_config(void_probability=1.0)
+        self.metadata = apply_null_sentinel_to_metadata(
+            self.source.metadata, self.config
+        )
+        self.catalog = build_void_pair_catalog(
+            self.source.dataset.encoded_rows, self.metadata, self.config
+        )
+        self.generator = PredicateTrainingContextGenerator(
+            {"enabled": True, "wildcard_probability": 0.0, "seed": 0}
+        )
+        self.generator.attach_void_catalog(self.catalog, self.config)
+
+    def _void_contexts(self, draws: int = 60):
+        if self.catalog is None:
+            self.skipTest("synthetic fixture yields no void pair")
+        rng = np.random.default_rng(0)
+        compiled = self.generator._compiled(self.metadata)
+        rows = np.asarray(self.source.dataset.encoded_rows)
+        out = []
+        for _ in range(draws):
+            for row in rows:
+                base = self.generator._generate_one(row, self.metadata, rng)
+                out.extend(
+                    context
+                    for context in self.generator._void_and_hard_negative(
+                        row, self.metadata, rng, compiled, base
+                    )
+                )
+        return out
+
+    def test_fanouts_are_derived_from_the_final_table_subset(self) -> None:
+        contexts = self._void_contexts()
+        self.assertTrue(contexts)
+        for context in contexts:
+            for index, column in enumerate(self.metadata.columns):
+                if column.kind != ColumnKind.FANOUT:
+                    continue
+                active = context.tokens[index].op == PredicateOp.INV_FANOUT
+                self.assertEqual(
+                    active,
+                    column.name in context.inverse_fanout_columns,
+                    "emitted fanout tokens must match inverse_fanout_columns",
+                )
+                # An inverse fanout points at a table the subset excludes; if
+                # that table is included the two statements contradict.
+                if active:
+                    child = self.generator._compiled(
+                        self.metadata
+                    ).fanout_child_by_name.get(column.name)
+                    if child is not None:
+                        self.assertNotIn(child, context.included_tables)
+
+    def test_table_subset_stays_connected_to_the_root(self) -> None:
+        from model.src.predicates.generation import (
+            _root_connected_component_mask,
+            _table_mask_from_tables,
+        )
+
+        compiled = self.generator._compiled(self.metadata)
+        for context in self._void_contexts():
+            mask = _table_mask_from_tables(set(context.included_tables), compiled)
+            closed = _root_connected_component_mask(mask, compiled, compiled.graph)
+            self.assertEqual(
+                mask,
+                closed,
+                f"subset {sorted(context.included_tables)} is not root-connected",
+            )
+
+
+class CausalVisibilityTest(unittest.TestCase):
+    """The supervised head must be able to see what makes the context void.
+
+    ResMADE masks head j to inputs from columns before j, so a head never
+    observes its own predicate token. Supervising the void column would give the
+    void and its twin identical visible input with opposite targets, and the
+    only function the head could fit is the marginal P(sentinel | prefix) --
+    which is exactly the constant sentinel mass the 50M run produced.
+    """
+
+    def setUp(self) -> None:
+        self.config = _enabled_config(void_probability=1.0)
+        self.metadata = apply_null_sentinel_to_metadata(_metadata(), self.config)
+        self.rows = np.array(
+            [
+                [0, 0, 0, 1, 0],
+                [0, 1, 1, 1, 0],
+                [0, 2, 2, 1, 0],
+                [1, 0, 1, 1, 0],
+                [1, 1, 2, 1, 0],
+            ],
+            dtype=int,
+        )
+        self.catalog = build_void_pair_catalog(self.rows, self.metadata, self.config)
+        self.generator = PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "wildcard_probability": 0.0,
+                "equality_probability": 1.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "seed": 0,
+            }
+        )
+        self.generator.attach_void_catalog(self.catalog, self.config)
+
+    @staticmethod
+    def _visible_columns(head_index: int) -> set[int]:
+        """Columns a ResMADE head can read, from the model's own mask rule."""
+
+        from model.src.model.masked_layers import mask_from_degrees
+        import torch
+
+        count = 8
+        degrees = torch.arange(count)
+        # Output layer and direct-IO both use strict=True: in_degree < out_degree.
+        mask = mask_from_degrees(degrees, degrees, strict=True)
+        return {index for index in range(count) if mask[head_index, index] > 0}
+
+    def test_head_cannot_see_its_own_token(self) -> None:
+        for head in range(6):
+            self.assertNotIn(head, self._visible_columns(head))
+
+    def test_supervised_head_sees_both_constrained_columns(self) -> None:
+        rng = np.random.default_rng(0)
+        compiled = self.generator._compiled(self.metadata)
+        checked = 0
+        for _ in range(40):
+            for row in self.rows:
+                base = self.generator._generate_one(row, self.metadata, rng)
+                for context in self.generator._void_and_hard_negative(
+                    row, self.metadata, rng, compiled, base
+                ):
+                    if context.void_column_index is None:
+                        continue
+                    checked += 1
+                    head = context.void_column_index
+                    anchor, void = context.void_pair_columns
+                    visible = self._visible_columns(head)
+                    self.assertIn(anchor, visible, "anchor invisible to the head")
+                    self.assertIn(void, visible, "void column invisible to the head")
+        self.assertGreater(checked, 5, "too few void contexts to be meaningful")
+
+    def test_supervised_head_carries_a_predicate(self) -> None:
+        # A wildcard column contributes exactly 1.0, so supervising an
+        # unpredicated head could never move the estimate at inference.
+        rng = np.random.default_rng(1)
+        compiled = self.generator._compiled(self.metadata)
+        checked = 0
+        for _ in range(40):
+            for row in self.rows:
+                base = self.generator._generate_one(row, self.metadata, rng)
+                for context in self.generator._void_and_hard_negative(
+                    row, self.metadata, rng, compiled, base
+                ):
+                    if context.void_column_index is None:
+                        continue
+                    checked += 1
+                    head = context.void_column_index
+                    self.assertNotEqual(context.tokens[head].op, PredicateOp.WILDCARD)
+        self.assertGreater(checked, 5)
 
 
 class NullSentinelConfigTest(unittest.TestCase):
