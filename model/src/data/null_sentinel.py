@@ -43,9 +43,10 @@ NULL_SENTINEL_TOKEN = "__VOID__"
 # fixture is never materialized in full.
 _CATALOG_CHUNK_ROWS = 1_000_000
 
-# Samples drawn before the per-pair share cap starts binding, so early noise
-# cannot lock out a pair that simply happened to be drawn first.
-_PAIR_SHARE_WARMUP = 64
+# No warm-up period: the projected-share test admits the first draw of any pair
+# (use 0 against a positive budget) and refuses the next one that would break
+# the cap, so it self-corrects from the very first sample. A warm-up would let a
+# dominant pair bank a surplus during it that the cap can never claw back.
 
 
 @dataclass(frozen=True)
@@ -256,6 +257,7 @@ class VoidPairCatalog:
         self.max_pair_share = float(max_pair_share)
         self._pair_use: dict[tuple[int, int], int] = {}
         self._total_use = 0
+        self.share_cap_skips = 0
         self._supported: dict[int, np.ndarray] = {
             index: marginal >= min_marginal_count
             for index, marginal in marginals.items()
@@ -311,11 +313,20 @@ class VoidPairCatalog:
         """
 
         if not self._total_use:
-            return {"void_pairs_drawn": 0, "top_pairs": []}
+            return {
+                "void_pairs_drawn": 0,
+                "top_pairs": [],
+                "share_cap_skips": int(self.share_cap_skips),
+            }
         ranked = sorted(self._pair_use.items(), key=lambda item: -item[1])
         return {
             "void_pairs_drawn": self._total_use,
             "distinct_pairs_used": len(self._pair_use),
+            # A large skip count against few draws means the cap is throttling
+            # void volume rather than diversifying it: the other pairs cannot
+            # supply the freed budget, so raise max_pair_share or widen the
+            # catalog instead of reading this as healthy balance.
+            "share_cap_skips": int(self.share_cap_skips),
             "top_pairs": [
                 {"pair": [int(left), int(right)], "share": round(count / self._total_use, 4)}
                 for (left, right), count in ranked[:top]
@@ -414,18 +425,31 @@ class VoidPairCatalog:
         # of absent cells and therefore succeeds nearly always, crowding every
         # other relationship out of training. The share cap bounds how much of
         # the void budget any one pair may take.
+        # The cap is enforced on every attempt. An earlier version skipped it on
+        # the final attempt so a schema with one viable pair would still yield
+        # voids; that let a dominant pair exceed its configured share whenever
+        # alternatives were unavailable for the sampled row, which is precisely
+        # the failure the cap exists to prevent. When no eligible pair remains
+        # this returns None and the caller emits an ordinary context instead --
+        # fewer voids, but an honest share.
+        #
+        # The floor keeps the cap satisfiable: with n pairs no setting below 1/n
+        # can be met by any pair, so a lower value would block every draw.
         share_cap = max(self.max_pair_share, 1.0 / len(self._pairs))
-        for attempt in range(max_attempts):
+        for _ in range(max_attempts):
             pair_index = int(rng.integers(0, len(self._pairs)))
             left, right = self._pairs[pair_index]
-            # The final attempt ignores the cap so a schema whose only viable
-            # pair is an over-used one still yields voids rather than none.
-            capped = (
-                attempt < max_attempts - 1
-                and self._total_use >= _PAIR_SHARE_WARMUP
-                and self._pair_use.get((left, right), 0) > share_cap * self._total_use
+            # Test the share this pair WOULD hold after being admitted, not the
+            # one it holds now. Comparing against the current total deadlocks:
+            # with n pairs and a cap at the 1/n floor, every pair sits exactly
+            # at its share and each one blocks the next, so no void is ever
+            # drawn. Measuring against total+1 leaves at most a single draw of
+            # overshoot, which decays as the run goes on.
+            over_share = self._pair_use.get((left, right), 0) >= share_cap * (
+                self._total_use + 1
             )
-            if capped:
+            if over_share:
+                self.share_cap_skips += 1
                 continue
             # Either column of the pair may serve as the anchor; the other one
             # becomes the void column.  Prefer the later column as the void so
@@ -566,6 +590,24 @@ def build_void_pair_catalog(
             flat = columns[left][mask] * width + columns[right][mask]
             seen = np.bincount(flat, minlength=domain_sizes[left] * width) > 0
             present[(left, right)] |= seen.reshape(domain_sizes[left], width)
+    # Keep only pairs that can actually produce a void: a cell that is absent
+    # AND whose two values both clear the marginal floor. Carrying the rest
+    # would waste proposal attempts and, worse, inflate the denominator of the
+    # share cap's 1/len(pairs) floor -- with 120 catalog pairs but three viable
+    # ones, a 0.25 cap would compute a floor of 0.008 and throttle voids to
+    # nothing while looking perfectly well configured.
+    supported = {
+        index: marginals[index] >= config.min_marginal_count
+        for index in column_indices
+    }
+    viable = {
+        (left, right): matrix
+        for (left, right), matrix in present.items()
+        if np.any(np.outer(supported[left], supported[right]) & ~matrix)
+    }
+    if not viable:
+        return None
+    present = viable
     catalog = VoidPairCatalog(
         column_indices=column_indices,
         domain_sizes=domain_sizes,

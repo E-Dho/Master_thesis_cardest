@@ -509,6 +509,48 @@ class TrajectoryDistinctTest(unittest.TestCase):
         self.assertFalse(bool(result.eligible_mask[0]))
         self.assertEqual(result.skip_reasons[0], "non_segment_measure")
 
+    def test_null_sentinel_void_context_is_not_a_trajectory_target(self) -> None:
+        metadata = _trajectory_metadata()
+        rows, trajectory_ids = _trajectory_rows(metadata)
+        provider = TrajectorySegmentIndex.from_rows(
+            metadata=metadata,
+            trajectory_ids=trajectory_ids,
+            encoded_rows=rows,
+            trajectory_key="trip_id",
+            segment_varying_columns=("segment.x",),
+            segment_table="segments",
+        )
+        void_context = GeneratedTrainingContext(
+            tokens=(
+                PredicateToken.equal(0),
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+                PredicateToken.equal(1),
+                PredicateToken.equal(1),
+                PredicateToken.wildcard(),
+            ),
+            included_tables=frozenset({"trips", "segments"}),
+            inverse_fanout_columns=frozenset(),
+            ordinary_predicates={
+                "segment.x": PredicateToken.equal(0),
+                "segment.y": PredicateToken.equal(1),
+            },
+            void_column_index=1,
+        )
+        eligibility = trajectory_distinct_context_eligibility(
+            void_context,
+            metadata,
+            provider.runtime_config,
+        )
+        self.assertFalse(eligibility.eligible)
+        self.assertEqual(eligibility.reason, "null_sentinel_zero_support")
+        result = provider.evaluate_batch(
+            anchor_trajectory_ids=("A",),
+            contexts=(void_context,),
+        )
+        self.assertFalse(bool(result.eligible_mask[0]))
+        self.assertEqual(result.skip_reasons[0], "null_sentinel_zero_support")
+
     def test_static_predicate_does_not_reduce_local_segment_multiplicity(self) -> None:
         metadata = _trajectory_metadata()
         rows, trajectory_ids = _trajectory_rows(metadata)

@@ -617,6 +617,8 @@ def trajectory_distinct_context_eligibility(
     """Return whether the ordinary estimator output is a segment cardinality."""
 
     del metadata
+    if context.void_column_index is not None:
+        return TrajectoryDistinctEligibility(False, "null_sentinel_zero_support")
     if config.predicate_scope != "segment_query":
         return TrajectoryDistinctEligibility(False, "unsupported_predicate_scope")
     if config.segment_table not in context.included_tables:

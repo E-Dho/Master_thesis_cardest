@@ -565,14 +565,18 @@ class PredicateTrainingContextGenerator:
         other_column_index: int,
         other_value_id: int,
         void_column_index: int | None,
+        extensions: tuple[tuple[str, PredicateToken], ...],
     ) -> GeneratedTrainingContext | None:
         """Build a context constraining exactly one column pair, plus extensions.
 
-        Both the void context and its matched hard negative go through here, so
-        they differ only in the value put on the second column and in whether
-        the target is the sentinel.  Keeping them structurally identical is the
-        point: the model has to tell them apart from the values, not from the
-        shape of the query.
+        Both the void context and its matched hard negative go through here with
+        the *same* ``extensions`` tuple, so they differ only in the value put on
+        the second column and in whether the target is the sentinel.  That is
+        the point: sampling the extensions separately for each side would let
+        the two differ in which further predicates they carry, and the model
+        could then separate them by the shape of the query instead of by the
+        values -- which is exactly the shortcut the hard negative exists to
+        close off.
         """
 
         anchor_column = metadata.columns[anchor_column_index]
@@ -585,20 +589,8 @@ class PredicateTrainingContextGenerator:
                 other_column.domain[other_value_id]
             ),
         }
-        # Re-admit a geometrically sampled number of the row-satisfied
-        # predicates the base context already drew.  For a void these can only
-        # shrink an already-empty result, so provability is preserved while the
-        # predicate count matches what real zero-cardinality queries look like.
-        spare = [
-            (name, token)
-            for name, token in base_context.ordinary_predicates.items()
-            if name not in predicates
-        ]
-        extensions = sample_chain_extension_count(rng, self.null_sentinel)
-        if extensions and spare:
-            order = rng.permutation(len(spare))
-            for position in order[:extensions]:
-                name, token = spare[int(position)]
+        for name, token in extensions:
+            if name not in predicates:
                 predicates[name] = token
 
         included_tables = set(base_context.included_tables)
@@ -666,6 +658,25 @@ class PredicateTrainingContextGenerator:
         pair = catalog.sample_void_pair(encoded_row, rng)
         if pair is None:
             return []
+        anchor_name = metadata.columns[pair.anchor_column_index].name
+        void_name = metadata.columns[pair.void_column_index].name
+        # Draw the extra row-satisfied conjuncts ONCE, here, and hand the same
+        # tuple to both sides. For a void these can only shrink an already-empty
+        # result, so provability is preserved while the predicate count matches
+        # what real zero-cardinality queries look like -- and because the twin
+        # carries the identical set, the only thing separating the pair is the
+        # value on the void column.
+        spare = [
+            (name, token)
+            for name, token in base_context.ordinary_predicates.items()
+            if name not in (anchor_name, void_name)
+        ]
+        extension_count = sample_chain_extension_count(rng, self.null_sentinel)
+        extensions: tuple[tuple[str, PredicateToken], ...] = ()
+        if extension_count and spare:
+            order = rng.permutation(len(spare))
+            extensions = tuple(spare[int(position)] for position in order[:extension_count])
+
         void_context = self._pair_constrained_context(
             encoded_row,
             metadata,
@@ -677,6 +688,7 @@ class PredicateTrainingContextGenerator:
             other_column_index=pair.void_column_index,
             other_value_id=pair.void_value_id,
             void_column_index=pair.void_column_index,
+            extensions=extensions,
         )
         if void_context is None:
             return []
@@ -694,6 +706,7 @@ class PredicateTrainingContextGenerator:
                 other_column_index=pair.void_column_index,
                 other_value_id=int(encoded_row[pair.void_column_index]),
                 void_column_index=None,
+                extensions=extensions,
             )
             if negative is not None:
                 contexts.append(negative)

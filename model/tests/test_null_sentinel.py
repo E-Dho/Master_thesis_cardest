@@ -322,9 +322,26 @@ class PairShareCapTest(unittest.TestCase):
             len(counts), 2, "the freed budget must reach another pair"
         )
 
-    def test_cap_never_starves_a_single_viable_pair(self) -> None:
-        # One eligible pair makes any cap below 100% unsatisfiable; it must
-        # degrade to no cap rather than blocking every draw.
+    def test_configured_share_is_actually_respected(self) -> None:
+        # The cap is enforced on every attempt, so no pair may finish above it.
+        # The floor at 1/len(pairs) keeps it satisfiable.
+        catalog, counts, _ = self._draw(0.5)
+        total = sum(counts.values())
+        allowed = max(0.5, 1.0 / catalog.pair_count)
+        for pair, count in counts.items():
+            # The projected-share test permits at most one draw of overshoot,
+            # which decays as the run goes on.
+            self.assertLessEqual(
+                count / total,
+                allowed + 1.0 / total + 1e-9,
+                f"pair {pair} took {count / total:.3f} of a {allowed:.3f} budget",
+            )
+
+    def test_single_viable_pair_is_never_starved(self) -> None:
+        # Only pairs that can produce a void enter the catalog, so the cap's
+        # 1/len(pairs) floor is computed over viable pairs alone. With one such
+        # pair the floor is 1.0 and nothing is throttled -- no unsatisfiable
+        # cap, and so no need to fall back to ordinary contexts.
         rows = np.array(
             [[a, 0, fd, 1] for a in range(4) for fd in range(a + 1)], dtype=int
         )
@@ -332,12 +349,29 @@ class PairShareCapTest(unittest.TestCase):
             rows, self.metadata, _enabled_config(max_pair_share=0.01)
         )
         self.assertIsNotNone(catalog)
+        self.assertEqual(catalog.pair_count, 1)
         rng = np.random.default_rng(0)
-        drawn = sum(
-            catalog.sample_void_pair(rows[i % len(rows)], rng) is not None
-            for i in range(300)
+        drawn = 0
+        for index in range(300):
+            pair = catalog.sample_void_pair(rows[index % len(rows)], rng)
+            if pair is None:
+                continue
+            catalog.commit_void_pair(pair)
+            drawn += 1
+        self.assertGreater(drawn, 200, "a lone viable pair must not be throttled")
+        self.assertEqual(catalog.pair_usage_summary()["share_cap_skips"], 0)
+
+    def test_catalog_drops_pairs_that_can_never_produce_a_void(self) -> None:
+        # Columns 0 and 1 co-occur densely here, so that pair is unusable and
+        # must not inflate the denominator of the share cap's floor.
+        rows = np.array(
+            [[a, b, fd, 1] for a in range(4) for b in range(4) for fd in range(a + 1)],
+            dtype=int,
         )
-        self.assertGreater(drawn, 0)
+        catalog = build_void_pair_catalog(rows, self.metadata, _enabled_config())
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog.pair_count, 1)
+        self.assertEqual(list(catalog.absent_values_for(0, 0, 1)), [])
 
     def test_usage_summary_reports_the_spread(self) -> None:
         catalog, _, _ = self._draw(0.34)
@@ -557,6 +591,41 @@ class VoidContextGenerationTest(unittest.TestCase):
                 self.metadata.columns[index].domain[int(row[index])],
             )
         self.assertTrue(pairs, "no void/negative pair was produced")
+
+    def test_pair_is_token_identical_except_the_void_value(self) -> None:
+        # The whole point of the hard negative is that the model cannot separate
+        # it from the void by the shape of the query. Sampling the extension
+        # predicates independently for each side would break that, so assert
+        # token equality on every column but the void one.
+        self.generator.attach_void_catalog(self.catalog, self.config)
+        rng = np.random.default_rng(5)
+        compiled = self.generator._compiled(self.metadata)
+        checked = 0
+        for _ in range(40):
+            for row in self.rows:
+                base = self.generator._generate_one(row, self.metadata, rng)
+                emitted = self.generator._void_and_hard_negative(
+                    row, self.metadata, rng, compiled, base
+                )
+                if len(emitted) != 2:
+                    continue
+                void, negative = emitted
+                checked += 1
+                index = void.void_column_index
+                self.assertEqual(
+                    set(void.ordinary_predicates), set(negative.ordinary_predicates)
+                )
+                self.assertEqual(void.included_tables, negative.included_tables)
+                for column_index in range(len(self.metadata.columns)):
+                    if column_index == index:
+                        continue
+                    self.assertEqual(
+                        void.tokens[column_index],
+                        negative.tokens[column_index],
+                        f"column {column_index} differs between the pair",
+                    )
+                self.assertNotEqual(void.tokens[index], negative.tokens[index])
+        self.assertGreater(checked, 5, "too few pairs to be meaningful")
 
     def test_hard_negative_targets_the_real_row_value(self) -> None:
         self.generator.attach_void_catalog(self.catalog, self.config)
