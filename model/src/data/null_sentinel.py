@@ -43,6 +43,10 @@ NULL_SENTINEL_TOKEN = "__VOID__"
 # fixture is never materialized in full.
 _CATALOG_CHUNK_ROWS = 1_000_000
 
+# Samples drawn before the per-pair share cap starts binding, so early noise
+# cannot lock out a pair that simply happened to be drawn first.
+_PAIR_SHARE_WARMUP = 64
+
 
 @dataclass(frozen=True)
 class NullSentinelConfig:
@@ -56,6 +60,8 @@ class NullSentinelConfig:
     max_catalog_columns: int = 16
     min_marginal_count: int = 32
     min_anchor_partners: int = 4
+    max_pair_share: float = 0.25
+    hard_negative_probability: float = 1.0
     max_catalog_rows: int | None = None
     cascade: bool = True
 
@@ -74,6 +80,8 @@ class NullSentinelConfig:
             max_catalog_columns=int(data.get("max_catalog_columns", 16)),
             min_marginal_count=int(data.get("min_marginal_count", 32)),
             min_anchor_partners=int(data.get("min_anchor_partners", 4)),
+            max_pair_share=float(data.get("max_pair_share", 0.25)),
+            hard_negative_probability=float(data.get("hard_negative_probability", 1.0)),
             max_catalog_rows=None if raw_rows is None else int(raw_rows),
             cascade=bool(data.get("cascade", True)),
         )
@@ -99,6 +107,12 @@ class NullSentinelConfig:
             raise ValueError("null_sentinel.min_marginal_count must be positive")
         if self.min_anchor_partners < 1:
             raise ValueError("null_sentinel.min_anchor_partners must be positive")
+        if not 0.0 < self.max_pair_share <= 1.0:
+            raise ValueError("null_sentinel.max_pair_share must lie in (0, 1]")
+        if not 0.0 <= self.hard_negative_probability <= 1.0:
+            raise ValueError(
+                "null_sentinel.hard_negative_probability must lie in [0, 1]"
+            )
         if self.max_catalog_rows is not None and self.max_catalog_rows < 1:
             raise ValueError("null_sentinel.max_catalog_rows must be positive or null")
 
@@ -230,6 +244,7 @@ class VoidPairCatalog:
         scanned_rows: int,
         min_marginal_count: int,
         min_anchor_partners: int = 1,
+        max_pair_share: float = 1.0,
     ) -> None:
         self.column_indices = column_indices
         self.domain_sizes = domain_sizes
@@ -238,6 +253,9 @@ class VoidPairCatalog:
         self.scanned_rows = int(scanned_rows)
         self.min_marginal_count = int(min_marginal_count)
         self.min_anchor_partners = int(min_anchor_partners)
+        self.max_pair_share = float(max_pair_share)
+        self._pair_use: dict[tuple[int, int], int] = {}
+        self._total_use = 0
         self._supported: dict[int, np.ndarray] = {
             index: marginal >= min_marginal_count
             for index, marginal in marginals.items()
@@ -266,7 +284,58 @@ class VoidPairCatalog:
             "void_cells": self.void_cell_count,
             "min_marginal_count": self.min_marginal_count,
             "min_anchor_partners": self.min_anchor_partners,
+            "max_pair_share": self.max_pair_share,
         }
+
+    def commit_void_pair(self, pair: "VoidPair") -> None:
+        """Charge a pair against its share, once its context really was built.
+
+        Counting the draw instead would charge pairs whose context was then
+        dropped by table or root filtering, which would skew both the cap and
+        the diagnostic away from what training actually saw.
+        """
+
+        key = (
+            (pair.anchor_column_index, pair.void_column_index)
+            if pair.anchor_column_index < pair.void_column_index
+            else (pair.void_column_index, pair.anchor_column_index)
+        )
+        self._pair_use[key] = self._pair_use.get(key, 0) + 1
+        self._total_use += 1
+
+    def pair_usage_summary(self, *, top: int = 5) -> dict[str, Any]:
+        """Report how the void budget was actually spread across column pairs.
+
+        One relationship dominating this is the failure mode the share cap
+        exists for, so it belongs in the run log rather than in a debugger.
+        """
+
+        if not self._total_use:
+            return {"void_pairs_drawn": 0, "top_pairs": []}
+        ranked = sorted(self._pair_use.items(), key=lambda item: -item[1])
+        return {
+            "void_pairs_drawn": self._total_use,
+            "distinct_pairs_used": len(self._pair_use),
+            "top_pairs": [
+                {"pair": [int(left), int(right)], "share": round(count / self._total_use, 4)}
+                for (left, right), count in ranked[:top]
+            ],
+        }
+
+    def present_partner_values(
+        self,
+        anchor_column_index: int,
+        anchor_value_id: int,
+        void_column_index: int,
+    ) -> np.ndarray:
+        """Return void-column values that DO co-occur with the anchor value."""
+
+        row = self._co_occurrence_row(
+            anchor_column_index, anchor_value_id, void_column_index
+        )
+        if row is None:
+            return np.empty(0, dtype=np.int64)
+        return np.flatnonzero(row).astype(np.int64, copy=False)
 
     def present_partner_count(
         self,
@@ -338,9 +407,26 @@ class VoidPairCatalog:
 
         if not self._pairs:
             return None
-        for _ in range(max_attempts):
+        # A pair is proposed uniformly but only accepted when it can actually
+        # produce a void for this row, so the realized rate is success-weighted.
+        # A functionally dependent pair -- num_of_segments and segment_idx, where
+        # every trip of length n forbids every index >= n -- has a whole triangle
+        # of absent cells and therefore succeeds nearly always, crowding every
+        # other relationship out of training. The share cap bounds how much of
+        # the void budget any one pair may take.
+        share_cap = max(self.max_pair_share, 1.0 / len(self._pairs))
+        for attempt in range(max_attempts):
             pair_index = int(rng.integers(0, len(self._pairs)))
             left, right = self._pairs[pair_index]
+            # The final attempt ignores the cap so a schema whose only viable
+            # pair is an over-used one still yields voids rather than none.
+            capped = (
+                attempt < max_attempts - 1
+                and self._total_use >= _PAIR_SHARE_WARMUP
+                and self._pair_use.get((left, right), 0) > share_cap * self._total_use
+            )
+            if capped:
+                continue
             # Either column of the pair may serve as the anchor; the other one
             # becomes the void column.  Prefer the later column as the void so
             # the bottleneck sits as deep in the chain as possible.
@@ -488,6 +574,7 @@ def build_void_pair_catalog(
         scanned_rows=scanned,
         min_marginal_count=config.min_marginal_count,
         min_anchor_partners=config.min_anchor_partners,
+        max_pair_share=config.max_pair_share,
     )
     if catalog.void_cell_count == 0:
         return None

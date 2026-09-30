@@ -217,6 +217,7 @@ class PredicateTrainingContextGenerator:
         self.void_catalog: VoidPairCatalog | None = None
         self._void_contexts_generated = 0
         self._void_attempts_failed = 0
+        self._hard_negatives_generated = 0
 
     def attach_void_catalog(
         self,
@@ -234,9 +235,11 @@ class PredicateTrainingContextGenerator:
             "enabled": bool(self.null_sentinel.enabled and self.void_catalog is not None),
             "void_contexts_generated": int(self._void_contexts_generated),
             "void_attempts_failed": int(self._void_attempts_failed),
+            "hard_negatives_generated": int(self._hard_negatives_generated),
         }
         if self.void_catalog is not None:
             summary.update(self.void_catalog.summary())
+            summary.update(self.void_catalog.pair_usage_summary())
         return summary
 
     def probability_diagnostics(self) -> dict[str, float | bool]:
@@ -309,23 +312,15 @@ class PredicateTrainingContextGenerator:
                 if self._requires_root(metadata, compiled) and not context.included_tables:
                     rejected += 1
                     continue
-                context = self._maybe_void_context(row, metadata, rng, compiled, context)
-                if not context_satisfies_row(context, row, metadata):
-                    rejected += 1
-                    continue
-                contexts.append(context)
-                repeated_rows.append(
-                    row
-                    if context.void_column_index is None
-                    else void_target_row(
-                        row,
-                        metadata,
-                        context.void_column_index,
-                        cascade=self.null_sentinel.cascade,
-                        predicated_columns=predicated_data_columns(context, metadata),
-                    )
-                )
-                source_row_indices.append(row_index)
+                for context, target in self._expand_row_contexts(
+                    row, metadata, rng, compiled, context
+                ):
+                    if not context_satisfies_row(context, row, metadata):
+                        rejected += 1
+                        continue
+                    contexts.append(context)
+                    repeated_rows.append(target)
+                    source_row_indices.append(row_index)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
         return (
@@ -485,29 +480,21 @@ class PredicateTrainingContextGenerator:
                 if self._requires_root(metadata, compiled) and not context.included_tables:
                     rejected += 1
                     continue
-                context = self._maybe_void_context(row, metadata, rng, compiled, context)
-                if validate_contexts:
-                    contradictions += included_indicator_contradictions(
-                        context,
-                        row,
-                        metadata,
-                    )
-                    if not context_satisfies_row(context, row, metadata):
-                        rejected += 1
-                        continue
-                contexts.append(context)
-                repeated_rows.append(
-                    row
-                    if context.void_column_index is None
-                    else void_target_row(
-                        row,
-                        metadata,
-                        context.void_column_index,
-                        cascade=self.null_sentinel.cascade,
-                        predicated_columns=predicated_data_columns(context, metadata),
-                    )
-                )
-                source_row_indices.append(row_index)
+                for context, target in self._expand_row_contexts(
+                    row, metadata, rng, compiled, context
+                ):
+                    if validate_contexts:
+                        contradictions += included_indicator_contradictions(
+                            context,
+                            row,
+                            metadata,
+                        )
+                        if not context_satisfies_row(context, row, metadata):
+                            rejected += 1
+                            continue
+                    contexts.append(context)
+                    repeated_rows.append(target)
+                    source_row_indices.append(row_index)
         if not contexts:
             raise ValueError("predicate generation rejected every sampled context")
         if not validate_contexts and validation_sample_size:
@@ -565,46 +552,43 @@ class PredicateTrainingContextGenerator:
             encoded_two_slot_row=encoded_two_slot_row,
         )
 
-    def _generate_void_context(
+    def _pair_constrained_context(
         self,
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
         compiled: _CompiledGenerationMetadata,
         base_context: GeneratedTrainingContext,
+        *,
+        anchor_column_index: int,
+        anchor_value_id: int,
+        other_column_index: int,
+        other_value_id: int,
+        void_column_index: int | None,
     ) -> GeneratedTrainingContext | None:
-        """Turn a row-satisfied context into a provably empty conjunction.
+        """Build a context constraining exactly one column pair, plus extensions.
 
-        The void is anchored on a value the sampled row actually carries, so
-        every column before the void column keeps a genuine prefix.  The void
-        column then receives an equality predicate on a value that the catalog
-        proves never co-occurs with that anchor, which makes the conjunction
-        empty no matter how many further row-satisfied conjuncts are added.
-
-        Returns None when no void could be constructed for this row, in which
-        case the caller keeps the ordinary context.
+        Both the void context and its matched hard negative go through here, so
+        they differ only in the value put on the second column and in whether
+        the target is the sentinel.  Keeping them structurally identical is the
+        point: the model has to tell them apart from the values, not from the
+        shape of the query.
         """
 
-        catalog = self.void_catalog
-        if catalog is None:
-            return None
-        pair = catalog.sample_void_pair(encoded_row, rng)
-        if pair is None:
-            return None
-        anchor_column = metadata.columns[pair.anchor_column_index]
-        void_column = metadata.columns[pair.void_column_index]
-        anchor_token = PredicateToken.equal(anchor_column.domain[pair.anchor_value_id])
-        void_token = PredicateToken.equal(void_column.domain[pair.void_value_id])
-
-        # Start from the two conjuncts that carry the proof, then re-admit a
-        # geometrically sampled number of the row-satisfied predicates the base
-        # context already sampled.  Extra row-satisfied conjuncts can only
+        anchor_column = metadata.columns[anchor_column_index]
+        other_column = metadata.columns[other_column_index]
+        predicates: dict[str, PredicateToken] = {
+            anchor_column.name: PredicateToken.equal(
+                anchor_column.domain[anchor_value_id]
+            ),
+            other_column.name: PredicateToken.equal(
+                other_column.domain[other_value_id]
+            ),
+        }
+        # Re-admit a geometrically sampled number of the row-satisfied
+        # predicates the base context already drew.  For a void these can only
         # shrink an already-empty result, so provability is preserved while the
         # predicate count matches what real zero-cardinality queries look like.
-        predicates: dict[str, PredicateToken] = {
-            anchor_column.name: anchor_token,
-            void_column.name: void_token,
-        }
         spare = [
             (name, token)
             for name, token in base_context.ordinary_predicates.items()
@@ -618,7 +602,7 @@ class PredicateTrainingContextGenerator:
                 predicates[name] = token
 
         included_tables = set(base_context.included_tables)
-        for column in (anchor_column, void_column):
+        for column in (anchor_column, other_column):
             if column.table is not None:
                 included_tables.add(column.table)
         if self._requires_root(metadata, compiled) and not included_tables:
@@ -628,7 +612,7 @@ class PredicateTrainingContextGenerator:
         present_tables = self._present_tables_for_row(encoded_row, metadata, compiled)
         if not included_tables.issubset(present_tables):
             included_tables &= set(present_tables)
-            for column in (anchor_column, void_column):
+            for column in (anchor_column, other_column):
                 if column.table is not None and column.table not in included_tables:
                     return None
 
@@ -644,39 +628,123 @@ class PredicateTrainingContextGenerator:
             included_tables=frozenset(included_tables),
             inverse_fanout_columns=base_context.inverse_fanout_columns,
             ordinary_predicates=predicates,
-            # A void context has no physical trajectory query; the spatial and
-            # temporal machinery assumes a satisfying segment exists.
+            # Neither member of the pair carries a physical trajectory query:
+            # the spatial and temporal machinery assumes a satisfying segment,
+            # and the void half has none.
             trajectory_query=None,
             encoded_two_slot_row=encoded_two_slot_row,
-            void_column_index=pair.void_column_index,
+            void_column_index=void_column_index,
         )
 
-    def _maybe_void_context(
+    def _void_and_hard_negative(
         self,
         encoded_row: np.ndarray,
         metadata: ModelMetadata,
         rng: np.random.Generator,
         compiled: _CompiledGenerationMetadata,
         base_context: GeneratedTrainingContext,
-    ) -> GeneratedTrainingContext:
-        """Replace a context with a void one at the configured rate."""
+    ) -> list[GeneratedTrainingContext]:
+        """Return a provably empty conjunction and its matched valid twin.
 
-        if self.void_catalog is None or not self.null_sentinel.enabled:
-            return base_context
-        if rng.random() >= self.null_sentinel.void_probability:
-            return base_context
-        void_context = self._generate_void_context(
+        The void is anchored on a value the sampled row actually carries, so the
+        prefix stays genuine, and its second column takes a value the catalog
+        proves never co-occurs with that anchor.
+
+        The hard negative constrains the same two columns with the values this
+        very row carries -- a combination the row itself witnesses, so it is
+        valid by construction and its targets are the real ones.  Without it the
+        model only ever sees those two columns constrained together in void
+        contexts and learns the marginal ("this column is constrained, so void
+        is plausible") instead of the discrimination.  On the 50M benchmark that
+        produced 140 false collapses against 37 correct ones, all of them on the
+        functionally dependent segment_idx / num_of_segments pair.
+        """
+
+        catalog = self.void_catalog
+        if catalog is None:
+            return []
+        pair = catalog.sample_void_pair(encoded_row, rng)
+        if pair is None:
+            return []
+        void_context = self._pair_constrained_context(
+            encoded_row,
+            metadata,
+            rng,
+            compiled,
+            base_context,
+            anchor_column_index=pair.anchor_column_index,
+            anchor_value_id=pair.anchor_value_id,
+            other_column_index=pair.void_column_index,
+            other_value_id=pair.void_value_id,
+            void_column_index=pair.void_column_index,
+        )
+        if void_context is None:
+            return []
+        catalog.commit_void_pair(pair)
+        contexts = [void_context]
+        if rng.random() < self.null_sentinel.hard_negative_probability:
+            negative = self._pair_constrained_context(
+                encoded_row,
+                metadata,
+                rng,
+                compiled,
+                base_context,
+                anchor_column_index=pair.anchor_column_index,
+                anchor_value_id=pair.anchor_value_id,
+                other_column_index=pair.void_column_index,
+                other_value_id=int(encoded_row[pair.void_column_index]),
+                void_column_index=None,
+            )
+            if negative is not None:
+                contexts.append(negative)
+                self._hard_negatives_generated += 1
+        return contexts
+
+    def _expand_row_contexts(
+        self,
+        encoded_row: np.ndarray,
+        metadata: ModelMetadata,
+        rng: np.random.Generator,
+        compiled: _CompiledGenerationMetadata,
+        base_context: GeneratedTrainingContext,
+    ) -> list[tuple[GeneratedTrainingContext, np.ndarray]]:
+        """Pair each emitted context with the target row it should be trained on."""
+
+        if (
+            self.void_catalog is None
+            or not self.null_sentinel.enabled
+            or rng.random() >= self.null_sentinel.void_probability
+        ):
+            return [(base_context, encoded_row)]
+        emitted = self._void_and_hard_negative(
             encoded_row,
             metadata,
             rng,
             compiled,
             base_context,
         )
-        if void_context is None:
+        if not emitted:
             self._void_attempts_failed += 1
-            return base_context
+            return [(base_context, encoded_row)]
         self._void_contexts_generated += 1
-        return void_context
+        expanded: list[tuple[GeneratedTrainingContext, np.ndarray]] = []
+        for context in emitted:
+            if context.void_column_index is None:
+                expanded.append((context, encoded_row))
+                continue
+            expanded.append(
+                (
+                    context,
+                    void_target_row(
+                        encoded_row,
+                        metadata,
+                        context.void_column_index,
+                        cascade=self.null_sentinel.cascade,
+                        predicated_columns=predicated_data_columns(context, metadata),
+                    ),
+                )
+            )
+        return expanded
 
     def _generate_physical_query(
         self,

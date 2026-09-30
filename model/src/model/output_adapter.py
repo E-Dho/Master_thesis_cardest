@@ -246,7 +246,14 @@ class TorchANPMFactorizedOutputAdapter:
         device = backbone_outputs.logits.device
         dtype = backbone_outputs.logits.dtype
         if predicate_token.op == PredicateOp.WILDCARD:
-            return torch.ones(batch_size, dtype=dtype, device=device)
+            sentinel = null_sentinel_index(column)
+            if sentinel is None:
+                return torch.ones(batch_size, dtype=dtype, device=device)
+            evaluator = self._evaluator(factorization, backbone_outputs)
+            self.last_factorized_profile = evaluator.profile
+            return torch.clamp(
+                1.0 - evaluator.encoded_id_mass(sentinel), min=0.0, max=1.0
+            )
         evaluator = self._evaluator(factorization, backbone_outputs)
         optimized = evaluator.predicate_mass(column, predicate_token)
         if optimized is not None:
@@ -427,7 +434,10 @@ class FactorizedColumnProbabilityEvaluator:
         import torch
 
         if token.op == PredicateOp.WILDCARD:
-            return torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+            sentinel = null_sentinel_index(column)
+            if sentinel is None:
+                return torch.ones(self.batch_size, dtype=self.dtype, device=self.device)
+            return torch.clamp(1.0 - self.encoded_id_mass(sentinel), min=0.0, max=1.0)
         if token.op == PredicateOp.EQUAL:
             encoded = _encoded_id_or_none(column, token.value)
             if encoded is None:
@@ -885,14 +895,14 @@ def _torch_column_factor_from_distribution(
     import torch
 
     if token.op == PredicateOp.WILDCARD:
-        # Unpredicated columns contribute exactly 1.0; see column_factor in
-        # model/src/predicates/encoding.py for why the sentinel must not act
-        # on a column the context does not constrain.
-        return torch.ones(
-            distribution.shape[0],
-            dtype=distribution.dtype,
-            device=distribution.device,
-        )
+        sentinel = null_sentinel_index(column)
+        if sentinel is None:
+            return torch.ones(
+                distribution.shape[0],
+                dtype=distribution.dtype,
+                device=distribution.device,
+            )
+        return 1.0 - distribution[:, sentinel]
     mask = _torch_predicate_mask_for_id_chunk(
         column,
         token,

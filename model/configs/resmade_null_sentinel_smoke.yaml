@@ -51,6 +51,8 @@ null_sentinel:
   max_catalog_columns: 16
   min_marginal_count: 1
   min_anchor_partners: 2
+  max_pair_share: 0.25
+  hard_negative_probability: 1.0
   cascade: true
 
 training:

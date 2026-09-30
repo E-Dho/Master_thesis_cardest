@@ -171,6 +171,8 @@ null_sentinel:
   max_catalog_columns: 16
   min_marginal_count: 32
   min_anchor_partners: 4
+  max_pair_share: 0.25
+  hard_negative_probability: 1.0
   max_catalog_rows: null
   cascade: true
 

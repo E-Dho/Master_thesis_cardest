@@ -1187,6 +1187,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "fanout_effective_sample_size": fanout_ess_summary,
         "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
         "importance_sampling": importance_summary,
+        "null_sentinel": context_generator.void_injection_diagnostics(),
         "rare_support": rare_support_summary,
         "rare_auxiliary": {
             "enabled": bool(config.get("rare_auxiliary", {}).get("enabled", False)),

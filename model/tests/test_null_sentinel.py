@@ -260,6 +260,93 @@ class VoidPairCatalogTest(unittest.TestCase):
         )
 
 
+class PairShareCapTest(unittest.TestCase):
+    """A functionally dependent pair must not consume the whole void budget."""
+
+    def setUp(self) -> None:
+        # Column 2 is functionally dependent on column 0 (value a only ever
+        # occurs with fd <= a), so it offers a void for almost every anchor
+        # value. Column 1 offers one only when a == 0. A pair is proposed
+        # uniformly but accepted only when it can produce a void for this row,
+        # so the dependent pair wins the rejection round far more often --
+        # which is exactly how segment_idx / num_of_segments crowded out every
+        # other relationship on the 50M run.
+        self.metadata = apply_null_sentinel_to_metadata(
+            ModelMetadata(
+                columns=(
+                    ColumnMetadata("t:a", ColumnKind.DATA, tuple(range(4)), table="t"),
+                    ColumnMetadata("t:b", ColumnKind.DATA, tuple(range(4)), table="t"),
+                    ColumnMetadata("t:fd", ColumnKind.DATA, tuple(range(4)), table="t"),
+                    ColumnMetadata("I_t", ColumnKind.INDICATOR, (0, 1), table="t"),
+                ),
+                full_join_cardinality=1000.0,
+            ),
+            _enabled_config(),
+        )
+        rows = []
+        for a in range(4):
+            for b in ([0, 1] if a == 0 else [0, 1, 2, 3]):
+                for fd in range(a + 1):
+                    rows.append([a, b, fd, 1])
+        self.rows = np.array(rows, dtype=int)
+
+    def _draw(self, share: float, draws: int = 900):
+        catalog = build_void_pair_catalog(
+            self.rows, self.metadata, _enabled_config(max_pair_share=share)
+        )
+        self.assertIsNotNone(catalog)
+        rng = np.random.default_rng(0)
+        counts: dict[tuple[int, int], int] = {}
+        for index in range(draws):
+            pair = catalog.sample_void_pair(self.rows[index % len(self.rows)], rng)
+            if pair is None:
+                continue
+            # The generator charges a pair only once its context materialized,
+            # so the cap sees committed usage rather than raw draws.
+            catalog.commit_void_pair(pair)
+            key = tuple(sorted((pair.anchor_column_index, pair.void_column_index)))
+            counts[key] = counts.get(key, 0) + 1
+        total = sum(counts.values())
+        self.assertTrue(total, "no void pair could be drawn at all")
+        return catalog, counts, counts.get((0, 2), 0) / total
+
+    def test_dependency_pair_dominates_without_a_cap(self) -> None:
+        _, counts, share = self._draw(1.0)
+        self.assertGreater(share, 0.5, f"expected FD dominance, got {counts}")
+
+    def test_cap_reduces_the_dependency_pair_share(self) -> None:
+        _, _, uncapped = self._draw(1.0)
+        _, counts, capped = self._draw(0.34)
+        self.assertLess(capped, uncapped)
+        self.assertGreaterEqual(
+            len(counts), 2, "the freed budget must reach another pair"
+        )
+
+    def test_cap_never_starves_a_single_viable_pair(self) -> None:
+        # One eligible pair makes any cap below 100% unsatisfiable; it must
+        # degrade to no cap rather than blocking every draw.
+        rows = np.array(
+            [[a, 0, fd, 1] for a in range(4) for fd in range(a + 1)], dtype=int
+        )
+        catalog = build_void_pair_catalog(
+            rows, self.metadata, _enabled_config(max_pair_share=0.01)
+        )
+        self.assertIsNotNone(catalog)
+        rng = np.random.default_rng(0)
+        drawn = sum(
+            catalog.sample_void_pair(rows[i % len(rows)], rng) is not None
+            for i in range(300)
+        )
+        self.assertGreater(drawn, 0)
+
+    def test_usage_summary_reports_the_spread(self) -> None:
+        catalog, _, _ = self._draw(0.34)
+        summary = catalog.pair_usage_summary()
+        self.assertGreater(summary["void_pairs_drawn"], 0)
+        self.assertGreaterEqual(summary["distinct_pairs_used"], 2)
+        self.assertLessEqual(summary["top_pairs"][0]["share"], 1.0)
+
+
 class VoidTargetRowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.metadata = apply_null_sentinel_to_metadata(_metadata(), _enabled_config())
@@ -381,16 +468,17 @@ class VoidContextGenerationTest(unittest.TestCase):
     def test_void_predicate_is_unsatisfied_by_the_source_row(self) -> None:
         self.generator.attach_void_catalog(self.catalog, self.config)
         rng = np.random.default_rng(5)
+        compiled = self.generator._compiled(self.metadata)
         for row in self.rows:
             base = self.generator._generate_one(row, self.metadata, rng)
-            context = self.generator._generate_void_context(
-                row, self.metadata, rng, self.generator._compiled(self.metadata), base
-            )
-            if context is None:
-                continue
-            index = context.void_column_index
-            row_value = self.metadata.columns[index].domain[int(row[index])]
-            self.assertFalse(context.tokens[index].satisfies(row_value))
+            for context in self.generator._void_and_hard_negative(
+                row, self.metadata, rng, compiled, base
+            ):
+                index = context.void_column_index
+                if index is None:
+                    continue
+                row_value = self.metadata.columns[index].domain[int(row[index])]
+                self.assertFalse(context.tokens[index].satisfies(row_value))
 
     def test_row_satisfaction_validation_exempts_void_contexts(self) -> None:
         self.generator.attach_void_catalog(self.catalog, self.config)
@@ -401,11 +489,13 @@ class VoidContextGenerationTest(unittest.TestCase):
         contexts = []
         for _ in range(20):
             base = self.generator._generate_one(row, self.metadata, rng)
-            context = self.generator._generate_void_context(
-                row, self.metadata, rng, compiled, base
+            contexts.extend(
+                context
+                for context in self.generator._void_and_hard_negative(
+                    row, self.metadata, rng, compiled, base
+                )
+                if context.void_column_index is not None
             )
-            if context is not None:
-                contexts.append(context)
         self.assertTrue(contexts, "no void context could be built for this row")
         for context in contexts:
             self.assertTrue(context_satisfies_row(context, row, self.metadata))
@@ -433,6 +523,76 @@ class VoidContextGenerationTest(unittest.TestCase):
                         f"column {index} got a sentinel target while unpredicated",
                     )
         self.assertTrue(checked, "no void context was produced")
+
+    def test_every_void_comes_with_a_matched_hard_negative(self) -> None:
+        self.generator.attach_void_catalog(self.catalog, self.config)
+        rng = np.random.default_rng(5)
+        compiled = self.generator._compiled(self.metadata)
+        pairs = 0
+        for row in self.rows:
+            base = self.generator._generate_one(row, self.metadata, rng)
+            emitted = self.generator._void_and_hard_negative(
+                row, self.metadata, rng, compiled, base
+            )
+            if not emitted:
+                continue
+            pairs += 1
+            self.assertEqual(len(emitted), 2, "hard_negative_probability=1 must pair")
+            void, negative = emitted
+            self.assertIsNotNone(void.void_column_index)
+            self.assertIsNone(negative.void_column_index)
+            # Same two columns constrained, so the model cannot tell the pair
+            # apart by the shape of the query -- only by the values.
+            index = void.void_column_index
+            self.assertEqual(
+                negative.tokens[index].op, PredicateOp.EQUAL
+            )
+            self.assertNotEqual(
+                negative.tokens[index].value, void.tokens[index].value
+            )
+            # The negative's value is the one this very row carries, so the
+            # combination is valid by construction.
+            self.assertEqual(
+                negative.tokens[index].value,
+                self.metadata.columns[index].domain[int(row[index])],
+            )
+        self.assertTrue(pairs, "no void/negative pair was produced")
+
+    def test_hard_negative_targets_the_real_row_value(self) -> None:
+        self.generator.attach_void_catalog(self.catalog, self.config)
+        contexts, targets, _ = self.generator.generate_batch(
+            encoded_rows=self.rows,
+            metadata=self.metadata,
+            rng=np.random.default_rng(3),
+        )
+        negatives = [
+            (c, t)
+            for c, t in zip(contexts, targets)
+            if c.void_column_index is None
+            and len(c.ordinary_predicates) >= 2
+        ]
+        self.assertTrue(negatives)
+        for context, target in negatives:
+            for index, column in enumerate(self.metadata.columns):
+                sentinel = null_sentinel_index(column)
+                if sentinel is not None:
+                    self.assertNotEqual(
+                        target[index],
+                        sentinel,
+                        "a hard negative must never target the sentinel",
+                    )
+
+    def test_hard_negative_can_be_disabled(self) -> None:
+        config = _enabled_config(void_probability=1.0, hard_negative_probability=0.0)
+        self.generator.attach_void_catalog(self.catalog, config)
+        rng = np.random.default_rng(5)
+        compiled = self.generator._compiled(self.metadata)
+        for row in self.rows:
+            base = self.generator._generate_one(row, self.metadata, rng)
+            emitted = self.generator._void_and_hard_negative(
+                row, self.metadata, rng, compiled, base
+            )
+            self.assertLessEqual(len(emitted), 1)
 
     def test_diagnostics_count_generated_voids(self) -> None:
         self.generator.attach_void_catalog(self.catalog, self.config)
