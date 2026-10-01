@@ -257,6 +257,7 @@ def build_manifest_payload(
     metadata: ModelMetadata,
     spec: CompleteDomainSpec,
     sample_rows: int,
+    neurocard_use_cols: str | None = None,
     source_csv_fingerprints: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create a versioned manifest that marks domains as complete."""
@@ -272,6 +273,7 @@ def build_manifest_payload(
         "sample_source": spec.sample_source,
         "sample_rows": int(sample_rows),
         "domains_complete": True,
+        "neurocard_use_cols": neurocard_use_cols,
         "source_csv_fingerprints": dict(source_csv_fingerprints or {}),
     }
 

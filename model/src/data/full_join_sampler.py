@@ -10,7 +10,11 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from model.src.data.neurocard_schema import configured_neurocard_use_cols
+from model.src.data.neurocard_schema import (
+    configured_neurocard_use_cols,
+    scoped_neurocard_prepare_cache_bypass,
+    validate_neurocard_manifest_projection,
+)
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 
 OUTER_MISSING = "__OUTER_MISSING__"
@@ -188,6 +192,8 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         use_cols: str | None = "simple",
     ) -> None:
         super().__init__(prepared_directory, sampling_mode="live")
+        self.use_cols = configured_neurocard_use_cols({"use_cols": use_cols})
+        validate_neurocard_manifest_projection(self.manifest, self.use_cols)
         self.csv_directory = Path(csv_directory).resolve()
         if not self.csv_directory.exists():
             raise FileNotFoundError(f"missing JOB-light CSV directory {self.csv_directory}")
@@ -197,7 +203,6 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         if self.sampler_batch_size <= 0:
             raise ValueError("sampler_batch_size must be positive")
         self.seed = int(seed)
-        self.use_cols = configured_neurocard_use_cols({"use_cols": use_cols})
         self.sampler_run_calls = 0
         self.conditional_sampler_batch_calls = 0
         self.conditional_rows_drawn = 0
@@ -262,9 +267,9 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
             import experiments  # type: ignore
             import factorized_sampler  # type: ignore
             import join_utils  # type: ignore
-            from factorized_sampler_lib import prepare_utils  # type: ignore
-
             self._startup_event("neurocard_imports_loaded")
+            # JOB_LIGHT_BASE defines topology and join keys; use_cols independently
+            # selects the ordinary columns loaded for the model.
             cfg = experiments.JOB_LIGHT_BASE
             spec = join_utils.get_join_spec(cfg)
             self._startup_event(
@@ -274,14 +279,6 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                     "join_tables": list(getattr(spec, "join_tables", ())),
                 },
             )
-            if prepare_utils.check_required_files(spec):
-                self._startup_event(
-                    "prepare_cache_hit",
-                    {
-                        "join_name": getattr(spec, "join_name", None),
-                    },
-                )
-                factorized_sampler.prepare_utils.prepare = lambda join_spec: None
             tables = [
                 datasets.LoadImdb(
                     table,
@@ -304,13 +301,24 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                     "sampler_batch_size": max(self.sampler_batch_size, 1),
                 },
             )
-            self._sampler = factorized_sampler.FactorizedSampler(
-                tables,
+            with scoped_neurocard_prepare_cache_bypass(
+                factorized_sampler,
                 spec,
-                max(self.sampler_batch_size, 1),
-                rng=np.random.default_rng(self.seed),
-                disambiguate_column_names=True,
-            )
+            ) as prepare_cache_hit:
+                if prepare_cache_hit:
+                    self._startup_event(
+                        "prepare_cache_hit",
+                        {
+                            "join_name": getattr(spec, "join_name", None),
+                        },
+                    )
+                self._sampler = factorized_sampler.FactorizedSampler(
+                    tables,
+                    spec,
+                    max(self.sampler_batch_size, 1),
+                    rng=np.random.default_rng(self.seed),
+                    disambiguate_column_names=True,
+                )
             self._startup_event(
                 "factorized_sampler_constructed",
                 {

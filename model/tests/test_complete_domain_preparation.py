@@ -157,6 +157,7 @@ class CompleteDomainPreparationTest(unittest.TestCase):
             metadata=metadata,
             spec=spec,
             sample_rows=encoded.encoded_rows.shape[0],
+            neurocard_use_cols="content",
         )
         stats = preparation_stats(
             metadata=metadata,
@@ -174,6 +175,7 @@ class CompleteDomainPreparationTest(unittest.TestCase):
             raw = json.loads(artifacts.manifest_path.read_text(encoding="utf-8"))
             self.assertTrue(raw["domains_complete"])
             self.assertEqual(raw["metadata_source"], COMPLETE_METADATA_SOURCE)
+            self.assertEqual(raw["neurocard_use_cols"], "content")
 
 
 def _tiny_tables() -> tuple[dict[str, pd.DataFrame], CompleteDomainSpec]:

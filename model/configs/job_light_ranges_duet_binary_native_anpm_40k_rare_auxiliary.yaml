@@ -3,6 +3,8 @@ dataset:
   name: job_light_ranges_duet_binary_native_anpm_40k_rare_auxiliary
   csv_directory: datasets/job
   prepared_directory: data/neurocard_prepared/job_light_ranges_content
+  # NeuroCard calls its expanded JOB-light-ranges projection `content`;
+  # its separate `full` mode is the JOB-full predicate-column projection.
   use_cols: content
   sampling_mode: live
   sampler_batch_size: 16384

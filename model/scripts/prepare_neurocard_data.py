@@ -22,7 +22,10 @@ from model.src.data.complete_domain_preparation import (
     write_prepared_artifacts,
 )
 from model.src.data.full_join_sampler import SyntheticFullJoinSampleSource
-from model.src.data.neurocard_schema import configured_neurocard_use_cols
+from model.src.data.neurocard_schema import (
+    configured_neurocard_use_cols,
+    scoped_neurocard_prepare_cache_bypass,
+)
 from model.src.model.factorization import FactorizationConfig
 
 
@@ -197,22 +200,22 @@ def _prepare_neurocard_job_light(
         )
         metadata = build_complete_metadata(table_by_name, complete_spec)
         report_stage("complete_metadata_built", column_count=len(metadata.columns))
-        prepare_cache_hit = _bypass_neurocard_prepare_on_cache_hit(
+        with scoped_neurocard_prepare_cache_bypass(
             factorized_sampler,
             spec,
-        )
-        report_stage(
-            "prepare_cache_checked",
-            cache_hit=str(prepare_cache_hit).lower(),
-        )
-        report_stage("factorized_sampler_construction_started", sample_rows=sample_rows)
-        sampler = factorized_sampler.FactorizedSampler(
-            tables,
-            spec,
-            sample_rows,
-            rng=np.random.default_rng(0),
-            disambiguate_column_names=True,
-        )
+        ) as prepare_cache_hit:
+            report_stage(
+                "prepare_cache_checked",
+                cache_hit=str(prepare_cache_hit).lower(),
+            )
+            report_stage("factorized_sampler_construction_started", sample_rows=sample_rows)
+            sampler = factorized_sampler.FactorizedSampler(
+                tables,
+                spec,
+                sample_rows,
+                rng=np.random.default_rng(0),
+                disambiguate_column_names=True,
+            )
         report_stage(
             "factorized_sampler_constructed",
             join_cardinality=int(sampler.join_card),
@@ -234,6 +237,7 @@ def _prepare_neurocard_job_light(
         spec=complete_spec,
         sample_rows=encoded_sample.encoded_rows.shape[0],
         source_csv_fingerprints=fingerprints,
+        neurocard_use_cols=use_cols,
     )
     stats = preparation_stats(
         metadata=metadata,
@@ -249,21 +253,6 @@ def _prepare_neurocard_job_light(
         encoded_rows=encoded_sample.encoded_rows,
         stats=stats,
     )
-
-
-def _bypass_neurocard_prepare_on_cache_hit(
-    factorized_sampler: Any,
-    join_spec: Any,
-) -> bool:
-    """Avoid NeuroCard's unconditional Ray startup when its sampler cache is complete."""
-
-    prepare_utils = factorized_sampler.prepare_utils
-    if not prepare_utils.check_required_files(join_spec):
-        return False
-    prepare_utils.prepare = lambda _join_spec: None
-    return True
-
-
 def _resolve_neurocard_package(explicit_path: str | None) -> Path:
     """Find the NeuroCard package used for JOB-light preparation."""
 
