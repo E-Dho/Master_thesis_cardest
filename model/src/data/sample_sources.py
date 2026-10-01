@@ -42,6 +42,7 @@ def sample_source_from_config(
                 ),
                 seed=int(dataset.get("sampler_seed", config.get("training", {}).get("seed", 0))),
                 startup_callback=startup_callback,
+                use_cols=dataset.get("use_cols", "simple"),
             )
         else:
             source = NeuroCardFullJoinSampleSource(

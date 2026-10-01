@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -21,6 +22,7 @@ from model.src.data.complete_domain_preparation import (
     write_prepared_artifacts,
 )
 from model.src.data.full_join_sampler import SyntheticFullJoinSampleSource
+from model.src.data.neurocard_schema import configured_neurocard_use_cols
 from model.src.model.factorization import FactorizationConfig
 
 
@@ -134,6 +136,16 @@ def _prepare_neurocard_job_light(
 ) -> Any:
     """Load complete JOB-light tables, sample validation rows, and write artifacts."""
 
+    started = perf_counter()
+
+    def report_stage(stage: str, **details: Any) -> None:
+        fields = " ".join(f"{key}={value}" for key, value in details.items())
+        suffix = f" {fields}" if fields else ""
+        print(
+            f"preparation_stage={stage} elapsed_seconds={perf_counter() - started:.3f}{suffix}",
+            flush=True,
+        )
+
     if sample_rows <= 0:
         raise SystemExit("--sample-rows must be positive")
     neurocard_package = _resolve_neurocard_package(neurocard_path)
@@ -146,7 +158,13 @@ def _prepare_neurocard_job_light(
     import join_utils  # type: ignore
 
     cfg = experiments.JOB_LIGHT_BASE
+    use_cols = configured_neurocard_use_cols(config["dataset"])
     spec = join_utils.get_join_spec(cfg)
+    report_stage(
+        "join_spec_loaded",
+        join_name=getattr(spec, "join_name", None),
+        use_cols=use_cols,
+    )
     if config.get("dataset", {}).get("name") not in {"job_light", "job_light_factorized_anpm"}:
         print(
             "warning=using NeuroCard JOB_LIGHT_BASE because only JOB-light "
@@ -157,11 +175,12 @@ def _prepare_neurocard_job_light(
             datasets.LoadImdb(
                 table,
                 data_dir=str(csv_directory) + "/",
-                use_cols=cfg["use_cols"],
+                use_cols=use_cols,
                 try_load_parsed=True,
             )
             for table in spec.join_tables
         ]
+        report_stage("tables_loaded", table_count=len(tables))
         table_by_name = {table.name: table for table in tables}
         join_cardinality = float(
             datasets.JoinOrderBenchmark.GetFullOuterCardinalityOrFail(spec.join_tables)
@@ -177,6 +196,16 @@ def _prepare_neurocard_job_light(
             dataset_type=config["dataset"]["type"],
         )
         metadata = build_complete_metadata(table_by_name, complete_spec)
+        report_stage("complete_metadata_built", column_count=len(metadata.columns))
+        prepare_cache_hit = _bypass_neurocard_prepare_on_cache_hit(
+            factorized_sampler,
+            spec,
+        )
+        report_stage(
+            "prepare_cache_checked",
+            cache_hit=str(prepare_cache_hit).lower(),
+        )
+        report_stage("factorized_sampler_construction_started", sample_rows=sample_rows)
         sampler = factorized_sampler.FactorizedSampler(
             tables,
             spec,
@@ -184,13 +213,20 @@ def _prepare_neurocard_job_light(
             rng=np.random.default_rng(0),
             disambiguate_column_names=True,
         )
+        report_stage(
+            "factorized_sampler_constructed",
+            join_cardinality=int(sampler.join_card),
+        )
+        report_stage("validation_sample_started", sample_rows=sample_rows)
         sample_frame = sampler.run()
+        report_stage("validation_sample_finished", sampled_rows=len(sample_frame))
         if int(sampler.join_card) != int(join_cardinality):
             raise ValueError(
                 f"sampler join cardinality {sampler.join_card} does not match "
                 f"static JOB-light cardinality {join_cardinality}"
             )
     encoded_sample = encode_sample_dataframe(sample_frame, metadata, strict=True)
+    report_stage("validation_sample_encoded", encoded_rows=len(encoded_sample.encoded_rows))
     csv_paths = [csv_directory / f"{table}.csv" for table in spec.join_tables]
     fingerprints = source_csv_fingerprints(csv_paths)
     manifest = build_manifest_payload(
@@ -213,6 +249,19 @@ def _prepare_neurocard_job_light(
         encoded_rows=encoded_sample.encoded_rows,
         stats=stats,
     )
+
+
+def _bypass_neurocard_prepare_on_cache_hit(
+    factorized_sampler: Any,
+    join_spec: Any,
+) -> bool:
+    """Avoid NeuroCard's unconditional Ray startup when its sampler cache is complete."""
+
+    prepare_utils = factorized_sampler.prepare_utils
+    if not prepare_utils.check_required_files(join_spec):
+        return False
+    prepare_utils.prepare = lambda _join_spec: None
+    return True
 
 
 def _resolve_neurocard_package(explicit_path: str | None) -> Path:

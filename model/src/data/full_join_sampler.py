@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from model.src.data.neurocard_schema import configured_neurocard_use_cols
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 
 OUTER_MISSING = "__OUTER_MISSING__"
@@ -184,6 +185,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         sampler_batch_size: int = 16384,
         seed: int = 0,
         startup_callback: Any | None = None,
+        use_cols: str | None = "simple",
     ) -> None:
         super().__init__(prepared_directory, sampling_mode="live")
         self.csv_directory = Path(csv_directory).resolve()
@@ -195,6 +197,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         if self.sampler_batch_size <= 0:
             raise ValueError("sampler_batch_size must be positive")
         self.seed = int(seed)
+        self.use_cols = configured_neurocard_use_cols({"use_cols": use_cols})
         self.sampler_run_calls = 0
         self.conditional_sampler_batch_calls = 0
         self.conditional_rows_drawn = 0
@@ -212,6 +215,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 "csv_directory": str(self.csv_directory),
                 "neurocard_path": str(self.neurocard_path),
                 "neurocard_workdir": str(self.neurocard_workdir),
+                "use_cols": self.use_cols,
             },
         )
         self._load_neurocard_sampler()
@@ -282,7 +286,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 datasets.LoadImdb(
                     table,
                     data_dir=str(self.csv_directory) + "/",
-                    use_cols=cfg["use_cols"],
+                    use_cols=self.use_cols,
                     try_load_parsed=True,
                 )
                 for table in spec.join_tables
