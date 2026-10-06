@@ -8,6 +8,9 @@ from typing import Any, Iterator, Mapping
 # a98f509e8d3c522d52ce4b4db47b894b7fafc153/neurocard/datasets.py#L242-L294.
 # `full` selects JOB-full predicate columns; null asks upstream to load every CSV column.
 NEUROCARD_USE_COLS_MODES = frozenset({"simple", "content", "multi", "full"})
+# Before manifests tracked this field, JOB_LIGHT_BASE used `simple` at the
+# pinned upstream revision above. This is the sole legacy inference we permit.
+LEGACY_JOB_LIGHT_USE_COLS = "simple"
 
 
 def configured_neurocard_use_cols(dataset: Mapping[str, Any]) -> str | None:
@@ -30,7 +33,7 @@ def validate_neurocard_manifest_projection(
     """Reject a prepared manifest built for a different NeuroCard projection."""
 
     if "neurocard_use_cols" not in manifest:
-        if configured_use_cols == "simple":
+        if configured_use_cols == LEGACY_JOB_LIGHT_USE_COLS:
             return
         raise ValueError(
             "prepared NeuroCard manifest predates projection tracking and cannot be "

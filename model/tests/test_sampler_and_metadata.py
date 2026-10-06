@@ -211,6 +211,30 @@ class SamplerMetadataTest(unittest.TestCase):
             use_cols="content",
         )
 
+    def test_fixture_sampler_receives_configured_content_projection(self) -> None:
+        config = {
+            "dataset": {
+                "type": "neurocard_full_join",
+                "sampling_mode": "fixture",
+                "prepared_directory": "prepared",
+                "use_cols": "content",
+            },
+            "factorization": {"enabled": False},
+            "rare_support": {"enabled": False},
+            "importance_sampling": {"enabled": False},
+        }
+        sentinel = object()
+        with patch(
+            "model.src.data.sample_sources.NeuroCardFullJoinSampleSource",
+            return_value=sentinel,
+        ) as constructor:
+            self.assertIs(sample_source_from_config(config), sentinel)
+        constructor.assert_called_once_with(
+            Path("prepared"),
+            sampling_mode="fixture",
+            use_cols="content",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

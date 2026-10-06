@@ -48,6 +48,7 @@ def sample_source_from_config(
             source = NeuroCardFullJoinSampleSource(
                 Path(dataset["prepared_directory"]),
                 sampling_mode=sampling_mode,
+                use_cols=dataset.get("use_cols", "simple"),
             )
     else:
         raise ValueError(f"unsupported dataset.type {dataset_type!r}")

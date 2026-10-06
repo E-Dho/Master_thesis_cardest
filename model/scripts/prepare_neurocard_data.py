@@ -253,6 +253,8 @@ def _prepare_neurocard_job_light(
         encoded_rows=encoded_sample.encoded_rows,
         stats=stats,
     )
+
+
 def _resolve_neurocard_package(explicit_path: str | None) -> Path:
     """Find the NeuroCard package used for JOB-light preparation."""
 

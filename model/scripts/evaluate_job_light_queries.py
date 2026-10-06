@@ -325,9 +325,6 @@ def eval_query_native(
     included_tables: set[str],
     predicates: list[RawPredicate],
 ) -> tuple[str, float, int, float, float, str, str, str, np.ndarray, int, list[str], list[str]]:
-    import torch
-    from model.src.model.output_adapter import TorchBackboneOutputs
-
     by_col: dict[str, list[RawPredicate]] = {}
     for predicate in predicates:
         by_col.setdefault(predicate.column, []).append(predicate)
@@ -359,6 +356,8 @@ def eval_query_native(
         if built_normalized.zero:
             missing.append(column_name)
             continue
+        if built_normalized.all_values:
+            continue
         assert built_normalized.token is not None
         normalized = ColumnPredicateSet((built_normalized.token,)).normalize(max_predicates=2)
         if normalized.contradiction:
@@ -387,6 +386,9 @@ def eval_query_native(
         return _empty_eval("unsupported", ";".join(sorted(set(unsupported))), metadata, predicates, included_tables)
     if missing:
         return _empty_eval("zero_due_to_missing_domain", ";".join(sorted(set(missing))), metadata, predicates, included_tables)
+
+    import torch
+    from model.src.model.output_adapter import TorchBackboneOutputs
 
     inverse_fanouts = set(inverse_fanouts_for_table_subset(metadata, included_tables))
     tokens = tokens_for_query_tables(metadata, included_tables, inverse_fanouts, conditioning_tokens)

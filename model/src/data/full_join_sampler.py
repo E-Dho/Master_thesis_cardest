@@ -117,9 +117,16 @@ class NeuroCardFullJoinSamplerAdapter:
 class NeuroCardFullJoinSampleSource:
     """Manifest-backed fixture source for deterministic smoke-test sampling."""
 
-    def __init__(self, prepared_directory: str | Path, *, sampling_mode: str = "fixture") -> None:
+    def __init__(
+        self,
+        prepared_directory: str | Path,
+        *,
+        sampling_mode: str = "fixture",
+        use_cols: str | None = "simple",
+    ) -> None:
         self.prepared_directory = Path(prepared_directory)
         self.sampling_mode = sampling_mode
+        self.use_cols = configured_neurocard_use_cols({"use_cols": use_cols})
         manifest_path = self.prepared_directory / "manifest.json"
         if not manifest_path.exists():
             raise FileNotFoundError(
@@ -130,6 +137,7 @@ class NeuroCardFullJoinSampleSource:
         from model.src.data.complete_domain_preparation import validate_prepared_manifest
 
         validate_prepared_manifest(self.prepared_directory)
+        validate_neurocard_manifest_projection(self.manifest, self.use_cols)
         self._metadata = ModelMetadata.from_json_dict(self.manifest["metadata"])
         self.sample_batches_generated = 0
         self.fixture_rows_reused = 0
@@ -191,9 +199,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         startup_callback: Any | None = None,
         use_cols: str | None = "simple",
     ) -> None:
-        super().__init__(prepared_directory, sampling_mode="live")
-        self.use_cols = configured_neurocard_use_cols({"use_cols": use_cols})
-        validate_neurocard_manifest_projection(self.manifest, self.use_cols)
+        super().__init__(prepared_directory, sampling_mode="live", use_cols=use_cols)
         self.csv_directory = Path(csv_directory).resolve()
         if not self.csv_directory.exists():
             raise FileNotFoundError(f"missing JOB-light CSV directory {self.csv_directory}")
