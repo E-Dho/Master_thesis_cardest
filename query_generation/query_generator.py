@@ -384,12 +384,15 @@ class QueryGenerator:
         executor: Optional[QueryExecutor] = None,
         sample_cache_size: int = 2048,
         evaluate_cardinalities: bool = True,
+        live_centers: Optional[LiveCenterCache] = None,
     ):
         self.config = config
         self.seed = seed
         self.rng = random.Random(seed)
         self.executor = executor
-        self.live_centers = LiveCenterCache(config, executor, sample_cache_size)
+        self.live_centers = live_centers or LiveCenterCache(
+            config, executor, sample_cache_size
+        )
         self.evaluate_cardinalities = evaluate_cardinalities
         self.hash = config_hash(config)
         self.generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
