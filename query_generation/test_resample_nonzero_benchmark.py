@@ -16,6 +16,7 @@ from query_generation.query_generator import (
 from query_generation import resample_nonzero_benchmark as resample
 from query_generation.resample_nonzero_benchmark import (
     REPLACEMENT_NAME,
+    canonical_sql_hash,
     build_summary,
     replace_true_zeros,
     source_category,
@@ -75,15 +76,25 @@ def row(query_id, cardinality):
     return generated
 
 
-def replace(source, executor, *, base_seed=123, progress=None, centers=None):
+def replace(
+    source,
+    executor,
+    *,
+    base_seed=123,
+    progress=None,
+    centers=None,
+    generator_config=None,
+    sample_cache_size=3,
+):
     return replace_true_zeros(
         source,
-        config=config(),
+        config=generator_config or config(),
         executor=executor,
         base_seed=base_seed,
         max_attempts=5,
         source_workload="source.jsonl",
-        sample_cache_size=3,
+        sample_cache_size=sample_cache_size,
+        source_workload_sha256="source-sha",
         progress_path=progress,
         centers_cache_path=centers,
     )
@@ -236,6 +247,71 @@ class MainOrderingTest(unittest.TestCase):
             )
 
 
+class DuplicateGuardTest(unittest.TestCase):
+    def test_resumed_hashes_guard_rows_sampled_before_their_own_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress = Path(directory) / "progress.jsonl"
+            source = [row("q00000001", 0), row("q00000002", 0)]
+
+            # Accept only the later zero row, so the sidecar holds a replacement
+            # whose slot the loop does not reach until after the earlier row has
+            # been sampled.
+            later, _, _ = replace([source[1]], FakeExecutor())
+            later_row = later[0]
+            later_row["query_id"] = "q00000002"
+            later_row["source_row_index"] = 1
+            later_row["nonzero_replacement"].update(
+                {
+                    "source_row_index": 1,
+                    "replaced_query_id": "q00000002",
+                    "replaced_sql_sha256": canonical_sql_hash(source[1]),
+                    "replacement_seed": resample.replacement_seed(123, "q00000002", 1),
+                }
+            )
+            progress.write_text(
+                json.dumps(later_row, sort_keys=True, default=str) + "\n",
+                encoding="utf-8",
+            )
+
+            seen = {}
+            original = resample.replacement_record
+
+            def capture(target, **kwargs):
+                seen.setdefault("hashes", set(kwargs["used_sql_hashes"]))
+                return original(target, **kwargs)
+
+            resample.replacement_record = capture
+            try:
+                replace(source, FakeExecutor(), progress=progress)
+            finally:
+                resample.replacement_record = original
+
+            self.assertIn(canonical_sql_hash(later_row), seen["hashes"])
+
+    def test_duplicate_sql_inside_the_progress_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress = Path(directory) / "progress.jsonl"
+            source = [row("q00000001", 0), row("q00000002", 0)]
+            first, _, _ = replace(source, FakeExecutor(), progress=progress)
+            lines = progress.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            clone = json.loads(lines[0])
+            clone["sql"] = json.loads(lines[1])["sql"]
+            progress.write_text("\n".join([json.dumps(clone, sort_keys=True), lines[1]]) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "duplicate replacement SQL"):
+                replace(source, FakeExecutor(), progress=progress)
+
+    def test_progress_from_another_generator_config_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress = Path(directory) / "progress.jsonl"
+            source = [row("q00000001", 0)]
+            replace(source, FakeExecutor(), progress=progress)
+            changed = config()
+            changed["tables"]["items"]["attributes"][0]["domain"]["max"] = 99
+            with self.assertRaisesRegex(SystemExit, "different generator config"):
+                replace(source, FakeExecutor(), progress=progress, generator_config=changed)
+
+
 class CenterPoolTest(unittest.TestCase):
     def test_pools_round_trip_through_the_cache_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -245,13 +321,58 @@ class CenterPoolTest(unittest.TestCase):
             first_executor = FakeExecutor()
             replace(source, first_executor, centers=centers)
             self.assertGreater(first_executor.rows_calls, 0)
-            self.assertEqual(
-                json.loads(centers.read_text())["items.value"], [2.0, 4.0, 6.0]
-            )
+            payload = json.loads(centers.read_text())
+            self.assertEqual(payload["pools"]["items.value"], [2.0, 4.0, 6.0])
+            self.assertEqual(payload["binding"]["source_workload_sha256"], "source-sha")
+            self.assertEqual(payload["binding"]["seed"], 123)
 
             second_executor = FakeExecutor()
             replace(source, second_executor, centers=centers)
             self.assertEqual(second_executor.rows_calls, 0)
+
+    def test_pools_are_persisted_before_the_replacement_that_used_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            centers = Path(directory) / "centers.json"
+            progress = Path(directory) / "progress.jsonl"
+            source = [row("q00000001", 0)]
+
+            def exploding_append(path, entry):
+                raise RuntimeError("interrupted")
+
+            original_append = resample.append_jsonl
+            resample.append_jsonl = exploding_append
+            try:
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    replace(source, FakeExecutor(), progress=progress, centers=centers)
+            finally:
+                resample.append_jsonl = original_append
+
+            self.assertFalse(progress.exists())
+            self.assertEqual(
+                json.loads(centers.read_text())["pools"]["items.value"], [2.0, 4.0, 6.0]
+            )
+
+    def test_cache_bound_to_another_config_or_seed_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            centers = Path(directory) / "centers.json"
+            source = [row("q00000001", 0)]
+            replace(source, FakeExecutor(), centers=centers)
+
+            changed = config()
+            changed["tables"]["items"]["attributes"][0]["domain"]["max"] = 99
+            with self.assertRaisesRegex(SystemExit, "config_hash"):
+                replace(source, FakeExecutor(), centers=centers, generator_config=changed)
+            with self.assertRaisesRegex(SystemExit, "seed"):
+                replace(source, FakeExecutor(), centers=centers, base_seed=999)
+            with self.assertRaisesRegex(SystemExit, "sample_cache_size"):
+                replace(source, FakeExecutor(), centers=centers, sample_cache_size=4)
+
+    def test_foreign_cache_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            centers = Path(directory) / "centers.json"
+            centers.write_text(json.dumps({"items.value": [1.0]}), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "not a center-pool snapshot"):
+                replace([row("q00000001", 0)], FakeExecutor(), centers=centers)
 
     def test_timestamp_and_row_pools_survive_encoding(self):
         cache = LiveCenterCache(config(), None, 0)

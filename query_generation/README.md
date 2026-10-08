@@ -67,11 +67,28 @@ Each accepted replacement is appended to `queries.jsonl.partial.jsonl` and
 fsynced before the next candidate is evaluated, and the live-center pools are
 snapshotted to `queries.jsonl.centers.json`. Resubmitting the job with the same
 `RUN_LABEL`, `INPUT_JSONL` and `REPLACEMENT_SEED` resumes from both rather than
-re-running every `COUNT(*)` against the 50M-row database; a sidecar written from
-a different source workload, row ordering or seed is rejected instead of being
-reused. The centers snapshot matters for more than speed: the pools come from an
+re-running every `COUNT(*)` against the 50M-row database. Pass `--no-progress`
+to disable both sidecars.
+
+The centers snapshot matters for more than speed: the pools come from an
 unseeded `ORDER BY random()`, so it is the snapshot, not `--seed`, that makes a
-run reconstructible. Pass `--no-progress` to disable both sidecars.
+run reconstructible. Two ordering and binding rules follow from that.
+
+A newly fetched pool is written and fsynced *before* the replacement that used
+it is appended to the progress file. In the other order, a crash in between
+would leave a progress row whose pool was never saved, and the restart would
+refetch it from an unseeded `ORDER BY random()` and change the rest of the
+benchmark.
+
+Both sidecars are bound to the run that produced them, and a mismatch is a hard
+error rather than a silent reuse. The centers snapshot carries the generator
+config hash, the source workload hash, the sampling cache size and the seed.
+Each progress row is checked against the source row it claims to replace (row
+index, replaced SQL hash, true-zero status), against the generator config hash,
+and against the replacement seed derived from `--seed`; replacements must also
+be distinct from one another, because their SQL hashes seed the duplicate guard
+for every row still to be sampled, from the first candidate onwards rather than
+only once the loop reaches their own index.
 
 The output JSONL and summary are written before the final validation pass, so a
 validation failure reports the problem without discarding the evaluated rows.

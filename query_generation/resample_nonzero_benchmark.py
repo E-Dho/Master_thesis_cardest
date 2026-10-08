@@ -31,6 +31,7 @@ try:
         LiveCenterCache,
         QueryExecutor,
         QueryGenerator,
+        config_hash,
         load_config,
     )
     from .rewrite_segment_coupled_queries import needs_segment_correction, rewrite_row
@@ -41,12 +42,14 @@ except ImportError:  # Direct execution from query_generation/ on the cluster.
         LiveCenterCache,
         QueryExecutor,
         QueryGenerator,
+        config_hash,
         load_config,
     )
     from rewrite_segment_coupled_queries import needs_segment_correction, rewrite_row
 
 
 REPLACEMENT_NAME = "positive_rejection_sampling_v1"
+CENTERS_CACHE_VERSION = 1
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -74,8 +77,59 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 def write_json_atomic(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True))
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary.replace(path)
+
+
+def centers_binding(
+    *,
+    config: dict[str, Any],
+    source_workload_sha256: str,
+    sample_cache_size: int,
+    seed: int,
+) -> dict[str, Any]:
+    """What a persisted center-pool snapshot is only valid for."""
+
+    return {
+        "config_hash": config_hash(config),
+        "source_workload_sha256": source_workload_sha256,
+        "sample_cache_size": int(sample_cache_size),
+        "seed": int(seed),
+    }
+
+
+def load_centers_cache(
+    path: Path,
+    live_centers: LiveCenterCache,
+    binding: dict[str, Any],
+) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or "pools" not in payload:
+        raise SystemExit(
+            f"{path} is not a center-pool snapshot written by this script; delete it to refetch"
+        )
+    if int(payload.get("version", -1)) != CENTERS_CACHE_VERSION:
+        raise SystemExit(f"{path} has center-pool snapshot version {payload.get('version')!r}")
+    stored = payload.get("binding") or {}
+    mismatched = sorted(key for key, value in binding.items() if stored.get(key) != value)
+    if mismatched:
+        raise SystemExit(
+            f"{path} was written for a different {', '.join(mismatched)}; delete it to refetch"
+        )
+    live_centers.restore(payload["pools"])
+
+
+def centers_cache_payload(
+    live_centers: LiveCenterCache, binding: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "version": CENTERS_CACHE_VERSION,
+        "binding": binding,
+        "pools": live_centers.snapshot(),
+    }
 
 
 def file_sha256(path: Path) -> str:
@@ -218,18 +272,22 @@ def load_progress(
     path: Path | None,
     source_rows: Sequence[dict[str, Any]],
     base_seed: int,
+    expected_config_hash: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Reload replacements accepted by an earlier run of this same job.
 
     Every row is checked against the source workload it claims to replace, so a
-    progress file left over from a different input, a different seed or a
-    different row ordering is rejected instead of silently reused.
+    progress file left over from a different input, a different generator
+    config, a different seed or a different row ordering is rejected instead of
+    silently reused.  Replacements must also be distinct from one another, since
+    their SQL hashes seed the duplicate guard for the rows still to be sampled.
     """
 
     if path is None or not path.exists():
         return {}
     by_id = {str(row["query_id"]): (index, row) for index, row in enumerate(source_rows)}
     resumed: dict[str, dict[str, Any]] = {}
+    seen_sql: dict[str, str] = {}
     for row in load_jsonl(path):
         query_id = str(row.get("query_id"))
         meta = row.get("nonzero_replacement") or {}
@@ -249,6 +307,17 @@ def load_progress(
             raise SystemExit(f"progress file was written with a different --seed ({query_id})")
         if int(row["join_cardinality"]) <= 0:
             raise SystemExit(f"progress file holds a non-positive replacement for {query_id}")
+        if expected_config_hash is not None and row.get("config_hash") != expected_config_hash:
+            raise SystemExit(
+                f"progress file was written with a different generator config ({query_id})"
+            )
+        row_hash = canonical_sql_hash(row)
+        if row_hash in seen_sql:
+            raise SystemExit(
+                f"progress file holds duplicate replacement SQL for {query_id} "
+                f"and {seen_sql[row_hash]}"
+            )
+        seen_sql[row_hash] = query_id
         resumed[query_id] = row
     return resumed
 
@@ -284,6 +353,7 @@ def replace_true_zeros(
     max_attempts: int,
     source_workload: str,
     sample_cache_size: int,
+    source_workload_sha256: str = "",
     progress_path: Path | None = None,
     centers_cache_path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[int], dict[str, Any]]:
@@ -291,12 +361,24 @@ def replace_true_zeros(
     used_sql_hashes = {
         canonical_sql_hash(row) for row in source_rows if not is_true_zero(row)
     }
+    binding = centers_binding(
+        config=config,
+        source_workload_sha256=source_workload_sha256,
+        sample_cache_size=sample_cache_size,
+        seed=base_seed,
+    )
     live_centers = LiveCenterCache(config, executor, sample_cache_size)
     if centers_cache_path is not None and centers_cache_path.exists():
-        live_centers.restore(json.loads(centers_cache_path.read_text(encoding="utf-8")))
+        load_centers_cache(centers_cache_path, live_centers, binding)
     cached_pool_keys = live_centers.pool_keys()
 
-    resumed = load_progress(progress_path, source_rows, base_seed)
+    resumed = load_progress(
+        progress_path, source_rows, base_seed, binding["config_hash"]
+    )
+    # Every resumed replacement occupies a slot in the final workload, so its
+    # SQL has to guard the rows still to be sampled from the first candidate
+    # onwards -- not only once the loop reaches that row's own index.
+    used_sql_hashes.update(canonical_sql_hash(row) for row in resumed.values())
     attempts: list[int] = []
     replaced_ids: list[str] = []
     for index, target in enumerate(source_rows):
@@ -318,17 +400,23 @@ def replace_true_zeros(
                 used_sql_hashes=used_sql_hashes,
                 source_index=index,
             )
+            # The snapshot has to reach disk before the replacement that used
+            # it does.  A crash in the other order leaves a progress row whose
+            # pools were never saved, and the restart would refetch them from an
+            # unseeded ORDER BY random(), changing the rest of the benchmark.
+            if centers_cache_path is not None and live_centers.pool_keys() != cached_pool_keys:
+                write_json_atomic(
+                    centers_cache_path, centers_cache_payload(live_centers, binding)
+                )
+                cached_pool_keys = live_centers.pool_keys()
             if progress_path is not None:
                 append_jsonl(progress_path, replacement)
-            if centers_cache_path is not None and live_centers.pool_keys() != cached_pool_keys:
-                write_json_atomic(centers_cache_path, live_centers.snapshot())
-                cached_pool_keys = live_centers.pool_keys()
         used_sql_hashes.add(canonical_sql_hash(replacement))
         output[index] = replacement
         attempts.append(replacement_attempts)
         replaced_ids.append(query_id)
-    if centers_cache_path is not None and live_centers.pool_keys():
-        write_json_atomic(centers_cache_path, live_centers.snapshot())
+    if centers_cache_path is not None and live_centers.pool_keys() != cached_pool_keys:
+        write_json_atomic(centers_cache_path, centers_cache_payload(live_centers, binding))
     provenance = {
         "replaced_query_ids": replaced_ids,
         "resumed_replacements": sum(1 for query_id in replaced_ids if query_id in resumed),
@@ -345,12 +433,13 @@ def build_summary(
     seed: int,
     attempts: Sequence[int],
     provenance: dict[str, Any],
+    source_sha256: str | None = None,
 ) -> dict[str, Any]:
     replaced = len(provenance["replaced_query_ids"])
     return {
         "name": REPLACEMENT_NAME,
         "source_workload": str(source_path),
-        "source_workload_sha256": file_sha256(source_path),
+        "source_workload_sha256": source_sha256 or file_sha256(source_path),
         "seed": seed,
         "rows": len(rows),
         "unique_query_ids": len({row["query_id"] for row in rows}),
@@ -410,6 +499,7 @@ def main() -> None:
     if not source_rows:
         raise SystemExit("input workload is empty")
     config = load_config(Path(args.config))
+    source_sha256 = file_sha256(source_path)
     output_path = Path(args.output)
     if args.no_progress:
         progress_path = None
@@ -432,6 +522,7 @@ def main() -> None:
             max_attempts=args.max_attempts,
             source_workload=str(source_path),
             sample_cache_size=args.sample_cache_size,
+            source_workload_sha256=source_sha256,
             progress_path=progress_path,
             centers_cache_path=centers_cache_path,
         )
@@ -445,6 +536,7 @@ def main() -> None:
         seed=args.seed,
         attempts=attempts,
         provenance=provenance,
+        source_sha256=source_sha256,
     )
     Path(args.summary).write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
