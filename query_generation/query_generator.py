@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import decimal
 import math
 import random
 import sys
@@ -177,6 +178,26 @@ def parse_timestamp(value: Any) -> datetime:
         except ValueError:
             pass
     raise ConfigError(f"Unsupported timestamp {value!r}")
+
+
+def encode_center_value(value: Any) -> Any:
+    """JSON-safe form of a live-center pool entry, round-tripped by ``decode_center_value``."""
+
+    if isinstance(value, datetime):
+        return {"__timestamp__": value.isoformat()}
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    if isinstance(value, (tuple, list)):
+        return [encode_center_value(item) for item in value]
+    return value
+
+
+def decode_center_value(value: Any) -> Any:
+    if isinstance(value, dict) and "__timestamp__" in value:
+        return datetime.fromisoformat(value["__timestamp__"])
+    if isinstance(value, list):
+        return tuple(decode_center_value(item) for item in value)
+    return value
 
 
 def timestamp_literal(value: datetime) -> str:
@@ -374,6 +395,41 @@ class LiveCenterCache:
     def fetch_rows(self, sql: str) -> List[Tuple[Any, ...]]:
         assert self.executor is not None
         return [tuple(row) for row in self.executor.rows(sql) if all(value is not None for value in row)]
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Serializable view of every pool fetched so far.
+
+        ``LiveCenterCache`` draws its pools with ``ORDER BY random()``, which is
+        not seeded, so two runs of the same script never see the same centers.
+        Persisting the snapshot is what makes a run reconstructible; see
+        ``restore``.
+        """
+
+        return {
+            f"{table_id}.{attr_name}": [encode_center_value(value) for value in values]
+            for (table_id, attr_name), values in sorted(self._cache.items())
+        }
+
+    def pool_keys(self) -> List[str]:
+        return [f"{table_id}.{attr_name}" for table_id, attr_name in sorted(self._cache)]
+
+    def restore(self, snapshot: Dict[str, Any]) -> None:
+        for key, values in snapshot.items():
+            table_id, _, attr_name = key.partition(".")
+            self._cache[(table_id, attr_name)] = [
+                decode_center_value(value) for value in values
+            ]
+
+    def fingerprint(self) -> Dict[str, Any]:
+        return {
+            key: {
+                "values": len(values),
+                "sha256": hashlib.sha256(
+                    json.dumps(values, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+            }
+            for key, values in self.snapshot().items()
+        }
 
 
 class QueryGenerator:

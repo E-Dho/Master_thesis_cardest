@@ -53,7 +53,28 @@ sbatch query_generation/run_pol_nonzero_replacement.sbatch
 The default source is the finalized segment-coupled workload and the default
 output label is `qgen_pol_50m_500qpc_20260824_segment_coupled_nonzero_v1`.
 The generated `benchmark_summary.json` records the source hash, replacement
-seed, replaced-row count, category counts, and rejection-sampling attempts.
+seed, replaced-row count, category counts, table-subset counts before and after
+replacement, the live-center pool fingerprints, and rejection-sampling attempts.
+
+Rejection sampling only ever accepts a positive draw, so the zero-free variant
+has no more small-cardinality queries than the source workload had. That is
+intentional: the workload is meant to mirror the data, and if hard queries are
+rare in the data they stay rare here. Read aggregate q-error on this benchmark
+with that in mind, and stratify by true cardinality when the question is about
+behaviour near zero.
+
+Each accepted replacement is appended to `queries.jsonl.partial.jsonl` and
+fsynced before the next candidate is evaluated, and the live-center pools are
+snapshotted to `queries.jsonl.centers.json`. Resubmitting the job with the same
+`RUN_LABEL`, `INPUT_JSONL` and `REPLACEMENT_SEED` resumes from both rather than
+re-running every `COUNT(*)` against the 50M-row database; a sidecar written from
+a different source workload, row ordering or seed is rejected instead of being
+reused. The centers snapshot matters for more than speed: the pools come from an
+unseeded `ORDER BY random()`, so it is the snapshot, not `--seed`, that makes a
+run reconstructible. Pass `--no-progress` to disable both sidecars.
+
+The output JSONL and summary are written before the final validation pass, so a
+validation failure reports the problem without discarding the evaluated rows.
 
 ## Tests
 
