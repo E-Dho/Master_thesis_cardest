@@ -61,12 +61,18 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    except BaseException:
+        # Leave no scratch file beside the output when the write does not
+        # complete.  A hard kill can still strand one; the next run overwrites it.
+        temporary.unlink(missing_ok=True)
+        raise
     fsync_directory(path.parent)
 
 
@@ -108,13 +114,17 @@ def write_json_atomic(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True, default=str, indent=indent))
-        if trailing_newline:
-            handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True, default=str, indent=indent))
+            if trailing_newline:
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     fsync_directory(path.parent)
 
 

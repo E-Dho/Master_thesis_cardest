@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime
+from unittest import mock
 from pathlib import Path
 
 from query_generation.query_generator import (
@@ -474,16 +475,48 @@ class CenterPoolTest(unittest.TestCase):
 
     def test_directory_fsync_failure_is_best_effort(self):
         with tempfile.TemporaryDirectory() as directory:
-            original = resample.os.fsync
+            with mock.patch(
+                "os.fsync", side_effect=OSError("directory fsync unsupported")
+            ) as rejected:
+                self.assertIsNone(resample.fsync_directory(Path(directory)))
+            self.assertEqual(rejected.call_count, 1)
 
-            def reject_directory_fsync(_descriptor):
-                raise OSError("directory fsync unsupported")
+    def test_directory_fsync_ignores_a_path_it_cannot_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            not_a_directory = Path(directory) / "payload.json"
+            not_a_directory.write_text("{}", encoding="utf-8")
 
-            resample.os.fsync = reject_directory_fsync
-            try:
-                resample.fsync_directory(Path(directory))
-            finally:
-                resample.os.fsync = original
+            # Both raise OSError inside fsync_directory without any patching:
+            # ENOTDIR for the regular file, ENOENT for the missing path.
+            self.assertIsNone(resample.fsync_directory(not_a_directory))
+            self.assertIsNone(resample.fsync_directory(Path(directory) / "missing"))
+
+    def test_a_failed_write_leaves_no_scratch_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "queries.jsonl"
+            resample.write_jsonl(output, [{"a": 1}])
+            intact = output.read_text()
+
+            def failing_rows():
+                yield {"a": 2}
+                raise RuntimeError("producer failed")
+
+            with self.assertRaisesRegex(RuntimeError, "producer failed"):
+                resample.write_jsonl(output, failing_rows())
+
+            summary = Path(directory) / "benchmark_summary.json"
+            with mock.patch.object(
+                resample.json, "dumps", side_effect=TypeError("not serializable")
+            ):
+                with self.assertRaisesRegex(TypeError, "not serializable"):
+                    resample.write_json_atomic(summary, {"rows": 1})
+
+            self.assertEqual(output.read_text(), intact)
+            self.assertFalse(summary.exists())
+            self.assertEqual(
+                sorted(entry.name for entry in Path(directory).iterdir()),
+                ["queries.jsonl"],
+            )
 
     def test_cache_bound_to_another_config_or_seed_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
