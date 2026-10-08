@@ -30,7 +30,7 @@ if [ ! -f "$PORTO_TRAIN_CSV" ]; then
 fi
 
 if [ ! -f "$MOBILITYDB_DATA_DIR/PG_VERSION" ]; then
-  "$REPO_ROOT/dataset_generation/porto_taxi_loader/init_porto_mobilitydb.sh"
+  bash "$REPO_ROOT/dataset_generation/porto_taxi_loader/init_porto_mobilitydb.sh"
 fi
 start_postgres
 trap 'stop_postgres' EXIT
