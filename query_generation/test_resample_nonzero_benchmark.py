@@ -352,6 +352,23 @@ class DuplicateGuardTest(unittest.TestCase):
 
 
 class CenterPoolTest(unittest.TestCase):
+    def test_cache_callback_sees_the_newly_fetched_pool(self):
+        executor = FakeExecutor()
+        captured = []
+        cache = LiveCenterCache(
+            config(),
+            executor,
+            3,
+            on_pool_cached=lambda: captured.append(cache.snapshot()),
+        )
+
+        values = cache.values(
+            "items", config()["tables"]["items"]["attributes"][0]
+        )
+
+        self.assertEqual(values, [2.0, 4.0, 6.0])
+        self.assertEqual(captured, [{"items.value": [2.0, 4.0, 6.0]}])
+
     def test_pools_round_trip_through_the_cache_file(self):
         with tempfile.TemporaryDirectory() as directory:
             centers = Path(directory) / "centers.json"
@@ -427,6 +444,19 @@ class CenterPoolTest(unittest.TestCase):
             self.assertEqual(
                 json.loads(centers.read_text())["pools"]["items.value"], [2.0, 4.0, 6.0]
             )
+
+    def test_atomic_snapshot_fsyncs_its_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "centers.json"
+            called = []
+            original = resample.fsync_directory
+            resample.fsync_directory = lambda parent: called.append(parent)
+            try:
+                resample.write_json_atomic(path, {"pool": []})
+            finally:
+                resample.fsync_directory = original
+
+            self.assertEqual(called, [path.parent])
 
     def test_cache_bound_to_another_config_or_seed_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

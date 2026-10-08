@@ -22,7 +22,7 @@ import time
 from collections import Counter
 from pathlib import Path
 from statistics import mean
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 try:
     from .merge_evaluated_slices import validate_segment_coupled_semantics
@@ -69,10 +69,24 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
     """Append one row and force it to disk, so an interrupted run loses nothing."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    created = not path.exists()
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+    if created:
+        fsync_directory(path.parent)
+
+
+def fsync_directory(path: Path) -> None:
+    """Make a file creation or rename in ``path`` durable."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def write_json_atomic(path: Path, payload: Any) -> None:
@@ -83,6 +97,7 @@ def write_json_atomic(path: Path, payload: Any) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     temporary.replace(path)
+    fsync_directory(path.parent)
 
 
 def centers_binding(
@@ -217,7 +232,6 @@ def replacement_record(
     source_workload: str,
     used_sql_hashes: set[str],
     source_index: int,
-    on_pools_fetched: Callable[[], None] | None = None,
 ) -> tuple[dict[str, Any], int]:
     target_key = str(target["category"]["key"])
     category = source_category(target)
@@ -237,12 +251,6 @@ def replacement_record(
             query_ordinal(target_query_id, source_index),
             category_index,
         )
-        # Generation is where live-center pools are fetched, and a candidate
-        # that is about to be rejected has already fetched them.  Persist here,
-        # before the rejection tests and before the long COUNT(*), so an
-        # interruption anywhere after this point resumes with the same pools.
-        if on_pools_fetched is not None:
-            on_pools_fetched()
         candidate = normalize_final_semantics(candidate, source_workload)
         if candidate["category"]["key"] != target_key:
             continue
@@ -395,10 +403,8 @@ def replace_true_zeros(
         sample_cache_size=sample_cache_size,
         seed=base_seed,
     )
-    live_centers = LiveCenterCache(config, executor, sample_cache_size)
-    if centers_cache_path is not None and centers_cache_path.exists():
-        load_centers_cache(centers_cache_path, live_centers, binding)
-    cached_pool_keys = live_centers.pool_keys()
+    cached_pool_keys: list[str] = []
+    live_centers: LiveCenterCache
 
     def persist_centers() -> None:
         nonlocal cached_pool_keys
@@ -406,6 +412,15 @@ def replace_true_zeros(
             return
         write_json_atomic(centers_cache_path, centers_cache_payload(live_centers, binding))
         cached_pool_keys = live_centers.pool_keys()
+
+    # The cache invokes this callback immediately after storing every newly
+    # fetched pool, before generation continues with predicate construction.
+    live_centers = LiveCenterCache(
+        config, executor, sample_cache_size, on_pool_cached=persist_centers
+    )
+    if centers_cache_path is not None and centers_cache_path.exists():
+        load_centers_cache(centers_cache_path, live_centers, binding)
+    cached_pool_keys = live_centers.pool_keys()
 
     resumed = load_progress(progress_path, source_rows, base_seed, binding)
     if progress_path is not None:
@@ -434,11 +449,10 @@ def replace_true_zeros(
                 source_workload=source_workload,
                 used_sql_hashes=used_sql_hashes,
                 source_index=index,
-                on_pools_fetched=persist_centers,
             )
-            # persist_centers has already run for every candidate this row
-            # generated, accepted or rejected, so the pools behind this row are
-            # on disk before the row itself is.
+            # The cache callback persists every newly fetched pool before
+            # generation continues, so the pools behind this row are on disk
+            # before the row itself is.
             if progress_path is not None:
                 append_jsonl(progress_path, replacement)
         used_sql_hashes.add(canonical_sql_hash(replacement))

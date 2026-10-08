@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 DIMENSIONS = ("standard", "temporal", "spatial", "spatio_temporal")
@@ -356,10 +356,17 @@ class QueryExecutor:
 
 
 class LiveCenterCache:
-    def __init__(self, config: Dict[str, Any], executor: Optional[QueryExecutor], sample_size: int):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        executor: Optional[QueryExecutor],
+        sample_size: int,
+        on_pool_cached: Optional[Callable[[], None]] = None,
+    ):
         self.config = config
         self.executor = executor
         self.sample_size = sample_size
+        self.on_pool_cached = on_pool_cached
         self._cache: Dict[Tuple[str, str], List[Any]] = {}
 
     def values(self, table_id: str, attr: Dict[str, Any]) -> List[Any]:
@@ -368,6 +375,8 @@ class LiveCenterCache:
         key = (table_id, attr["name"])
         if key not in self._cache:
             self._cache[key] = self.fetch_values(table_id, attr)
+            if self.on_pool_cached is not None:
+                self.on_pool_cached()
         return self._cache[key]
 
     def fetch_values(self, table_id: str, attr: Dict[str, Any]) -> List[Any]:
