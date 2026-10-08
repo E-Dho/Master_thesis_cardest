@@ -18,6 +18,9 @@ activate_mobilitydb_env
 
 TARGET_SEGMENTS=${TARGET_SEGMENTS:-50000000}
 SELECTION_SEED=${SELECTION_SEED:-porto_taxi_50m_v1}
+# Parsing train.csv is the slowest step and is fully determined by the input
+# file, target and seed.  Resubmit with the same RUN_ID to reuse the staging
+# directory instead of re-parsing; the default starts a fresh one.
 RUN_ID=${RUN_ID:-porto_taxi_50m_load_$(date -u +%Y%m%dT%H%M%SZ)}
 STAGING_DIR="$MOBILITYDB_STAGING_ROOT/$RUN_ID"
 mkdir -p "$STAGING_DIR" "$MOBILITYDB_LOG_DIR" "$MOBILITYDB_RUN_DIR"
@@ -37,6 +40,7 @@ python "$REPO_ROOT/dataset_generation/porto_taxi_loader/parse_porto_to_staging.p
   --staging-dir "$STAGING_DIR" \
   --target-segments "$TARGET_SEGMENTS" \
   --selection-seed "$SELECTION_SEED" \
+  --skip-if-complete \
   2>&1 | tee "$MOBILITYDB_LOG_DIR/${RUN_ID}_staging.log"
 
 psql_mobility -v ON_ERROR_STOP=1 -f "$REPO_ROOT/dataset_generation/porto_taxi_loader/schema.sql" 2>&1 | tee "$MOBILITYDB_LOG_DIR/${RUN_ID}_load.log"

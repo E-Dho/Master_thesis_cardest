@@ -382,20 +382,43 @@ class LiveCenterCache:
     def fetch_values(self, table_id: str, attr: Dict[str, Any]) -> List[Any]:
         table = self.config["tables"][table_id]
         attr_type = attr["type"]
+        source = f"FROM {table['name']} {table['alias']} ORDER BY random() LIMIT {int(self.sample_size)}"
         if attr_type in {"numeric", "integer"}:
-            select_sql = attr["expression"]
-        elif attr_type == "temporal_interval":
-            select_sql = f"{attr['start_expression']}, {attr['end_expression']}"
-        elif attr_type == "geometry":
-            point = f"ST_PointOnSurface({attr['expression']})"
-            select_sql = f"ST_X({point}), ST_Y({point})"
-        else:
-            return []
+            return self.fetch_column(f"SELECT {attr['expression']} {source}")
+        if attr_type == "temporal_interval":
+            return self.fetch_rows(
+                f"SELECT {attr['start_expression']}, {attr['end_expression']} {source}"
+            )
+        if attr_type == "geometry":
+            return self.fetch_rows(self.geometry_sample_sql(attr["expression"], source))
+        return []
 
-        sql = f"SELECT {select_sql} FROM {table['name']} {table['alias']} ORDER BY random() LIMIT {int(self.sample_size)}"
-        if attr_type in {"numeric", "integer"}:
-            return self.fetch_column(sql)
-        return self.fetch_rows(sql)
+    @staticmethod
+    def geometry_sample_sql(geometry: str, source: str) -> str:
+        """Sample one representative point per geometry row.
+
+        A segment geometry is a two-point line, and ``ST_PointOnSurface`` always
+        returns the same one of its two vertices, so centers drawn from segments
+        would only ever be segment start points.  For those, pick the start or
+        the end point with equal probability.  Longer lines (a whole trip, say)
+        keep the interior point, because their endpoints are the trip's origin
+        and destination rather than a representative place along the route.
+
+        The sample is materialized because ``random()`` would otherwise be
+        evaluated once per output column, pairing one endpoint's X with the
+        other endpoint's Y.
+        """
+
+        point = (
+            f"CASE WHEN ST_NPoints({geometry}) = 2 "
+            f"THEN CASE WHEN random() < 0.5 THEN ST_StartPoint({geometry}) "
+            f"ELSE ST_EndPoint({geometry}) END "
+            f"ELSE ST_PointOnSurface({geometry}) END"
+        )
+        return (
+            f"WITH sampled AS MATERIALIZED (SELECT {point} AS sampled_point {source}) "
+            "SELECT ST_X(sampled_point), ST_Y(sampled_point) FROM sampled"
+        )
 
     def fetch_column(self, sql: str) -> List[Any]:
         assert self.executor is not None

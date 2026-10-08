@@ -32,8 +32,12 @@ import json
 import sys
 from collections import Counter
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-assert len(rows) == 8000
-assert Counter(row['category']['key'] for row in rows).values() and all(value == 500 for value in Counter(row['category']['key'] for row in rows).values())
-assert all(row['join_cardinality'] is None for row in rows)
-print(json.dumps({'rows': len(rows), 'category_counts': dict(sorted(Counter(row['category']['key'] for row in rows).items())), 'seed': 20260929}, indent=2, sort_keys=True))
+counts = Counter(row['category']['key'] for row in rows)
+if len(rows) != 8000:
+    raise SystemExit(f'expected 8000 frozen queries, got {len(rows)}')
+if len(counts) != 16 or any(value != 500 for value in counts.values()):
+    raise SystemExit(f'expected 16 categories of 500 queries, got {dict(sorted(counts.items()))}')
+if any(row['join_cardinality'] is not None for row in rows):
+    raise SystemExit('frozen workload must leave cardinalities unevaluated')
+print(json.dumps({'rows': len(rows), 'category_counts': dict(sorted(counts.items())), 'seed': 20260929}, indent=2, sort_keys=True))
 PY

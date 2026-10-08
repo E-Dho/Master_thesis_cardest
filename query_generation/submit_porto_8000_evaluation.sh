@@ -7,6 +7,11 @@ INPUT_JSONL=${INPUT_JSONL:-$PORTO_MOBILITYDB_ROOT/query_runs/porto_taxi_50m_8000
 SLICE_PREFIX=${SLICE_PREFIX:-porto_taxi_50m_8000_segment_coupled_v1_eval}
 test -f "$INPUT_JSONL"
 
+# The slices are chained with afterok and MUST stay serial.  Every slice calls
+# start_postgres against the same MOBILITYDB_DATA_DIR, and two slices running
+# on different nodes would each find a postmaster.pid whose PID does not exist
+# locally and could both start a postmaster on one data directory.  Do not
+# convert this into an array job without giving each slice its own cluster.
 previous_job=
 for chunk in $(seq 0 31); do
   start=$((chunk * 250))

@@ -80,7 +80,15 @@ def read_domains(host: str | None, port: int | None, dbname: str | None, user: s
         for key, column in (("call_type", "call_type"), ("daytype", "daytype")):
             cursor.execute(f"SELECT DISTINCT {column} FROM porto.trips ORDER BY {column}")
             domains[key] = [row[0] for row in cursor.fetchall()]
-        cursor.execute("SELECT MIN(t_s), MAX(t_e), MIN(s_x), MIN(s_y), MAX(s_x), MAX(s_y) FROM porto.segments")
+        # Every segment end point is the next segment's start point except for
+        # the last segment of each trip, so a start-only extent silently drops
+        # roughly one trip terminal point per trip from the spatial domain.
+        cursor.execute(
+            "SELECT MIN(t_s), MAX(t_e),"
+            " LEAST(MIN(s_x), MIN(e_x)), LEAST(MIN(s_y), MIN(e_y)),"
+            " GREATEST(MAX(s_x), MAX(e_x)), GREATEST(MAX(s_y), MAX(e_y))"
+            " FROM porto.segments"
+        )
         start, end, min_x, min_y, max_x, max_y = cursor.fetchone()
         if start is None or end is None or min_x >= max_x or min_y >= max_y:
             raise SystemExit("invalid Porto segment temporal or spatial domain")

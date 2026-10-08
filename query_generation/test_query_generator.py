@@ -7,6 +7,7 @@ from pathlib import Path
 from query_generation.query_generator import (
     Category,
     ConfigError,
+    LiveCenterCache,
     QueryGenerator,
     all_valid_categories,
     load_config,
@@ -120,3 +121,30 @@ class QueryGeneratorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeometryCenterSamplingTest(unittest.TestCase):
+    """A segment geometry is a two-point line; both of its ends must be drawn."""
+
+    def sql(self, geometry="s.segment_geom"):
+        return LiveCenterCache.geometry_sample_sql(
+            geometry, "FROM porto.segments s ORDER BY random() LIMIT 8"
+        )
+
+    def test_two_point_lines_draw_either_endpoint(self):
+        sql = self.sql()
+        self.assertIn("ST_NPoints(s.segment_geom) = 2", sql)
+        self.assertIn("random() < 0.5", sql)
+        self.assertIn("ST_StartPoint(s.segment_geom)", sql)
+        self.assertIn("ST_EndPoint(s.segment_geom)", sql)
+
+    def test_longer_lines_keep_the_interior_point(self):
+        self.assertIn("ST_PointOnSurface(t.trip_geom)", self.sql("t.trip_geom"))
+
+    def test_the_draw_is_made_once_per_row(self):
+        # ST_X and ST_Y must read one materialized point.  Evaluating the CASE
+        # per output column would pair one endpoint's X with the other's Y.
+        sql = self.sql()
+        self.assertEqual(sql.count("random() < 0.5"), 1)
+        self.assertIn("MATERIALIZED", sql)
+        self.assertIn("SELECT ST_X(sampled_point), ST_Y(sampled_point) FROM sampled", sql)

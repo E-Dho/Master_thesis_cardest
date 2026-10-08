@@ -12,6 +12,7 @@ if [ ! -f "$MOBILITYDB_DATA_DIR/PG_VERSION" ]; then
 listen_addresses = '127.0.0.1'
 port = $MOBILITYDB_PORT
 unix_socket_directories = '$MOBILITYDB_SOCKET_DIR'
+timezone = 'UTC'
 shared_preload_libraries = 'postgis-3'
 shared_buffers = 2GB
 work_mem = 64MB
