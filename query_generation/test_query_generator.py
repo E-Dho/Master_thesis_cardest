@@ -119,8 +119,6 @@ class QueryGeneratorTest(unittest.TestCase):
         self.assertEqual(len(executor.row_queries), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class GeometryCenterSamplingTest(unittest.TestCase):
@@ -148,3 +146,7 @@ class GeometryCenterSamplingTest(unittest.TestCase):
         self.assertEqual(sql.count("random() < 0.5"), 1)
         self.assertIn("MATERIALIZED", sql)
         self.assertIn("SELECT ST_X(sampled_point), ST_Y(sampled_point) FROM sampled", sql)
+
+
+if __name__ == "__main__":
+    unittest.main()

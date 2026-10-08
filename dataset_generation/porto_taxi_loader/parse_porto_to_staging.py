@@ -20,6 +20,18 @@ from typing import Any, Iterable
 SOURCE_URL = "https://www.kaggle.com/datasets/crailtap/taxi-trajectory"
 SAMPLE_SECONDS = 15
 
+# Bump whenever the staging contract changes, so a directory written by an
+# older parser is re-parsed rather than reused: the TSV column order or
+# meaning, which source columns are read, the timestamp mapping, the selection
+# or rejection rules, or anything else that makes an old trips.tsv or
+# segments_wgs84.tsv wrong for the current load.sql.
+#
+# 2: read DAY_TYPE rather than the non-existent DAYTYPE, which left every day
+#    type blank; validate CALL_TYPE/DAY_TYPE/ORIGIN_*; keep the first row of a
+#    repeated TRIP_ID instead of aborting. Version 1 is any unversioned
+#    directory written before those changes.
+STAGING_FORMAT_VERSION = 2
+
 
 class InvalidTrace(ValueError):
     """A row cannot participate in the strict complete-trace population."""
@@ -298,9 +310,11 @@ def reusable_metadata(
     """Return the metadata of a staging directory that this run can reuse.
 
     Parsing a 1.9 GB train.csv twice is the slowest part of the load and it is
-    fully determined by the input file, the segment target and the seed, so a
-    resubmitted job should not repeat it.  Anything that does not match, or any
-    missing staging file, means re-parsing.
+    fully determined by the staging format, the input file, the segment target
+    and the seed, so a resubmitted job should not repeat it.  Anything that does
+    not match, or any missing staging file, means re-parsing -- including an
+    unversioned directory, which predates the DAY_TYPE fix and holds TSVs whose
+    day types are blank.
     """
 
     metadata_path = staging_dir / "load_metadata.json"
@@ -313,6 +327,7 @@ def reusable_metadata(
     except (OSError, json.JSONDecodeError):
         return None
     expected = {
+        "staging_format_version": STAGING_FORMAT_VERSION,
         "input_sha256": sha256_file(csv_path),
         "target_segments": target_segments,
         "selection_seed": selection_seed,
@@ -363,6 +378,7 @@ def main() -> None:
     if written["trips"] != selected_trips or written["segments"] != selected_segments:
         raise SystemExit("staging output does not match deterministic selection")
     metadata: dict[str, Any] = {
+        "staging_format_version": STAGING_FORMAT_VERSION,
         "source_url": SOURCE_URL,
         "input_csv": str(csv_path),
         "input_sha256": sha256_file(csv_path),

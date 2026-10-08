@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from dataset_generation.porto_taxi_loader.parse_porto_to_staging import (
+    STAGING_FORMAT_VERSION,
     InvalidTrace,
     create_candidate_db,
     parse_complete_row,
@@ -12,6 +13,7 @@ from dataset_generation.porto_taxi_loader.parse_porto_to_staging import (
     reusable_metadata,
     scan_candidates,
     select_candidates,
+    sha256_file,
     stable_hash,
     timestamp_text,
     write_staging,
@@ -175,19 +177,14 @@ class PortoStagingTest(unittest.TestCase):
 
             for name in ("trips.tsv", "segments_wgs84.tsv", "taxis.tsv", "selected_trips.tsv"):
                 (staging / name).write_text("", encoding="utf-8")
-            from dataset_generation.porto_taxi_loader.parse_porto_to_staging import sha256_file
-
-            (staging / "load_metadata.json").write_text(
-                json.dumps(
-                    {
-                        "input_sha256": sha256_file(csv_path),
-                        "target_segments": 10,
-                        "selection_seed": "seed",
-                        "selected_trips": 1,
-                    }
-                ),
-                encoding="utf-8",
-            )
+            metadata = {
+                "staging_format_version": STAGING_FORMAT_VERSION,
+                "input_sha256": sha256_file(csv_path),
+                "target_segments": 10,
+                "selection_seed": "seed",
+                "selected_trips": 1,
+            }
+            (staging / "load_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
             reused = reusable_metadata(staging, csv_path, 10, "seed")
             self.assertIsNotNone(reused)
             self.assertTrue(reused["reused_existing_staging"])
@@ -196,6 +193,41 @@ class PortoStagingTest(unittest.TestCase):
 
             write_csv(csv_path, [source_row(), source_row(TRIP_ID="b")])
             self.assertIsNone(reusable_metadata(staging, csv_path, 10, "seed"))
+
+    def test_staging_from_an_older_parser_is_never_reused(self):
+        # A directory written before the DAY_TYPE fix holds TSVs whose day types
+        # are blank.  Reusing it would load stale semantics or fail the COPY
+        # again, so an unversioned or differently versioned directory is
+        # re-parsed.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            csv_path = base / "input.csv"
+            write_csv(csv_path, [source_row()])
+            staging = base / "staging"
+            staging.mkdir()
+            for name in ("trips.tsv", "segments_wgs84.tsv", "taxis.tsv", "selected_trips.tsv"):
+                (staging / name).write_text("", encoding="utf-8")
+            metadata_path = staging / "load_metadata.json"
+            unversioned = {
+                "input_sha256": sha256_file(csv_path),
+                "target_segments": 10,
+                "selection_seed": "seed",
+            }
+
+            metadata_path.write_text(json.dumps(unversioned), encoding="utf-8")
+            self.assertIsNone(reusable_metadata(staging, csv_path, 10, "seed"))
+
+            metadata_path.write_text(
+                json.dumps({**unversioned, "staging_format_version": STAGING_FORMAT_VERSION - 1}),
+                encoding="utf-8",
+            )
+            self.assertIsNone(reusable_metadata(staging, csv_path, 10, "seed"))
+
+            metadata_path.write_text(
+                json.dumps({**unversioned, "staging_format_version": STAGING_FORMAT_VERSION}),
+                encoding="utf-8",
+            )
+            self.assertIsNotNone(reusable_metadata(staging, csv_path, 10, "seed"))
 
 
 if __name__ == "__main__":

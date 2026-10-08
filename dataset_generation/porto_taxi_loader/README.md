@@ -37,5 +37,11 @@ divides by zero when any enforced check failed, so the job stops instead of
 proceeding to build a query config over a bad database.
 
 Re-submitting the loader with the same `RUN_ID` reuses an existing staging
-directory when the input SHA-256, segment target and selection seed all match,
-rather than re-parsing the 1.9 GB CSV.
+directory when the staging format version, input SHA-256, segment target and
+selection seed all match, rather than re-parsing the 1.9 GB CSV. The format
+version is `STAGING_FORMAT_VERSION` in `parse_porto_to_staging.py`; bump it
+whenever the staging contract changes -- the TSV column order or meaning, which
+source columns are read, the timestamp mapping, or the selection and rejection
+rules -- so that directories written by an older parser are re-parsed instead
+of silently loaded. A directory with no version predates the `DAY_TYPE` fix and
+is never reused.
