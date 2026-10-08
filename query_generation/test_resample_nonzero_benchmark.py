@@ -458,6 +458,33 @@ class CenterPoolTest(unittest.TestCase):
 
             self.assertEqual(called, [path.parent])
 
+    def test_new_progress_file_fsyncs_its_directory_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "progress.jsonl"
+            called = []
+            original = resample.fsync_directory
+            resample.fsync_directory = lambda parent: called.append(parent)
+            try:
+                resample.append_jsonl(path, {"record": 1})
+                resample.append_jsonl(path, {"record": 2})
+            finally:
+                resample.fsync_directory = original
+
+            self.assertEqual(called, [path.parent])
+
+    def test_directory_fsync_failure_is_best_effort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = resample.os.fsync
+
+            def reject_directory_fsync(_descriptor):
+                raise OSError("directory fsync unsupported")
+
+            resample.os.fsync = reject_directory_fsync
+            try:
+                resample.fsync_directory(Path(directory))
+            finally:
+                resample.os.fsync = original
+
     def test_cache_bound_to_another_config_or_seed_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             centers = Path(directory) / "centers.json"

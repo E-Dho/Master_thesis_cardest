@@ -60,9 +60,14 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    fsync_directory(path.parent)
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
@@ -79,21 +84,34 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 
 
 def fsync_directory(path: Path) -> None:
-    """Make a file creation or rename in ``path`` durable."""
+    """Try to make a file creation or rename in ``path`` durable."""
 
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(path, flags)
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        # BeeGFS and other network filesystems may reject directory fsync.
+        # The payload file has already been synced, so retain that guarantee.
+        return
 
 
-def write_json_atomic(path: Path, payload: Any) -> None:
+def write_json_atomic(
+    path: Path,
+    payload: Any,
+    *,
+    indent: int | None = None,
+    trailing_newline: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True))
+        handle.write(json.dumps(payload, sort_keys=True, default=str, indent=indent))
+        if trailing_newline:
+            handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
     temporary.replace(path)
@@ -581,9 +599,7 @@ def main() -> None:
         provenance=provenance,
         source_sha256=source_sha256,
     )
-    Path(args.summary).write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json_atomic(Path(args.summary), summary, indent=2, trailing_newline=True)
     print(json.dumps({key: value for key, value in summary.items() if key != "center_pools"}, sort_keys=True))
     validate_output(rows, source_rows)
 
