@@ -74,21 +74,27 @@ The centers snapshot matters for more than speed: the pools come from an
 unseeded `ORDER BY random()`, so it is the snapshot, not `--seed`, that makes a
 run reconstructible. Two ordering and binding rules follow from that.
 
-A newly fetched pool is written and fsynced *before* the replacement that used
-it is appended to the progress file. In the other order, a crash in between
-would leave a progress row whose pool was never saved, and the restart would
-refetch it from an unseeded `ORDER BY random()` and change the rest of the
-benchmark.
+A newly fetched pool is written and fsynced as soon as the candidate that
+fetched it has been generated — before that candidate is tested or evaluated,
+and so before the replacement that eventually uses the pool is appended to the
+progress file. Persisting on acceptance instead is not enough: a candidate that
+is rejected for zero cardinality or duplicate SQL has already drawn its pools,
+and an interruption after such a rejection would leave those pools unsaved. The
+restart would refetch them from an unseeded `ORDER BY random()` and change the
+rest of the benchmark.
 
 Both sidecars are bound to the run that produced them, and a mismatch is a hard
-error rather than a silent reuse. The centers snapshot carries the generator
-config hash, the source workload hash, the sampling cache size and the seed.
-Each progress row is checked against the source row it claims to replace (row
-index, replaced SQL hash, true-zero status), against the generator config hash,
-and against the replacement seed derived from `--seed`; replacements must also
-be distinct from one another, because their SQL hashes seed the duplicate guard
-for every row still to be sampled, from the first candidate onwards rather than
-only once the loop reaches their own index.
+error rather than a silent reuse. The same binding — generator config hash,
+source workload SHA-256, sampling cache size and seed — is stored in the centers
+snapshot and in a header line written as the first record of the progress file,
+so neither sidecar can be reused across a changed run even if the other one is
+missing. Each progress row is additionally checked against the source row it
+claims to replace (row index, replaced SQL hash, true-zero status), against the
+generator config hash the generator stamps on every record, and against the
+replacement seed derived from `--seed`. Replacements must also be distinct from
+one another, because their SQL hashes seed the duplicate guard for every row
+still to be sampled, from the first candidate onwards rather than only once the
+loop reaches their own index.
 
 The output JSONL and summary are written before the final validation pass, so a
 validation failure reports the problem without discarding the evaluated rows.

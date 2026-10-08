@@ -22,7 +22,7 @@ import time
 from collections import Counter
 from pathlib import Path
 from statistics import mean
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 try:
     from .merge_evaluated_slices import validate_segment_coupled_semantics
@@ -50,6 +50,7 @@ except ImportError:  # Direct execution from query_generation/ on the cluster.
 
 REPLACEMENT_NAME = "positive_rejection_sampling_v1"
 CENTERS_CACHE_VERSION = 1
+PROGRESS_HEADER_KEY = "progress_header"
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -216,6 +217,7 @@ def replacement_record(
     source_workload: str,
     used_sql_hashes: set[str],
     source_index: int,
+    on_pools_fetched: Callable[[], None] | None = None,
 ) -> tuple[dict[str, Any], int]:
     target_key = str(target["category"]["key"])
     category = source_category(target)
@@ -235,6 +237,12 @@ def replacement_record(
             query_ordinal(target_query_id, source_index),
             category_index,
         )
+        # Generation is where live-center pools are fetched, and a candidate
+        # that is about to be rejected has already fetched them.  Persist here,
+        # before the rejection tests and before the long COUNT(*), so an
+        # interruption anywhere after this point resumes with the same pools.
+        if on_pools_fetched is not None:
+            on_pools_fetched()
         candidate = normalize_final_semantics(candidate, source_workload)
         if candidate["category"]["key"] != target_key:
             continue
@@ -268,11 +276,18 @@ def replacement_record(
     )
 
 
+def ensure_progress_header(path: Path, binding: dict[str, Any]) -> None:
+    """Start a progress file with the run it belongs to, before the first row."""
+
+    if not path.exists():
+        append_jsonl(path, {PROGRESS_HEADER_KEY: binding})
+
+
 def load_progress(
     path: Path | None,
     source_rows: Sequence[dict[str, Any]],
     base_seed: int,
-    expected_config_hash: str | None = None,
+    binding: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     """Reload replacements accepted by an earlier run of this same job.
 
@@ -285,10 +300,23 @@ def load_progress(
 
     if path is None or not path.exists():
         return {}
+    records = load_jsonl(path)
+    if not records or PROGRESS_HEADER_KEY not in records[0]:
+        raise SystemExit(
+            f"{path} has no progress header; it was not written by this script, "
+            "or predates run binding -- delete it to start over"
+        )
+    stored = records[0][PROGRESS_HEADER_KEY] or {}
+    mismatched = sorted(key for key, value in binding.items() if stored.get(key) != value)
+    if mismatched:
+        raise SystemExit(
+            f"{path} was written for a different {', '.join(mismatched)}; delete it to start over"
+        )
+    expected_config_hash = binding["config_hash"]
     by_id = {str(row["query_id"]): (index, row) for index, row in enumerate(source_rows)}
     resumed: dict[str, dict[str, Any]] = {}
     seen_sql: dict[str, str] = {}
-    for row in load_jsonl(path):
+    for row in records[1:]:
         query_id = str(row.get("query_id"))
         meta = row.get("nonzero_replacement") or {}
         if query_id not in by_id:
@@ -372,9 +400,16 @@ def replace_true_zeros(
         load_centers_cache(centers_cache_path, live_centers, binding)
     cached_pool_keys = live_centers.pool_keys()
 
-    resumed = load_progress(
-        progress_path, source_rows, base_seed, binding["config_hash"]
-    )
+    def persist_centers() -> None:
+        nonlocal cached_pool_keys
+        if centers_cache_path is None or live_centers.pool_keys() == cached_pool_keys:
+            return
+        write_json_atomic(centers_cache_path, centers_cache_payload(live_centers, binding))
+        cached_pool_keys = live_centers.pool_keys()
+
+    resumed = load_progress(progress_path, source_rows, base_seed, binding)
+    if progress_path is not None:
+        ensure_progress_header(progress_path, binding)
     # Every resumed replacement occupies a slot in the final workload, so its
     # SQL has to guard the rows still to be sampled from the first candidate
     # onwards -- not only once the loop reaches that row's own index.
@@ -399,24 +434,18 @@ def replace_true_zeros(
                 source_workload=source_workload,
                 used_sql_hashes=used_sql_hashes,
                 source_index=index,
+                on_pools_fetched=persist_centers,
             )
-            # The snapshot has to reach disk before the replacement that used
-            # it does.  A crash in the other order leaves a progress row whose
-            # pools were never saved, and the restart would refetch them from an
-            # unseeded ORDER BY random(), changing the rest of the benchmark.
-            if centers_cache_path is not None and live_centers.pool_keys() != cached_pool_keys:
-                write_json_atomic(
-                    centers_cache_path, centers_cache_payload(live_centers, binding)
-                )
-                cached_pool_keys = live_centers.pool_keys()
+            # persist_centers has already run for every candidate this row
+            # generated, accepted or rejected, so the pools behind this row are
+            # on disk before the row itself is.
             if progress_path is not None:
                 append_jsonl(progress_path, replacement)
         used_sql_hashes.add(canonical_sql_hash(replacement))
         output[index] = replacement
         attempts.append(replacement_attempts)
         replaced_ids.append(query_id)
-    if centers_cache_path is not None and live_centers.pool_keys() != cached_pool_keys:
-        write_json_atomic(centers_cache_path, centers_cache_payload(live_centers, binding))
+    persist_centers()
     provenance = {
         "replaced_query_ids": replaced_ids,
         "resumed_replacements": sum(1 for query_id in replaced_ids if query_id in resumed),

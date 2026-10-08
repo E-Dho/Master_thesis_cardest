@@ -85,6 +85,7 @@ def replace(
     centers=None,
     generator_config=None,
     sample_cache_size=3,
+    source_sha="source-sha",
 ):
     return replace_true_zeros(
         source,
@@ -94,7 +95,7 @@ def replace(
         max_attempts=5,
         source_workload="source.jsonl",
         sample_cache_size=sample_cache_size,
-        source_workload_sha256="source-sha",
+        source_workload_sha256=source_sha,
         progress_path=progress,
         centers_cache_path=centers,
     )
@@ -156,7 +157,12 @@ class ResumeTest(unittest.TestCase):
             first_executor = FakeExecutor()
             first, _, _ = replace(source, first_executor, progress=progress)
             self.assertGreater(first_executor.scalar_calls, 0)
-            self.assertEqual(len(progress.read_text().splitlines()), 1)
+            lines = progress.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(
+                json.loads(lines[0])["progress_header"]["source_workload_sha256"],
+                "source-sha",
+            )
 
             second_executor = FakeExecutor()
             second, attempts, provenance = replace(
@@ -175,7 +181,7 @@ class ResumeTest(unittest.TestCase):
             progress = Path(directory) / "progress.jsonl"
             source = [row("q00000001", 0)]
             replace(source, FakeExecutor(), progress=progress)
-            with self.assertRaisesRegex(SystemExit, "different --seed"):
+            with self.assertRaisesRegex(SystemExit, "different seed"):
                 replace(source, FakeExecutor(), base_seed=999, progress=progress)
 
     def test_progress_from_another_source_workload_is_rejected(self):
@@ -268,8 +274,19 @@ class DuplicateGuardTest(unittest.TestCase):
                     "replacement_seed": resample.replacement_seed(123, "q00000002", 1),
                 }
             )
+            header = {
+                "progress_header": resample.centers_binding(
+                    config=config(),
+                    source_workload_sha256="source-sha",
+                    sample_cache_size=3,
+                    seed=123,
+                )
+            }
             progress.write_text(
-                json.dumps(later_row, sort_keys=True, default=str) + "\n",
+                json.dumps(header, sort_keys=True)
+                + "\n"
+                + json.dumps(later_row, sort_keys=True, default=str)
+                + "\n",
                 encoding="utf-8",
             )
 
@@ -294,11 +311,33 @@ class DuplicateGuardTest(unittest.TestCase):
             source = [row("q00000001", 0), row("q00000002", 0)]
             first, _, _ = replace(source, FakeExecutor(), progress=progress)
             lines = progress.read_text().splitlines()
-            self.assertEqual(len(lines), 2)
-            clone = json.loads(lines[0])
-            clone["sql"] = json.loads(lines[1])["sql"]
-            progress.write_text("\n".join([json.dumps(clone, sort_keys=True), lines[1]]) + "\n", encoding="utf-8")
+            self.assertEqual(len(lines), 3)
+            clone = json.loads(lines[1])
+            clone["sql"] = json.loads(lines[2])["sql"]
+            progress.write_text(
+                "\n".join([lines[0], json.dumps(clone, sort_keys=True), lines[2]]) + "\n",
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(SystemExit, "duplicate replacement SQL"):
+                replace(source, FakeExecutor(), progress=progress)
+
+    def test_progress_from_another_source_workload_hash_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress = Path(directory) / "progress.jsonl"
+            source = [row("q00000001", 0)]
+            replace(source, FakeExecutor(), progress=progress)
+            with self.assertRaisesRegex(SystemExit, "different source_workload_sha256"):
+                replace(source, FakeExecutor(), progress=progress, source_sha="other-sha")
+
+    def test_progress_without_a_header_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress = Path(directory) / "progress.jsonl"
+            source = [row("q00000001", 0)]
+            first, _, _ = replace(source, FakeExecutor())
+            progress.write_text(
+                json.dumps(first[0], sort_keys=True, default=str) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "no progress header"):
                 replace(source, FakeExecutor(), progress=progress)
 
     def test_progress_from_another_generator_config_is_rejected(self):
@@ -308,7 +347,7 @@ class DuplicateGuardTest(unittest.TestCase):
             replace(source, FakeExecutor(), progress=progress)
             changed = config()
             changed["tables"]["items"]["attributes"][0]["domain"]["max"] = 99
-            with self.assertRaisesRegex(SystemExit, "different generator config"):
+            with self.assertRaisesRegex(SystemExit, "different config_hash"):
                 replace(source, FakeExecutor(), progress=progress, generator_config=changed)
 
 
@@ -336,10 +375,13 @@ class CenterPoolTest(unittest.TestCase):
             progress = Path(directory) / "progress.jsonl"
             source = [row("q00000001", 0)]
 
+            original_append = resample.append_jsonl
+
             def exploding_append(path, entry):
+                if "progress_header" in entry:
+                    return original_append(path, entry)
                 raise RuntimeError("interrupted")
 
-            original_append = resample.append_jsonl
             resample.append_jsonl = exploding_append
             try:
                 with self.assertRaisesRegex(RuntimeError, "interrupted"):
@@ -347,7 +389,41 @@ class CenterPoolTest(unittest.TestCase):
             finally:
                 resample.append_jsonl = original_append
 
-            self.assertFalse(progress.exists())
+            self.assertEqual(len(progress.read_text().splitlines()), 1)
+            self.assertEqual(
+                json.loads(centers.read_text())["pools"]["items.value"], [2.0, 4.0, 6.0]
+            )
+
+    def test_pools_from_a_rejected_candidate_are_persisted(self):
+        class RejectingExecutor(FakeExecutor):
+            """Returns zero until the pools have been fetched and a retry happens."""
+
+            def scalar(self, sql):
+                super().scalar(sql)
+                return 0 if self.scalar_calls == 1 else 3
+
+        with tempfile.TemporaryDirectory() as directory:
+            centers = Path(directory) / "centers.json"
+            executor = RejectingExecutor()
+            captured = {}
+            original = resample.write_json_atomic
+
+            def capture(path, payload):
+                captured.setdefault("scalar_calls_at_first_write", executor.scalar_calls)
+                return original(path, payload)
+
+            resample.write_json_atomic = capture
+            try:
+                output, attempts, _ = replace(
+                    [row("q00000001", 0)], executor, centers=centers
+                )
+            finally:
+                resample.write_json_atomic = original
+
+            # The pools reached disk during the first (rejected) candidate's
+            # generation, before any COUNT(*) had run.
+            self.assertEqual(captured["scalar_calls_at_first_write"], 0)
+            self.assertEqual(attempts, [2])
             self.assertEqual(
                 json.loads(centers.read_text())["pools"]["items.value"], [2.0, 4.0, 6.0]
             )
