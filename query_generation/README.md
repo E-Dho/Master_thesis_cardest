@@ -34,28 +34,39 @@ python3 query_generation/query_generator.py \
   --user sunip956
 ```
 
-## Mutually Exclusive Columns
+## Columns A Query Cannot Combine Freely
 
-A config may declare `exclusive_attribute_groups`: sets of attributes of which a
-query may constrain at most one. Use it when the schema makes columns
-impossible to satisfy together, so that the generator never emits a query that
-is empty for every row regardless of the bounds it draws.
+Some column pairs are empty for every row no matter which bounds are drawn,
+because the schema says so. Two config keys let the generator avoid emitting
+those queries instead of paying a database evaluation to discover them.
 
-Porto declares `["trips.call_type", "trips.origin_call", "trips.origin_stand"]`.
-`CALL_TYPE` partitions trips into `A` (origin_call set, origin_stand null), `B`
-(origin_stand set, origin_call null) and `C` (both null); across the full Kaggle
-file not one of 1,674,152 eligible rows has both origin columns set. A range
-predicate never matches NULL, so a query constraining two of the three -- two
-ranges, or an equality against the wrong origin column -- is empty by schema.
-Without the group, 39.8% of generated `standard.*` queries fell into that trap;
-with it, none do.
+`exclusive_attribute_groups` lists sets of attributes of which a query
+constrains at most one. Use it only for columns that are *genuinely* mutually
+exclusive. Groups must not overlap, since the reduction picks one surviving
+member per group and overlapping membership would make that ambiguous;
+`validate_config` rejects overlapping, single-member, repeated and unknown
+members. If a group makes a category unsatisfiable -- putting both the spatial
+and the temporal attribute of a `spatio_temporal` query in one group, say --
+generation raises `ConfigError` rather than looping.
 
-Groups must not overlap, since the reduction picks one surviving member per
-group and overlapping membership would make that ambiguous. `validate_config`
-rejects overlapping, single-member, repeated and unknown members. If a group
-makes a category unsatisfiable -- putting both the spatial and the temporal
-attribute of a `spatio_temporal` query in one group, say -- generation raises
-`ConfigError` rather than looping.
+`attribute_value_dependencies` is for the commoner case where a nominal
+discriminator decides whether another column is non-null. Each entry names the
+dependent `attribute`, the nominal `determined_by` column, and the `values` that
+make the dependent live. When both are selected the discriminator's value is
+drawn from that list; when the discriminator appears alone it is unrestricted.
+Two dependents pinning one discriminator to disjoint values make a selection
+unsatisfiable, and the sampler drops that combination rather than emitting it.
+
+Porto uses both. `CALL_TYPE` partitions trips into `A` (origin_call set,
+origin_stand null), `B` (origin_stand set, origin_call null) and `C` (both
+null); across the full Kaggle file not one of 1,674,152 eligible rows has both
+origin columns set. So the two origin columns form an exclusive group, while
+`call_type` is declared as their discriminator rather than a third exclusive
+peer -- `call_type = 'A' AND origin_call BETWEEN ...` is a good query and must
+survive; only the mismatched pairing is impossible. Measured over 2,000
+generated `standard.*` queries: 39.8% constrained an impossible combination
+before, none do now, and 565 still pair `call_type` with an origin column, every
+one of them correctly pinned.
 
 This removes queries that are *provably* empty. It cannot remove queries that
 happen to be empty for the data, so it reduces the zero rate rather than

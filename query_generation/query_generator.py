@@ -112,6 +112,7 @@ def validate_config(config: Dict[str, Any]) -> None:
             raise ConfigError("Join graph is disconnected")
 
     validate_exclusive_attribute_groups(config)
+    validate_attribute_value_dependencies(config)
 
 
 def validate_exclusive_attribute_groups(config: Dict[str, Any]) -> None:
@@ -141,6 +142,45 @@ def validate_exclusive_attribute_groups(config: Dict[str, Any]) -> None:
                     "overlapping groups make the reduction ambiguous"
                 )
             seen[member] = index
+
+
+def validate_attribute_value_dependencies(config: Dict[str, Any]) -> None:
+    dependencies = config.get("attribute_value_dependencies")
+    if dependencies is None:
+        return
+    if not isinstance(dependencies, list):
+        raise ConfigError("attribute_value_dependencies must be a list")
+    attributes = {
+        attribute_key(table_id, attr): attr
+        for table_id, table in config["tables"].items()
+        for attr in table["attributes"]
+    }
+    for index, dependency in enumerate(dependencies):
+        if not isinstance(dependency, dict):
+            raise ConfigError(f"value dependency {index} must be an object")
+        for key in ("attribute", "determined_by", "values"):
+            if key not in dependency:
+                raise ConfigError(f"value dependency {index} is missing {key!r}")
+        dependent = str(dependency["attribute"])
+        discriminator = str(dependency["determined_by"])
+        for member in (dependent, discriminator):
+            if member not in attributes:
+                raise ConfigError(f"value dependency {index} references unknown attribute {member!r}")
+        if dependent == discriminator:
+            raise ConfigError(f"value dependency {index} points an attribute at itself")
+        discriminator_attr = attributes[discriminator]
+        if discriminator_attr["type"] != "nominal":
+            raise ConfigError(
+                f"value dependency {index} needs a nominal determined_by, got {discriminator_attr['type']!r}"
+            )
+        values = dependency["values"]
+        if not isinstance(values, list) or not values:
+            raise ConfigError(f"value dependency {index} must allow at least one value")
+        unknown = [value for value in values if value not in discriminator_attr["values"]]
+        if unknown:
+            raise ConfigError(
+                f"value dependency {index} allows {unknown!r}, which {discriminator} does not take"
+            )
 
 
 def validate_attribute(table_id: str, attr: Dict[str, Any]) -> None:
@@ -293,6 +333,44 @@ def exclusive_attribute_groups(config: Dict[str, Any]) -> List[frozenset]:
 
     groups = config.get("exclusive_attribute_groups") or []
     return [frozenset(str(member) for member in group) for group in groups]
+
+
+def attribute_value_dependencies(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Columns whose non-null rows are selected by a discriminator's value.
+
+    Porto's origin_call is non-null exactly on CALL_TYPE 'A' rows and
+    origin_stand exactly on 'B' rows.  Constraining origin_call together with
+    call_type is a perfectly good query -- as long as call_type is pinned to
+    'A'.  Declaring the dependency keeps that query and removes only the
+    mismatched pairing, which no row can satisfy.
+    """
+
+    return list(config.get("attribute_value_dependencies") or [])
+
+
+def nominal_value_restrictions(
+    config: Dict[str, Any], selected_attrs: Sequence[Tuple[str, Dict[str, Any]]]
+) -> Dict[str, List[Any]]:
+    """Allowed values per discriminator, given which attributes are selected.
+
+    A discriminator is only restricted when a dependent column is selected
+    alongside it.  An empty list means the selection cannot be satisfied at all,
+    which the caller rejects rather than emitting an impossible query.
+    """
+
+    selected_keys = {attribute_key(table_id, attr) for table_id, attr in selected_attrs}
+    restrictions: Dict[str, List[Any]] = {}
+    for dependency in attribute_value_dependencies(config):
+        dependent = str(dependency["attribute"])
+        discriminator = str(dependency["determined_by"])
+        if dependent not in selected_keys or discriminator not in selected_keys:
+            continue
+        values = list(dependency["values"])
+        current = restrictions.get(discriminator)
+        restrictions[discriminator] = (
+            values if current is None else [value for value in current if value in values]
+        )
+    return restrictions
 
 
 def max_conflict_free_count(
@@ -667,6 +745,9 @@ class QueryGenerator:
                 continue
             if category.interval == "unbounded" and not any(is_ordered(attr) for _, attr in selected):
                 continue
+            restrictions = nominal_value_restrictions(self.config, selected)
+            if any(not values for values in restrictions.values()):
+                continue
             return selected
         raise ConfigError(f"Could not sample valid attributes for {category.key} on {table_ids}")
 
@@ -725,18 +806,25 @@ class QueryGenerator:
                     if idx != first and self.rng.random() < 0.5:
                         force_unbounded.add(idx)
 
+        restrictions = nominal_value_restrictions(self.config, selected_attrs)
         predicates = []
         for idx, (table_id, attr) in enumerate(selected_attrs):
+            allowed_values = restrictions.get(attribute_key(table_id, attr))
             if category.interval == "unbounded" and idx in force_unbounded and is_ordered(attr):
-                predicates.append(self.unbounded_predicate(table_id, attr))
+                predicates.append(self.unbounded_predicate(table_id, attr, allowed_values))
             else:
-                predicates.append(self.range_predicate(table_id, attr))
+                predicates.append(self.range_predicate(table_id, attr, allowed_values))
         return predicates
 
-    def range_predicate(self, table_id: str, attr: Dict[str, Any]) -> Dict[str, Any]:
+    def range_predicate(
+        self,
+        table_id: str,
+        attr: Dict[str, Any],
+        allowed_values: Optional[Sequence[Any]] = None,
+    ) -> Dict[str, Any]:
         attr_type = attr["type"]
         if attr_type == "nominal":
-            value = self.rng.choice(attr["values"])
+            value = self.rng.choice(list(allowed_values or attr["values"]))
             return self.predicate_record(table_id, attr, f"{attr['expression']} = {sql_literal(value)}", "nominal_eq", value=value)
         if attr_type in {"numeric", "integer"}:
             center, center_source = self.scalar_center(table_id, attr)
@@ -767,7 +855,12 @@ class QueryGenerator:
             return self.predicate_record(table_id, attr, sql, "spatial_intersects", min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, center_source=center_source, range_source=range_source)
         raise ConfigError(f"Unsupported range predicate for {attr_type}")
 
-    def unbounded_predicate(self, table_id: str, attr: Dict[str, Any]) -> Dict[str, Any]:
+    def unbounded_predicate(
+        self,
+        table_id: str,
+        attr: Dict[str, Any],
+        allowed_values: Optional[Sequence[Any]] = None,
+    ) -> Dict[str, Any]:
         attr_type = attr["type"]
         if attr_type in {"numeric", "integer"}:
             center, center_source = self.scalar_center(table_id, attr)
@@ -803,7 +896,7 @@ class QueryGenerator:
             sql = self.spatial_intersects_sql(attr, min_x, min_y, max_x, max_y)
             return self.predicate_record(table_id, attr, sql, "spatial_unbounded", operator=direction, min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, center_source=center_source)
         if attr_type == "nominal":
-            return self.range_predicate(table_id, attr)
+            return self.range_predicate(table_id, attr, allowed_values)
         raise ConfigError(f"Unsupported unbounded predicate for {attr_type}")
 
     def predicate_record(self, table_id: str, attr: Dict[str, Any], sql: str, mode: str, **metadata: Any) -> Dict[str, Any]:

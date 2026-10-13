@@ -28,26 +28,43 @@ class PortoQueryConfigTest(unittest.TestCase):
         validate_config(config)
         self.assertEqual(len(all_valid_categories(config)), 16)
 
-    def test_mutually_exclusive_origin_columns_cannot_co_occur(self):
+    def test_origin_columns_are_exclusive_and_call_type_discriminates(self):
         # CALL_TYPE partitions trips into A (origin_call), B (origin_stand) and
-        # C (neither), and no row in the Kaggle file has both origin columns
-        # set, so any query constraining two of the three is empty by schema.
+        # C (neither). No row has both origin columns, so those two are
+        # exclusive; call_type paired with one of them is a valid query as long
+        # as it is pinned to the value that makes that column non-null.
         config = build_config(DOMAINS)
         validate_config(config)
         self.assertEqual(
             config["exclusive_attribute_groups"],
-            [["trips.call_type", "trips.origin_call", "trips.origin_stand"]],
+            [["trips.origin_call", "trips.origin_stand"]],
         )
-        group = set(config["exclusive_attribute_groups"][0])
+        required = {
+            str(dependency["attribute"]): dependency["values"]
+            for dependency in config["attribute_value_dependencies"]
+        }
+        self.assertEqual(
+            required,
+            {"trips.origin_call": ["A"], "trips.origin_stand": ["B"]},
+        )
         categories = [
             category
             for category in all_valid_categories(config)
             if category.dimension == "standard"
         ]
         rows = QueryGenerator(config, seed=11).generate(categories, 150)
+        paired = 0
         for row in rows:
-            keys = {f"{p['table']}.{p['attribute']}" for p in row["predicates"]}
-            self.assertLessEqual(len(keys & group), 1, keys)
+            byattr = {f"{p['table']}.{p['attribute']}": p for p in row["predicates"]}
+            self.assertLessEqual(len(set(byattr) & set(required)), 1, byattr.keys())
+            call_type = byattr.get("trips.call_type")
+            if call_type is None:
+                continue
+            for dependent, values in required.items():
+                if dependent in byattr:
+                    paired += 1
+                    self.assertIn(call_type["value"], values, byattr.keys())
+        self.assertGreater(paired, 20)
 
     def test_spatial_and_temporal_attributes_are_segments_only(self):
         config = build_config(DOMAINS)

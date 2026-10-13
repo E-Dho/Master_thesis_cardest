@@ -18,11 +18,13 @@ loaded as a real column even though it is constant, so queries generated against
 it match everything; treat it as a zero-information attribute when reading
 results.
 
-`CALL_TYPE`, `ORIGIN_CALL` and `ORIGIN_STAND` are mutually exclusive: `A` sets
-`ORIGIN_CALL`, `B` sets `ORIGIN_STAND`, `C` sets neither, and no row in the file
-has both origin columns. The generated query config declares them as an
-exclusive attribute group so no query constrains two of the three, since such a
-query is empty for every row whatever bounds are drawn. Regenerate the config
+`CALL_TYPE` decides which origin column a trip has: `A` sets `ORIGIN_CALL`, `B`
+sets `ORIGIN_STAND`, `C` sets neither, and no row in the file has both. The
+generated query config therefore declares the two origin columns as an exclusive
+attribute group, and `call_type` as the discriminator that pins which value they
+require -- `call_type = 'A' AND origin_call BETWEEN ...` stays in the workload,
+while the mismatched pairing, which no row can satisfy, does not. Regenerate the
+config
 with `query_generation/build_porto_taxi_query_config.py` -- it only reads
 domains from the loaded database, so it does not need a reload -- and then
 re-freeze the workload, after changing anything that affects it.

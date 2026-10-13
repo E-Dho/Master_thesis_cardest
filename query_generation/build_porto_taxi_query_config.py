@@ -50,13 +50,26 @@ def build_config(domains: dict[str, Any]) -> dict[str, Any]:
         # CALL_TYPE partitions trips into A (origin_call set, origin_stand null),
         # B (origin_stand set, origin_call null) and C (both null); across the
         # whole Kaggle file not one of 1,674,152 eligible rows has both origin
-        # columns set.  A predicate never matches NULL, so constraining two of
-        # these three columns -- two ranges, or an equality against the wrong
-        # origin column -- is empty for every row no matter which bounds are
-        # drawn.  Allowing at most one keeps those impossible queries out of the
-        # workload instead of paying a database evaluation to reject them.
-        "exclusive_attribute_groups": [
-            ["trips.call_type", "trips.origin_call", "trips.origin_stand"]
+        # columns set.  A predicate never matches NULL, so a range on both
+        # origin columns is empty for every row no matter which bounds are
+        # drawn.
+        "exclusive_attribute_groups": [["trips.origin_call", "trips.origin_stand"]],
+        # call_type is the discriminator, not a third exclusive peer.  Pairing
+        # it with an origin column is a good query when it is pinned to the
+        # value that makes that column non-null; only the mismatched pairing is
+        # impossible, so restrict the drawn value instead of forbidding the
+        # combination.
+        "attribute_value_dependencies": [
+            {
+                "attribute": "trips.origin_call",
+                "determined_by": "trips.call_type",
+                "values": ["A"],
+            },
+            {
+                "attribute": "trips.origin_stand",
+                "determined_by": "trips.call_type",
+                "values": ["B"],
+            },
         ],
     }
 

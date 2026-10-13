@@ -172,12 +172,18 @@ EXCLUSIVE_CONFIG = {
         }
     },
     "joins": [],
-    "exclusive_attribute_groups": [
-        ["trips.call_type", "trips.origin_call", "trips.origin_stand"]
+    # origin_call and origin_stand are genuinely exclusive; call_type is the
+    # discriminator that decides which of them is non-null, so it is restricted
+    # rather than forbidden.
+    "exclusive_attribute_groups": [["trips.origin_call", "trips.origin_stand"]],
+    "attribute_value_dependencies": [
+        {"attribute": "trips.origin_call", "determined_by": "trips.call_type", "values": ["A"]},
+        {"attribute": "trips.origin_stand", "determined_by": "trips.call_type", "values": ["B"]},
     ],
 }
 
-GROUP = {"trips.call_type", "trips.origin_call", "trips.origin_stand"}
+GROUP = {"trips.origin_call", "trips.origin_stand"}
+DISCRIMINATED = {"trips.origin_call": "A", "trips.origin_stand": "B"}
 
 
 def exclusive_config(**overrides):
@@ -189,14 +195,23 @@ def exclusive_config(**overrides):
 class ExclusiveAttributeGroupTest(unittest.TestCase):
     """Columns the schema makes mutually exclusive must never co-occur."""
 
-    def generated_predicate_keys(self, config, count=400):
-        rows = QueryGenerator(config, seed=11).generate(
+    def generated_rows(self, config, count=400):
+        return QueryGenerator(config, seed=11).generate(
             [Category.parse("standard.range.single"),
              Category.parse("standard.unbounded.single")],
             count,
         )
+
+    def generated_predicate_keys(self, config, count=400):
         return [
-            {f"{p['table']}.{p['attribute']}" for p in row["predicates"]} for row in rows
+            {f"{p['table']}.{p['attribute']}" for p in row["predicates"]}
+            for row in self.generated_rows(config, count)
+        ]
+
+    def predicates_by_key(self, config, count=400):
+        return [
+            {f"{p['table']}.{p['attribute']}": p for p in row["predicates"]}
+            for row in self.generated_rows(config, count)
         ]
 
     def test_without_the_group_the_impossible_pair_is_common(self):
@@ -225,12 +240,50 @@ class ExclusiveAttributeGroupTest(unittest.TestCase):
             ("trips", attr) for attr in EXCLUSIVE_CONFIG["tables"]["trips"]["attributes"]
         ]
         groups = [frozenset(GROUP)]
-        self.assertEqual(max_conflict_free_count(attrs, groups), 2)
+        self.assertEqual(max_conflict_free_count(attrs, groups), 3)
         for seed in range(20):
             retained = drop_conflicting_attributes(attrs, groups, random.Random(seed))
             keys = {f"{table}.{attr['name']}" for table, attr in retained}
             self.assertEqual(len(keys & GROUP), 1)
             self.assertIn("trips.num_of_segments", keys)
+            self.assertIn("trips.call_type", keys)
+
+    def test_the_discriminator_is_pinned_to_the_value_that_makes_the_column_live(self):
+        paired = 0
+        for byattr in self.predicates_by_key(exclusive_config()):
+            call_type = byattr.get("trips.call_type")
+            if call_type is None:
+                continue
+            for dependent, required in DISCRIMINATED.items():
+                if dependent in byattr:
+                    paired += 1
+                    self.assertEqual(call_type["value"], required, byattr.keys())
+        # The combination must survive -- forbidding it outright would lose
+        # valid queries, which is the whole point of discriminating.
+        self.assertGreater(paired, 50)
+
+    def test_the_discriminator_is_unrestricted_on_its_own(self):
+        values = set()
+        for byattr in self.predicates_by_key(exclusive_config()):
+            if set(byattr) & set(DISCRIMINATED):
+                continue
+            call_type = byattr.get("trips.call_type")
+            if call_type is not None:
+                values.add(call_type["value"])
+        self.assertEqual(values, {"A", "B", "C"})
+
+    def test_without_the_dependency_the_mismatched_pairing_occurs(self):
+        config = exclusive_config()
+        config.pop("attribute_value_dependencies")
+        mismatched = 0
+        for byattr in self.predicates_by_key(config):
+            call_type = byattr.get("trips.call_type")
+            if call_type is None:
+                continue
+            for dependent, required in DISCRIMINATED.items():
+                if dependent in byattr and call_type["value"] != required:
+                    mismatched += 1
+        self.assertGreater(mismatched, 50)
 
     def test_a_group_that_cannot_satisfy_the_minimum_is_rejected(self):
         # spatio_temporal needs one spatial and one temporal attribute; putting
@@ -298,6 +351,61 @@ class ExclusiveGroupValidationTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConfigError, "repeats an attribute"):
             validate_config(config)
+
+
+class ValueDependencyValidationTest(unittest.TestCase):
+    def dependency(self, **overrides):
+        base = {
+            "attribute": "trips.origin_call",
+            "determined_by": "trips.call_type",
+            "values": ["A"],
+        }
+        base.update(overrides)
+        return exclusive_config(attribute_value_dependencies=[base])
+
+    def test_accepts_a_well_formed_dependency(self):
+        validate_config(self.dependency())
+
+    def test_rejects_an_unknown_attribute(self):
+        with self.assertRaisesRegex(ConfigError, "unknown attribute"):
+            validate_config(self.dependency(attribute="trips.missing"))
+
+    def test_rejects_a_non_nominal_discriminator(self):
+        with self.assertRaisesRegex(ConfigError, "nominal determined_by"):
+            validate_config(self.dependency(determined_by="trips.num_of_segments"))
+
+    def test_rejects_a_value_the_discriminator_cannot_take(self):
+        with self.assertRaisesRegex(ConfigError, "which trips.call_type does not take"):
+            validate_config(self.dependency(values=["Z"]))
+
+    def test_rejects_an_empty_value_list(self):
+        with self.assertRaisesRegex(ConfigError, "at least one value"):
+            validate_config(self.dependency(values=[]))
+
+    def test_rejects_a_self_reference(self):
+        with self.assertRaisesRegex(ConfigError, "points an attribute at itself"):
+            validate_config(
+                self.dependency(attribute="trips.call_type", determined_by="trips.call_type")
+            )
+
+    def test_conflicting_dependencies_make_the_selection_unsatisfiable(self):
+        # Two dependents pinning one discriminator to disjoint values cannot be
+        # satisfied together; the sampler must drop that combination, not emit it.
+        config = exclusive_config(
+            exclusive_attribute_groups=[],
+            attribute_value_dependencies=[
+                {"attribute": "trips.origin_call", "determined_by": "trips.call_type", "values": ["A"]},
+                {"attribute": "trips.origin_stand", "determined_by": "trips.call_type", "values": ["B"]},
+            ],
+        )
+        validate_config(config)
+        rows = QueryGenerator(config, seed=5).generate(
+            [Category.parse("standard.range.single")], 400
+        )
+        for row in rows:
+            keys = {f"{p['table']}.{p['attribute']}" for p in row["predicates"]}
+            if "trips.call_type" in keys:
+                self.assertLessEqual(len(keys & set(DISCRIMINATED)), 1, keys)
 
 
 if __name__ == "__main__":
