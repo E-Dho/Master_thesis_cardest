@@ -34,13 +34,15 @@ python3 query_generation/query_generator.py \
   --user sunip956
 ```
 
-## Create A Zero-Free POL Variant
+## Create A Zero-Free Variant
 
-`resample_nonzero_benchmark.py` keeps every positive row in an evaluated POL
+`resample_nonzero_benchmark.py` keeps every positive row in an evaluated
 workload and replaces only its true-zero rows. Each replacement is a fresh
-category-local draw, normalized to the same-segment spatial-temporal semantics
-before evaluation, and accepted only when its exact join cardinality is
+category-local draw and is accepted only when its exact join cardinality is
 positive. The output retains the original query IDs and final category counts.
+Legacy POL candidates are normalized to the same-segment spatial-temporal
+semantics before evaluation. Porto candidates already use only `segments` for
+spatial and temporal predicates, so they need no SQL rewrite.
 
 On the cluster, submit the serialized job after setting `REPO_ROOT` to the
 checkout containing the desired branch:
@@ -98,6 +100,22 @@ loop reaches their own index.
 
 The output JSONL and summary are written before the final validation pass, so a
 validation failure reports the problem without discarding the evaluated rows.
+
+For Porto, submit the normal frozen-workload evaluator chain:
+
+```bash
+REPO_ROOT=/zfshome/sunip956/master_thesis_trajectories/Master_thesis_cardest_git \
+bash query_generation/submit_porto_8000_evaluation.sh
+```
+
+It evaluates the frozen 8,000-row source in 32 serialized slices, merges it as
+`porto_taxi_50m_8000_segment_coupled_v1`, then submits the dependent
+`qreplace_porto_nonzero` job. That job keeps all exact-positive source rows and
+replaces only true zeros. Its final workload and summary are written under
+`$PORTO_MOBILITYDB_ROOT/query_runs/porto_taxi_50m_8000_segment_coupled_nonzero_v1/`.
+It validates 8,000 unique IDs, 500 rows in each category, 4,000 multi-relation
+distinct-trip truths, segment-coupled spatio-temporal predicates, and strictly
+positive exact join cardinalities.
 
 ## Tests
 

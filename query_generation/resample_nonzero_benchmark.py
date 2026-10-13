@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replace only true-zero POL workload rows with positive rejection samples.
+"""Replace only true-zero workload rows with positive rejection samples.
 
 The input benchmark remains untouched.  Its positive rows are copied as-is;
 each row whose exact database join cardinality is zero is replaced by a fresh
@@ -21,11 +21,15 @@ import os
 import time
 from collections import Counter
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Any, Iterable, Sequence
 
 try:
-    from .merge_evaluated_slices import validate_segment_coupled_semantics
+    from .merge_evaluated_slices import (
+        percentile,
+        validate_segment_coupled_semantics,
+        validate_workload_shape,
+    )
     from .query_generator import (
         Category,
         LiveCenterCache,
@@ -36,7 +40,11 @@ try:
     )
     from .rewrite_segment_coupled_queries import needs_segment_correction, rewrite_row
 except ImportError:  # Direct execution from query_generation/ on the cluster.
-    from merge_evaluated_slices import validate_segment_coupled_semantics
+    from merge_evaluated_slices import (
+        percentile,
+        validate_segment_coupled_semantics,
+        validate_workload_shape,
+    )
     from query_generator import (
         Category,
         LiveCenterCache,
@@ -222,6 +230,49 @@ def query_ordinal(query_id: str, fallback: int) -> int:
 def table_subset_counts(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
     counts = Counter("+".join(sorted(row["tables"])) for row in rows)
     return dict(sorted(counts.items()))
+
+
+def numeric_statistics(values: Sequence[float]) -> dict[str, float] | None:
+    if not values:
+        return None
+    return {
+        "min": min(values),
+        "median": median(values),
+        "max": max(values),
+        "p90": percentile(list(values), 0.90),
+        "p95": percentile(list(values), 0.95),
+    }
+
+
+def category_statistics(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["category"]["key"]), []).append(row)
+    statistics: dict[str, dict[str, Any]] = {}
+    for category, category_rows in sorted(grouped.items()):
+        join_values = [float(row["join_cardinality"]) for row in category_rows]
+        entity_values = [
+            float(row["entity_cardinality"])
+            for row in category_rows
+            if row.get("entity_cardinality") is not None
+        ]
+        seconds = [
+            float(row.get("join_evaluation_seconds") or 0)
+            + float(row.get("entity_evaluation_seconds") or 0)
+            for row in category_rows
+        ]
+        statistics[category] = {
+            "rows": len(category_rows),
+            "join_cardinality": numeric_statistics(join_values),
+            "entity_cardinality": numeric_statistics(entity_values),
+            "evaluation_seconds": {
+                "total": sum(seconds),
+                "average_per_query": sum(seconds) / len(seconds),
+                "p90_per_query": percentile(seconds, 0.90),
+                "p95_per_query": percentile(seconds, 0.95),
+            },
+        }
+    return statistics
 
 
 def normalize_final_semantics(candidate: dict[str, Any], source_workload: str) -> dict[str, Any]:
@@ -526,6 +577,7 @@ def build_summary(
         "distinct_trajectory_truth_rows": sum(
             row.get("entity_cardinality") is not None for row in rows
         ),
+        "category_statistics": category_statistics(rows),
         "center_pools": provenance["center_pools"],
         "replacement_attempts": {
             "total": sum(attempts),
@@ -537,7 +589,7 @@ def build_summary(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Replace true-zero POL workload rows with positive category-local rejection samples."
+        description="Replace true-zero workload rows with positive category-local rejection samples."
     )
     parser.add_argument("--input", required=True)
     parser.add_argument("--config", required=True)
@@ -546,6 +598,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--max-attempts", type=int, default=1000)
     parser.add_argument("--sample-cache-size", type=int, default=2048)
+    parser.add_argument(
+        "--queries-per-category",
+        type=int,
+        help="Require exactly this many rows in each of the 16 workload categories.",
+    )
+    parser.add_argument(
+        "--expected-distinct-rows",
+        type=int,
+        help="Require this many rows with a distinct-entity truth.",
+    )
     parser.add_argument(
         "--progress",
         help="JSONL sidecar of accepted replacements; defaults to <output>.partial.jsonl. "
@@ -612,6 +674,7 @@ def main() -> None:
     write_json_atomic(Path(args.summary), summary, indent=2, trailing_newline=True)
     print(json.dumps({key: value for key, value in summary.items() if key != "center_pools"}, sort_keys=True))
     validate_output(rows, source_rows)
+    validate_workload_shape(rows, args.queries_per_category, args.expected_distinct_rows)
 
 
 if __name__ == "__main__":

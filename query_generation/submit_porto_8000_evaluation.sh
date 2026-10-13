@@ -5,6 +5,9 @@ REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 source "$REPO_ROOT/dataset_generation/porto_taxi_loader/common.sh"
 INPUT_JSONL=${INPUT_JSONL:-$PORTO_MOBILITYDB_ROOT/query_runs/porto_taxi_50m_8000_segment_coupled_v1_frozen/queries.jsonl}
 SLICE_PREFIX=${SLICE_PREFIX:-porto_taxi_50m_8000_segment_coupled_v1_eval}
+BENCHMARK_LABEL=${BENCHMARK_LABEL:-porto_taxi_50m_8000_segment_coupled_v1}
+NONZERO_BENCHMARK_LABEL=${NONZERO_BENCHMARK_LABEL:-porto_taxi_50m_8000_segment_coupled_nonzero_v1}
+REPLACEMENT_SEED=${REPLACEMENT_SEED:-20261013}
 test -f "$INPUT_JSONL"
 
 # The slices are chained with afterok and MUST stay serial.  Every slice calls
@@ -23,5 +26,11 @@ for chunk in $(seq 0 31); do
   previous_job=${job%%;*}
   printf 'chunk=%02d job_id=%s start=%d end=%d\n' "$chunk" "$previous_job" "$start" "$end"
 done
-merge=$(INPUT_JSONL="$INPUT_JSONL" SLICE_PREFIX="$SLICE_PREFIX" sbatch --parsable --dependency="afterok:$previous_job" --job-name=qmerge_porto "$REPO_ROOT/query_generation/run_porto_query_merge.sbatch")
-printf 'merge_job=%s\n' "${merge%%;*}"
+merge=$(INPUT_JSONL="$INPUT_JSONL" SLICE_PREFIX="$SLICE_PREFIX" BENCHMARK_LABEL="$BENCHMARK_LABEL" \
+  sbatch --parsable --dependency="afterok:$previous_job" --job-name=qmerge_porto "$REPO_ROOT/query_generation/run_porto_query_merge.sbatch")
+merge=${merge%%;*}
+nonzero=$(INPUT_JSONL="$PORTO_MOBILITYDB_ROOT/query_runs/$BENCHMARK_LABEL/queries.jsonl" \
+  RUN_LABEL="$NONZERO_BENCHMARK_LABEL" REPLACEMENT_SEED="$REPLACEMENT_SEED" \
+  sbatch --parsable --dependency="afterok:$merge" --job-name=qreplace_porto_nonzero "$REPO_ROOT/query_generation/run_porto_nonzero_replacement.sbatch")
+printf 'merge_job=%s\n' "$merge"
+printf 'nonzero_replacement_job=%s\n' "${nonzero%%;*}"

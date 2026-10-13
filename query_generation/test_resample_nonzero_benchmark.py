@@ -14,6 +14,7 @@ from query_generation.query_generator import (
     decode_center_value,
     encode_center_value,
 )
+from query_generation.build_porto_taxi_query_config import build_config as build_porto_config
 from query_generation import resample_nonzero_benchmark as resample
 from query_generation.resample_nonzero_benchmark import (
     REPLACEMENT_NAME,
@@ -51,6 +52,22 @@ def config():
     }
 
 
+def porto_config():
+    return build_porto_config(
+        {
+            "taxi_id": {"min": 1, "max": 3},
+            "call_type": ["A", "B"],
+            "origin_call": {"min": 1, "max": 3},
+            "origin_stand": {"min": 1, "max": 3},
+            "daytype": ["A"],
+            "num_of_segments": {"min": 1, "max": 3},
+            "segment_idx": {"min": 0, "max": 2},
+            "segment_time": {"min": "2013-01-01 00:00:00", "max": "2013-01-01 01:00:00"},
+            "segment_geom": {"min_x": 0.0, "min_y": 0.0, "max_x": 10.0, "max_y": 10.0},
+        }
+    )
+
+
 class FakeExecutor:
     def __init__(self):
         self.scalar_calls = 0
@@ -65,6 +82,20 @@ class FakeExecutor:
         self.scalar_calls += 1
         self.last_scalar_sql = sql
         return 3
+
+
+class PortoFakeExecutor(FakeExecutor):
+    def rows(self, sql):
+        self.rows_calls += 1
+        self.last_rows_sql = sql
+        if "s.t_s, s.t_e" in sql:
+            return [
+                (datetime(2013, 1, 1, 0, 0), datetime(2013, 1, 1, 0, 0, 15)),
+                (datetime(2013, 1, 1, 0, 1), datetime(2013, 1, 1, 0, 1, 15)),
+            ]
+        if "ST_X(sampled_point)" in sql:
+            return [(1.0, 2.0), (3.0, 4.0)]
+        return super().rows(sql)
 
 
 def row(query_id, cardinality):
@@ -147,6 +178,30 @@ class NonzeroReplacementTest(unittest.TestCase):
         }
 
         self.assertEqual(source_category(target).key, "spatio_temporal.range.single")
+
+    def test_porto_replacements_keep_native_segment_coupled_predicates(self):
+        category = Category.parse("spatio_temporal.range.multi")
+        source = QueryGenerator(porto_config(), seed=7).generate([category], 1)
+        source[0]["join_cardinality"] = 0
+        source[0]["entity_cardinality"] = 0
+
+        output, attempts, _ = replace(
+            source, PortoFakeExecutor(), generator_config=porto_config()
+        )
+
+        replacement = output[0]
+        self.assertEqual(attempts, [1])
+        self.assertGreater(replacement["join_cardinality"], 0)
+        self.assertGreater(replacement["entity_cardinality"], 0)
+        self.assertNotIn("semantic_correction", replacement)
+        self.assertTrue(
+            all(
+                predicate["table"] == "segments"
+                for predicate in replacement["predicates"]
+                if predicate["dimension"] in {"spatial", "temporal"}
+            )
+        )
+        validate_output(output, source)
 
 
 class ResumeTest(unittest.TestCase):
@@ -580,6 +635,11 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(
             summary["table_subset_counts"]["output"], table_subset_counts(output)
         )
+        category_stats = summary["category_statistics"]["standard.range.single"]
+        self.assertEqual(category_stats["rows"], 2)
+        self.assertEqual(category_stats["join_cardinality"]["min"], 3.0)
+        self.assertIsNone(category_stats["entity_cardinality"])
+        self.assertIn("average_per_query", category_stats["evaluation_seconds"])
         self.assertIn("items.value", summary["center_pools"])
 
     def test_retained_count_ignores_replacement_blocks_from_an_earlier_run(self):

@@ -45,3 +45,15 @@ source columns are read, the timestamp mapping, or the selection and rejection
 rules -- so that directories written by an older parser are re-parsed instead
 of silently loaded. A directory with no version predates the `DAY_TYPE` fix and
 is never reused.
+
+## Query Workload
+
+`query_generation/run_porto_query_generator.sbatch` freezes the deterministic
+8,000-row segment-coupled workload. Submit
+`query_generation/submit_porto_8000_evaluation.sh` to evaluate it in 32
+serialized slices. Its final dependent job preserves every exact-positive row
+and rejection-samples replacements for exact zero rows, publishing the
+zero-free benchmark at
+`$PORTO_MOBILITYDB_ROOT/query_runs/porto_taxi_50m_8000_segment_coupled_nonzero_v1/`.
+Spatial and temporal predicates in both the source and final Porto workload are
+restricted to the same `porto.segments` row.
