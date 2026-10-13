@@ -71,6 +71,8 @@ SELECT
   'porto_validation_guard' AS check_name,
   bool_and(ok) AS ok,
   COUNT(*) FILTER (WHERE NOT ok) AS failed_checks,
-  CASE WHEN bool_and(ok) THEN 1 ELSE 1 / 0 END AS fail_if_bad
+  -- Keep the denominator dependent on the aggregate. PostgreSQL folds a
+  -- literal 1 / 0 while planning, even in the unreachable CASE branch.
+  1 / CASE WHEN bool_and(ok) THEN 1 ELSE 0 END AS fail_if_bad
 FROM porto_validation
 WHERE enforced;
