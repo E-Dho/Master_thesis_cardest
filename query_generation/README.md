@@ -34,6 +34,34 @@ python3 query_generation/query_generator.py \
   --user sunip956
 ```
 
+## Mutually Exclusive Columns
+
+A config may declare `exclusive_attribute_groups`: sets of attributes of which a
+query may constrain at most one. Use it when the schema makes columns
+impossible to satisfy together, so that the generator never emits a query that
+is empty for every row regardless of the bounds it draws.
+
+Porto declares `["trips.call_type", "trips.origin_call", "trips.origin_stand"]`.
+`CALL_TYPE` partitions trips into `A` (origin_call set, origin_stand null), `B`
+(origin_stand set, origin_call null) and `C` (both null); across the full Kaggle
+file not one of 1,674,152 eligible rows has both origin columns set. A range
+predicate never matches NULL, so a query constraining two of the three -- two
+ranges, or an equality against the wrong origin column -- is empty by schema.
+Without the group, 39.8% of generated `standard.*` queries fell into that trap;
+with it, none do.
+
+Groups must not overlap, since the reduction picks one surviving member per
+group and overlapping membership would make that ambiguous. `validate_config`
+rejects overlapping, single-member, repeated and unknown members. If a group
+makes a category unsatisfiable -- putting both the spatial and the temporal
+attribute of a `spatio_temporal` query in one group, say -- generation raises
+`ConfigError` rather than looping.
+
+This removes queries that are *provably* empty. It cannot remove queries that
+happen to be empty for the data, so it reduces the zero rate rather than
+guaranteeing zero; the rejection-sampling stage below is what makes a workload
+actually zero-free.
+
 ## Create A Zero-Free Variant
 
 `resample_nonzero_benchmark.py` keeps every positive row in an evaluated
@@ -116,6 +144,15 @@ replaces only true zeros. Its final workload and summary are written under
 It validates 8,000 unique IDs, 500 rows in each category, 4,000 multi-relation
 distinct-trip truths, segment-coupled spatio-temporal predicates, and strictly
 positive exact join cardinalities.
+
+The replacement job also checks that every source row's `config_hash` matches
+the `--config` it was given, so a workload frozen under a different query config
+is refused rather than silently resampled from a different distribution.
+
+Nothing resubmits the replacement job if it exceeds its wall clock. Re-submit
+`run_porto_nonzero_replacement.sbatch` with the same `RUN_LABEL`, `INPUT_JSONL`
+and `REPLACEMENT_SEED`; it resumes from the progress and centers sidecars rather
+than re-evaluating the replacements it already accepted.
 
 ## Tests
 

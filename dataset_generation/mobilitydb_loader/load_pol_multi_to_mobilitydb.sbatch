@@ -61,9 +61,13 @@ SELECT
   agents = :expected_agents::bigint AND total_tuples >= :min_total_tuples::bigint AS ok,
   agents,
   total_tuples,
-  CASE
+  -- Keep the denominator dependent on the counts.  PostgreSQL folds a literal
+  -- 1 / 0 while planning whenever the CASE test is not itself constant, so the
+  -- previous shape raised division by zero on a good database as well as a bad
+  -- one, making this guard abort every load instead of only failing ones.
+  1 / CASE
     WHEN agents = :expected_agents::bigint AND total_tuples >= :min_total_tuples::bigint THEN 1
-    ELSE 1 / 0
+    ELSE 0
   END AS fail_if_bad
 FROM counts;
 SQL

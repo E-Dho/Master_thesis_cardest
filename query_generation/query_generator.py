@@ -111,6 +111,37 @@ def validate_config(config: Dict[str, Any]) -> None:
         if seen != table_names:
             raise ConfigError("Join graph is disconnected")
 
+    validate_exclusive_attribute_groups(config)
+
+
+def validate_exclusive_attribute_groups(config: Dict[str, Any]) -> None:
+    groups = config.get("exclusive_attribute_groups")
+    if groups is None:
+        return
+    if not isinstance(groups, list):
+        raise ConfigError("exclusive_attribute_groups must be a list")
+    known = {
+        attribute_key(table_id, attr)
+        for table_id, table in config["tables"].items()
+        for attr in table["attributes"]
+    }
+    seen: Dict[str, int] = {}
+    for index, group in enumerate(groups):
+        if not isinstance(group, list) or len(group) < 2:
+            raise ConfigError(f"exclusive group {index} must list at least two attributes")
+        members = [str(member) for member in group]
+        if len(set(members)) != len(members):
+            raise ConfigError(f"exclusive group {index} repeats an attribute")
+        for member in members:
+            if member not in known:
+                raise ConfigError(f"exclusive group {index} references unknown attribute {member!r}")
+            if member in seen:
+                raise ConfigError(
+                    f"{member!r} appears in exclusive groups {seen[member]} and {index}; "
+                    "overlapping groups make the reduction ambiguous"
+                )
+            seen[member] = index
+
 
 def validate_attribute(table_id: str, attr: Dict[str, Any]) -> None:
     for key in ("name", "type", "dimension"):
@@ -242,6 +273,71 @@ def attrs_for_dimension(config: Dict[str, Any], table_ids: Sequence[str], dimens
             if attr["dimension"] in dims:
                 attrs.append((table_id, attr))
     return attrs
+
+
+def attribute_key(table_id: str, attr: Dict[str, Any]) -> str:
+    return f"{table_id}.{attr['name']}"
+
+
+def exclusive_attribute_groups(config: Dict[str, Any]) -> List[frozenset]:
+    """Sets of attributes of which a query may constrain at most one.
+
+    Some columns cannot be satisfied together no matter what bounds are drawn,
+    because the schema makes them mutually exclusive.  Porto's CALL_TYPE
+    partitions trips into A (origin_call set, origin_stand null), B (origin_stand
+    set, origin_call null) and C (both null), so a range on both origin columns,
+    or a call_type equality against the wrong origin column, is empty for every
+    row in the table.  Constraining at most one of a group keeps the generator
+    from emitting queries that are impossible by construction.
+    """
+
+    groups = config.get("exclusive_attribute_groups") or []
+    return [frozenset(str(member) for member in group) for group in groups]
+
+
+def max_conflict_free_count(
+    attrs: Sequence[Tuple[str, Dict[str, Any]]], groups: Sequence[frozenset]
+) -> int:
+    """Largest number of attributes selectable while honouring every group."""
+
+    keys = [attribute_key(table_id, attr) for table_id, attr in attrs]
+    total = len(keys)
+    for group in groups:
+        present = sum(1 for key in keys if key in group)
+        if present > 1:
+            total -= present - 1
+    return total
+
+
+def drop_conflicting_attributes(
+    attrs: Sequence[Tuple[str, Dict[str, Any]]],
+    groups: Sequence[frozenset],
+    rng: random.Random,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Keep one uniformly chosen member of each exclusive group."""
+
+    if not groups:
+        return list(attrs)
+    keep: Dict[frozenset, str] = {}
+    for group in groups:
+        members = [
+            attribute_key(table_id, attr)
+            for table_id, attr in attrs
+            if attribute_key(table_id, attr) in group
+        ]
+        if len(members) > 1:
+            keep[group] = rng.choice(members)
+    if not keep:
+        return list(attrs)
+    retained: List[Tuple[str, Dict[str, Any]]] = []
+    for table_id, attr in attrs:
+        key = attribute_key(table_id, attr)
+        blocked = any(
+            key in group and key != chosen for group, chosen in keep.items()
+        )
+        if not blocked:
+            retained.append((table_id, attr))
+    return retained
 
 
 def is_ordered(attr: Dict[str, Any]) -> bool:
@@ -556,12 +652,17 @@ class QueryGenerator:
         if not attrs:
             raise ConfigError(f"No attributes available for {category.key} on {table_ids}")
         min_count = 2 if category.dimension == "spatio_temporal" else 1
-        if len(attrs) < min_count:
+        groups = exclusive_attribute_groups(self.config)
+        if max_conflict_free_count(attrs, groups) < min_count:
             raise ConfigError(f"Not enough attributes for {category.key} on {table_ids}")
 
         for _ in range(200):
-            count = self.rng.randint(min_count, len(attrs))
-            selected = self.rng.sample(attrs, count)
+            # Reduce first, then sample: rejecting conflicting draws afterwards
+            # would loop forever once the requested count exceeds the largest
+            # conflict-free subset.
+            candidates = drop_conflicting_attributes(attrs, groups, self.rng)
+            count = self.rng.randint(min_count, len(candidates))
+            selected = self.rng.sample(candidates, count)
             if not has_required_dimension_mix(selected, category.dimension):
                 continue
             if category.interval == "unbounded" and not any(is_ordered(attr) for _, attr in selected):

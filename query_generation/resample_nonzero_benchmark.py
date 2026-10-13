@@ -244,6 +244,23 @@ def numeric_statistics(values: Sequence[float]) -> dict[str, float] | None:
     }
 
 
+def evaluation_seconds_statistics(rows: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    seconds = [
+        float(row.get("join_evaluation_seconds") or 0)
+        + float(row.get("entity_evaluation_seconds") or 0)
+        for row in rows
+    ]
+    return {
+        "rows": len(seconds),
+        "total": sum(seconds),
+        "average_per_query": sum(seconds) / len(seconds),
+        "p90_per_query": percentile(seconds, 0.90),
+        "p95_per_query": percentile(seconds, 0.95),
+    }
+
+
 def category_statistics(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -256,20 +273,21 @@ def category_statistics(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, A
             for row in category_rows
             if row.get("entity_cardinality") is not None
         ]
-        seconds = [
-            float(row.get("join_evaluation_seconds") or 0)
-            + float(row.get("entity_evaluation_seconds") or 0)
-            for row in category_rows
-        ]
+        # Retained rows were timed by the sliced evaluator when the benchmark was
+        # built; replacements were timed by this job.  Different runs on
+        # differently loaded nodes, so they are reported apart rather than
+        # averaged into one number that measures neither.
         statistics[category] = {
             "rows": len(category_rows),
             "join_cardinality": numeric_statistics(join_values),
             "entity_cardinality": numeric_statistics(entity_values),
             "evaluation_seconds": {
-                "total": sum(seconds),
-                "average_per_query": sum(seconds) / len(seconds),
-                "p90_per_query": percentile(seconds, 0.90),
-                "p95_per_query": percentile(seconds, 0.95),
+                "retained": evaluation_seconds_statistics(
+                    [row for row in category_rows if not row.get("nonzero_replacement")]
+                ),
+                "replaced": evaluation_seconds_statistics(
+                    [row for row in category_rows if row.get("nonzero_replacement")]
+                ),
             },
         }
     return statistics
@@ -437,6 +455,31 @@ def load_progress(
     return resumed
 
 
+def validate_source_config(
+    source_rows: Sequence[dict[str, Any]], expected_config_hash: str
+) -> None:
+    """Refuse a workload that was generated from a different query config.
+
+    Replacements are drawn from the config passed to --config, so resampling a
+    workload generated from a different one silently mixes two distributions.
+    The sidecars are already bound this way; the input workload was the one
+    input that was not.
+    """
+
+    mismatched = sorted(
+        {
+            str(row.get("config_hash"))
+            for row in source_rows
+            if row.get("config_hash") != expected_config_hash
+        }
+    )
+    if mismatched:
+        raise SystemExit(
+            f"source workload was generated from config hash(es) {mismatched} "
+            f"but --config hashes to {expected_config_hash}"
+        )
+
+
 def validate_output(rows: Sequence[dict[str, Any]], source_rows: Sequence[dict[str, Any]]) -> None:
     if len(rows) != len(source_rows):
         raise ValueError("replacement output changed the workload row count")
@@ -501,6 +544,7 @@ def replace_true_zeros(
         load_centers_cache(centers_cache_path, live_centers, binding)
     cached_pool_keys = live_centers.pool_keys()
 
+    validate_source_config(source_rows, binding["config_hash"])
     resumed = load_progress(progress_path, source_rows, base_seed, binding)
     if progress_path is not None:
         ensure_progress_header(progress_path, binding)

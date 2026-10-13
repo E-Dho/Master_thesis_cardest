@@ -2,7 +2,11 @@ import unittest
 from datetime import datetime
 
 from query_generation.build_porto_taxi_query_config import build_config, read_domains
-from query_generation.query_generator import all_valid_categories, validate_config
+from query_generation.query_generator import (
+    QueryGenerator,
+    all_valid_categories,
+    validate_config,
+)
 
 
 DOMAINS = {
@@ -23,6 +27,27 @@ class PortoQueryConfigTest(unittest.TestCase):
         config = build_config(DOMAINS)
         validate_config(config)
         self.assertEqual(len(all_valid_categories(config)), 16)
+
+    def test_mutually_exclusive_origin_columns_cannot_co_occur(self):
+        # CALL_TYPE partitions trips into A (origin_call), B (origin_stand) and
+        # C (neither), and no row in the Kaggle file has both origin columns
+        # set, so any query constraining two of the three is empty by schema.
+        config = build_config(DOMAINS)
+        validate_config(config)
+        self.assertEqual(
+            config["exclusive_attribute_groups"],
+            [["trips.call_type", "trips.origin_call", "trips.origin_stand"]],
+        )
+        group = set(config["exclusive_attribute_groups"][0])
+        categories = [
+            category
+            for category in all_valid_categories(config)
+            if category.dimension == "standard"
+        ]
+        rows = QueryGenerator(config, seed=11).generate(categories, 150)
+        for row in rows:
+            keys = {f"{p['table']}.{p['attribute']}" for p in row["predicates"]}
+            self.assertLessEqual(len(keys & group), 1, keys)
 
     def test_spatial_and_temporal_attributes_are_segments_only(self):
         config = build_config(DOMAINS)

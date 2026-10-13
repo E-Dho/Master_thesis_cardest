@@ -47,6 +47,17 @@ def build_config(domains: dict[str, Any]) -> dict[str, Any]:
             {"left": "taxis", "right": "trips", "condition": "x.taxi_id = t.taxi_id"},
             {"left": "trips", "right": "segments", "condition": "t.trip_id = s.trip_id"},
         ],
+        # CALL_TYPE partitions trips into A (origin_call set, origin_stand null),
+        # B (origin_stand set, origin_call null) and C (both null); across the
+        # whole Kaggle file not one of 1,674,152 eligible rows has both origin
+        # columns set.  A predicate never matches NULL, so constraining two of
+        # these three columns -- two ranges, or an equality against the wrong
+        # origin column -- is empty for every row no matter which bounds are
+        # drawn.  Allowing at most one keeps those impossible queries out of the
+        # workload instead of paying a database evaluation to reject them.
+        "exclusive_attribute_groups": [
+            ["trips.call_type", "trips.origin_call", "trips.origin_stand"]
+        ],
     }
 
 

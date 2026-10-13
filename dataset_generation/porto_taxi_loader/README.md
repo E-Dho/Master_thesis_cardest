@@ -18,6 +18,15 @@ loaded as a real column even though it is constant, so queries generated against
 it match everything; treat it as a zero-information attribute when reading
 results.
 
+`CALL_TYPE`, `ORIGIN_CALL` and `ORIGIN_STAND` are mutually exclusive: `A` sets
+`ORIGIN_CALL`, `B` sets `ORIGIN_STAND`, `C` sets neither, and no row in the file
+has both origin columns. The generated query config declares them as an
+exclusive attribute group so no query constrains two of the three, since such a
+query is empty for every row whatever bounds are drawn. Regenerate the config
+with `query_generation/build_porto_taxi_query_config.py` -- it only reads
+domains from the loaded database, so it does not need a reload -- and then
+re-freeze the workload, after changing anything that affects it.
+
 `TRIP_ID` is not a key. 81 of 1,710,670 rows repeat one and 79 of those carry
 different trip data, so the first occurrence in file order is kept and the rest
 are counted as `duplicate_trip_id` in `load_metadata.json`. `porto.trips`

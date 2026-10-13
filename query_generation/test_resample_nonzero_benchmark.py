@@ -396,15 +396,29 @@ class DuplicateGuardTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "no progress header"):
                 replace(source, FakeExecutor(), progress=progress)
 
-    def test_progress_from_another_generator_config_is_rejected(self):
+    def test_a_workload_from_another_generator_config_is_rejected(self):
+        # The sidecars were already bound to the run; the input workload was the
+        # one input that was not, so a config change went unnoticed.
+        source = [row("q00000001", 0)]
+        changed = config()
+        changed["tables"]["items"]["attributes"][0]["domain"]["max"] = 99
+        with self.assertRaisesRegex(SystemExit, "source workload was generated from config"):
+            replace(source, FakeExecutor(), generator_config=changed)
+
+    def test_progress_rows_from_another_generator_config_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             progress = Path(directory) / "progress.jsonl"
             source = [row("q00000001", 0)]
             replace(source, FakeExecutor(), progress=progress)
-            changed = config()
-            changed["tables"]["items"]["attributes"][0]["domain"]["max"] = 99
-            with self.assertRaisesRegex(SystemExit, "different config_hash"):
-                replace(source, FakeExecutor(), progress=progress, generator_config=changed)
+            lines = progress.read_text().splitlines()
+            tampered = json.loads(lines[1])
+            tampered["config_hash"] = "0" * 16
+            progress.write_text(
+                "\n".join([lines[0], json.dumps(tampered, sort_keys=True)]) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SystemExit, "different generator config"):
+                replace(source, FakeExecutor(), progress=progress)
 
 
 class CenterPoolTest(unittest.TestCase):
@@ -639,7 +653,10 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(category_stats["rows"], 2)
         self.assertEqual(category_stats["join_cardinality"]["min"], 3.0)
         self.assertIsNone(category_stats["entity_cardinality"])
-        self.assertIn("average_per_query", category_stats["evaluation_seconds"])
+        timings = category_stats["evaluation_seconds"]
+        self.assertEqual(timings["retained"]["rows"], 1)
+        self.assertEqual(timings["replaced"]["rows"], 1)
+        self.assertIn("average_per_query", timings["retained"])
         self.assertIn("items.value", summary["center_pools"])
 
     def test_retained_count_ignores_replacement_blocks_from_an_earlier_run(self):
