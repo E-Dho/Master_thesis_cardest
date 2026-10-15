@@ -54,8 +54,14 @@ discriminator decides whether another column is non-null. Each entry names the
 dependent `attribute`, the nominal `determined_by` column, and the `values` that
 make the dependent live. When both are selected the discriminator's value is
 drawn from that list; when the discriminator appears alone it is unrestricted.
-Two dependents pinning one discriminator to disjoint values make a selection
-unsatisfiable, and the sampler drops that combination rather than emitting it.
+
+Dependents of one discriminator narrow it jointly, and a selection whose
+dependents leave no value in common is dropped. That exclusion does not depend
+on the discriminator being selected: two dependents with disjoint value sets
+cannot be non-null on the same row, so constraining both is impossible whether
+or not the query says anything about the discriminator. Overlapping value sets
+are not an exclusion -- both dependents survive and the discriminator is pinned
+to their intersection.
 
 Porto uses both. `CALL_TYPE` partitions trips into `A` (origin_call set,
 origin_stand null), `B` (origin_stand set, origin_call null) and `C` (both
@@ -67,6 +73,12 @@ survive; only the mismatched pairing is impossible. Measured over 2,000
 generated `standard.*` queries: 39.8% constrained an impossible combination
 before, none do now, and 565 still pair `call_type` with an origin column, every
 one of them correctly pinned.
+
+Porto's exclusive group is redundant with its dependencies, since `['A']` and
+`['B']` are disjoint and already exclude each other. It is kept because it
+states a fact about the data that holds independently of `call_type`: widening
+either dependent's values would dissolve the derived exclusion while the two
+columns would still never be non-null together.
 
 This removes queries that are *provably* empty. It cannot remove queries that
 happen to be empty for the data, so it reduces the zero rate rather than

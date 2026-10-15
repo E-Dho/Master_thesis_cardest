@@ -351,11 +351,16 @@ def attribute_value_dependencies(config: Dict[str, Any]) -> List[Dict[str, Any]]
 def nominal_value_restrictions(
     config: Dict[str, Any], selected_attrs: Sequence[Tuple[str, Dict[str, Any]]]
 ) -> Dict[str, List[Any]]:
-    """Allowed values per discriminator, given which attributes are selected.
+    """Values each discriminator may still take, given the selected dependents.
 
-    A discriminator is only restricted when a dependent column is selected
-    alongside it.  An empty list means the selection cannot be satisfied at all,
-    which the caller rejects rather than emitting an impossible query.
+    Every selected dependent narrows its discriminator, whether or not the
+    discriminator is itself selected: two dependents of one discriminator with
+    disjoint value sets cannot be non-null on the same row, so selecting both is
+    impossible even when nothing constrains the discriminator directly.  An
+    empty list means exactly that, and the caller drops the selection rather
+    than emitting a query no row can satisfy.  ``build_predicates`` looks up
+    only the discriminators it actually selected, so an entry for an unselected
+    one restricts nothing.
     """
 
     selected_keys = {attribute_key(table_id, attr) for table_id, attr in selected_attrs}
@@ -363,7 +368,7 @@ def nominal_value_restrictions(
     for dependency in attribute_value_dependencies(config):
         dependent = str(dependency["attribute"])
         discriminator = str(dependency["determined_by"])
-        if dependent not in selected_keys or discriminator not in selected_keys:
+        if dependent not in selected_keys:
             continue
         values = list(dependency["values"])
         current = restrictions.get(discriminator)

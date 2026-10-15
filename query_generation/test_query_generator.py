@@ -214,14 +214,31 @@ class ExclusiveAttributeGroupTest(unittest.TestCase):
             for row in self.generated_rows(config, count)
         ]
 
-    def test_without_the_group_the_impossible_pair_is_common(self):
+    def test_without_either_rule_the_impossible_pair_is_common(self):
         config = exclusive_config()
         config.pop("exclusive_attribute_groups")
+        config.pop("attribute_value_dependencies")
         conflicts = sum(
             1 for keys in self.generated_predicate_keys(config) if len(keys & GROUP) >= 2
         )
         # Roughly (n+1)/(3n) of draws; the point is that it is far from zero.
         self.assertGreater(conflicts, 100)
+
+    def test_disjoint_dependents_exclude_each_other_without_the_group(self):
+        # origin_call needs call_type 'A' and origin_stand needs 'B', so they
+        # cannot be non-null on one row.  That holds whether or not the query
+        # constrains call_type, so the exclusion must not depend on the
+        # discriminator being selected.
+        config = exclusive_config()
+        config.pop("exclusive_attribute_groups")
+        without_discriminator = 0
+        for keys in self.generated_predicate_keys(config):
+            self.assertLessEqual(len(keys & GROUP), 1, keys)
+            if keys & GROUP and "trips.call_type" not in keys:
+                without_discriminator += 1
+        # Guard against the assertion above passing vacuously: selections that
+        # take a dependent and leave the discriminator out must really occur.
+        self.assertGreater(without_discriminator, 50)
 
     def test_declaring_the_group_removes_every_conflicting_query(self):
         for keys in self.generated_predicate_keys(exclusive_config()):
@@ -388,24 +405,33 @@ class ValueDependencyValidationTest(unittest.TestCase):
                 self.dependency(attribute="trips.call_type", determined_by="trips.call_type")
             )
 
-    def test_conflicting_dependencies_make_the_selection_unsatisfiable(self):
-        # Two dependents pinning one discriminator to disjoint values cannot be
-        # satisfied together; the sampler must drop that combination, not emit it.
+    def test_overlapping_dependents_may_still_be_combined(self):
+        # Disjoint value sets exclude; overlapping ones do not.  Both dependents
+        # here can be live on a 'B' row, so the pair must survive and pin the
+        # discriminator to the intersection.
         config = exclusive_config(
             exclusive_attribute_groups=[],
             attribute_value_dependencies=[
-                {"attribute": "trips.origin_call", "determined_by": "trips.call_type", "values": ["A"]},
-                {"attribute": "trips.origin_stand", "determined_by": "trips.call_type", "values": ["B"]},
+                {"attribute": "trips.origin_call", "determined_by": "trips.call_type",
+                 "values": ["A", "B"]},
+                {"attribute": "trips.origin_stand", "determined_by": "trips.call_type",
+                 "values": ["B", "C"]},
             ],
         )
         validate_config(config)
         rows = QueryGenerator(config, seed=5).generate(
             [Category.parse("standard.range.single")], 400
         )
+        combined = 0
         for row in rows:
-            keys = {f"{p['table']}.{p['attribute']}" for p in row["predicates"]}
-            if "trips.call_type" in keys:
-                self.assertLessEqual(len(keys & set(DISCRIMINATED)), 1, keys)
+            byattr = {f"{p['table']}.{p['attribute']}": p for p in row["predicates"]}
+            if len(set(byattr) & set(DISCRIMINATED)) < 2:
+                continue
+            combined += 1
+            call_type = byattr.get("trips.call_type")
+            if call_type is not None:
+                self.assertEqual(call_type["value"], "B", byattr.keys())
+        self.assertGreater(combined, 20)
 
 
 if __name__ == "__main__":
