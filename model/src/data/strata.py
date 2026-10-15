@@ -17,29 +17,15 @@ SQL_NULL = "__SQL_NULL__"
 
 
 @dataclass(frozen=True)
-class RootDataStratum:
-    """A root-table DATA region with exact mass under uniform FOJ tuples."""
+class StratumTerm:
+    """One column region inside a (possibly conjunctive) stratum."""
 
-    stratum_id: str
     column_index: int
     column_name: str
     region_type: str
     value: Any | None = None
     lower: Any | None = None
     upper: Any | None = None
-    foj_count: float = 0.0
-    probability: float = 0.0
-    expected_target_rows: float = 0.0
-    expected_equality_count: float | None = None
-    expected_lower_count: float | None = None
-    expected_upper_count: float | None = None
-    expected_range_support: float | None = None
-    support_score: float = 0.0
-    support_deficit: float = 0.0
-    support_bottleneck: str | None = None
-    alpha: float = 0.0
-    source: str = "unknown"
-    semantic_type: str = "categorical"
 
     def contains_value(self, value: Any) -> bool:
         if _is_structural_value(value):
@@ -56,9 +42,111 @@ class RootDataStratum:
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        for key in ("value", "lower", "upper"):
+            payload[key] = _jsonable(payload[key])
+        return payload
+
+
+@dataclass(frozen=True)
+class RootDataStratum:
+    """A DATA region with exact mass under uniform FOJ tuples.
+
+    A stratum is a conjunction of per-column terms.  ``terms`` is the full
+    conjunction; the legacy scalar fields describe its **last** term, which is
+    the one that decides which suffix heads the stratum can serve, so depth-1
+    strata behave exactly as before and existing consumers keep working.
+    """
+
+    stratum_id: str
+    column_index: int
+    column_name: str
+    region_type: str
+    value: Any | None = None
+    lower: Any | None = None
+    upper: Any | None = None
+    terms: tuple["StratumTerm", ...] = ()
+    foj_count: float = 0.0
+    probability: float = 0.0
+    expected_target_rows: float = 0.0
+    expected_equality_count: float | None = None
+    expected_lower_count: float | None = None
+    expected_upper_count: float | None = None
+    expected_range_support: float | None = None
+    support_score: float = 0.0
+    support_deficit: float = 0.0
+    support_bottleneck: str | None = None
+    alpha: float = 0.0
+    source: str = "unknown"
+    semantic_type: str = "categorical"
+
+    def __post_init__(self) -> None:
+        terms = tuple(
+            term if isinstance(term, StratumTerm) else StratumTerm(**dict(term))
+            for term in (self.terms or ())
+        )
+        if not terms:
+            terms = (
+                StratumTerm(
+                    column_index=int(self.column_index),
+                    column_name=str(self.column_name),
+                    region_type=str(self.region_type),
+                    value=self.value,
+                    lower=self.lower,
+                    upper=self.upper,
+                ),
+            )
+        if len({term.column_index for term in terms}) != len(terms):
+            raise ValueError(f"stratum {self.stratum_id!r} repeats a column across terms")
+        # Order by column index so that the last term is the one that gates the
+        # eligible suffix heads.
+        terms = tuple(sorted(terms, key=lambda term: term.column_index))
+        object.__setattr__(self, "terms", terms)
+        last = terms[-1]
+        object.__setattr__(self, "column_index", int(last.column_index))
+        object.__setattr__(self, "column_name", str(last.column_name))
+        object.__setattr__(self, "region_type", str(last.region_type))
+        object.__setattr__(self, "value", last.value)
+        object.__setattr__(self, "lower", last.lower)
+        object.__setattr__(self, "upper", last.upper)
+
+    @property
+    def depth(self) -> int:
+        return len(self.terms)
+
+    @property
+    def is_conjunctive(self) -> bool:
+        return len(self.terms) > 1
+
+    @property
+    def column_indices(self) -> tuple[int, ...]:
+        return tuple(term.column_index for term in self.terms)
+
+    def tables(self, metadata: ModelMetadata) -> frozenset[str]:
+        names = {
+            metadata.columns[term.column_index].table
+            for term in self.terms
+        }
+        return frozenset(name for name in names if name is not None)
+
+    def contains_value(self, value: Any) -> bool:
+        """Membership for the last term only; see ``contains_row`` for the conjunction."""
+
+        return self.terms[-1].contains_value(value)
+
+    def contains_row(self, encoded_row: np.ndarray, metadata: ModelMetadata) -> bool:
+        row = np.asarray(encoded_row)
+        for term in self.terms:
+            column = metadata.columns[term.column_index]
+            if not term.contains_value(column.domain[int(row[term.column_index])]):
+                return False
+        return True
+
+    def to_json_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
         payload["value"] = _jsonable(payload["value"])
         payload["lower"] = _jsonable(payload["lower"])
         payload["upper"] = _jsonable(payload["upper"])
+        payload["terms"] = tuple(term.to_json_dict() for term in self.terms)
         return payload
 
 
@@ -298,6 +386,118 @@ class ExactRootStratumProvider:
             },
         )
 
+    @property
+    def supports_conjunctive_strata(self) -> bool:
+        """Conjunctions need exact joint counts, which only materialized rows give.
+
+        The live root-JCT provider holds one marginal per root column and no
+        way to intersect them, so conjunctive discovery is refused there rather
+        than approximated.
+        """
+
+        return self.encoded_rows is not None
+
+    def joint_count(self, terms: "tuple[StratumTerm, ...]") -> float:
+        if self.encoded_rows is None:
+            raise NotImplementedError("joint counts require materialized rows")
+        mask = np.ones(self.encoded_rows.shape[0], dtype=bool)
+        for term in terms:
+            column = self.metadata.columns[term.column_index]
+            values = [
+                column.domain[int(index)]
+                for index in self.encoded_rows[:, term.column_index]
+            ]
+            mask &= np.array([term.contains_value(value) for value in values], dtype=bool)
+        weights = self.row_weights
+        if weights is None:
+            return float(mask.sum())
+        return float(weights[mask].sum())
+
+    def extend_with_conjunctions(
+        self,
+        seeds: "tuple[RootDataStratum, ...]",
+        *,
+        n_total: int,
+        predicate_probabilities: Mapping[str, float],
+        threshold: float,
+        max_depth: int,
+        beam_width: int,
+        minimum_joint_rows: float,
+        require_distinct_tables: bool,
+    ) -> "tuple[RootDataStratum, ...]":
+        """Beam search for conjunctions, scored by repairable per-head deficit.
+
+        Extension candidates are the seed terms themselves, so the search needs
+        no enumeration of value pairs: it intersects boolean masks it can
+        already build.  A candidate is dropped as soon as its joint row count
+        falls below ``minimum_joint_rows``, because a region with too few rows
+        cannot be conditionally sampled without memorizing those rows.
+        """
+
+        if not self.supports_conjunctive_strata or max_depth <= 1:
+            return ()
+        total = float(sum(mass.total_count for mass in self.column_masses.values()))
+        if self.row_weights is not None:
+            total = float(self.row_weights.sum())
+        elif self.encoded_rows is not None:
+            total = float(self.encoded_rows.shape[0])
+        if total <= 0.0:
+            return ()
+        root = self.metadata.join_root
+        pool = [stratum.terms[0] for stratum in seeds]
+        beam = list(seeds)
+        produced: dict[str, RootDataStratum] = {}
+        for _ in range(max_depth - 1):
+            scored: list[RootDataStratum] = []
+            for stratum in beam:
+                used = set(stratum.column_indices)
+                used_tables = set(stratum.tables(self.metadata))
+                for term in pool:
+                    if term.column_index in used:
+                        continue
+                    table = self.metadata.columns[term.column_index].table
+                    if require_distinct_tables and table in used_tables:
+                        continue
+                    terms = tuple(sorted(stratum.terms + (term,), key=lambda item: item.column_index))
+                    count = self.joint_count(terms)
+                    if count < minimum_joint_rows:
+                        continue
+                    candidate = RootDataStratum(
+                        stratum_id="&".join(
+                            f"{item.column_name}:{item.region_type}:{_literal_id(item.value if item.value is not None else item.lower if item.lower is not None else item.upper)}"
+                            for item in terms
+                        ),
+                        column_index=terms[-1].column_index,
+                        column_name=terms[-1].column_name,
+                        region_type=terms[-1].region_type,
+                        value=terms[-1].value,
+                        lower=terms[-1].lower,
+                        upper=terms[-1].upper,
+                        terms=terms,
+                        foj_count=count,
+                        probability=count / total,
+                        expected_target_rows=n_total * (count / total),
+                        source=self.source,
+                        semantic_type="conjunctive",
+                    )
+                    scored.append(
+                        with_conditional_score(
+                            candidate,
+                            metadata=self.metadata,
+                            n_total=n_total,
+                            predicate_probabilities=predicate_probabilities,
+                            threshold=threshold,
+                            root_table=root,
+                        )
+                    )
+            if not scored:
+                break
+            scored.sort(key=lambda item: (-item.support_deficit, item.stratum_id))
+            beam = scored[: max(1, int(beam_width))]
+            for candidate in beam:
+                produced[candidate.stratum_id] = candidate
+        return tuple(produced.values())
+
     def discover(
         self,
         *,
@@ -305,7 +505,22 @@ class ExactRootStratumProvider:
         predicate_probabilities: Mapping[str, float],
         minimum_expected_context_support: float,
         max_selected_strata: int,
+        conjunctive: Mapping[str, Any] | None = None,
     ) -> tuple[RootDataStratum, ...]:
+        conjunctive = dict(conjunctive or {})
+        conjunctive_requested = bool(conjunctive.get("enabled", False))
+        self.conjunctive_status: dict[str, Any] = {
+            "requested": conjunctive_requested,
+            "applied": False,
+            "reason": None,
+            "conjunctive_selected": 0,
+        }
+        if conjunctive_requested and not self.supports_conjunctive_strata:
+            self.conjunctive_status["reason"] = (
+                "provider has no materialized rows, so exact joint counts are "
+                "unavailable; falling back to depth-1 strata"
+            )
+            conjunctive_requested = False
         candidates: list[RootDataStratum] = []
         for column_index, mass in self.column_masses.items():
             column = self.metadata.columns[column_index]
@@ -341,6 +556,40 @@ class ExactRootStratumProvider:
                         semantic_type=mass.semantic_type,
                     )
                 )
+        if conjunctive_requested:
+            root = self.metadata.join_root
+            rescored = [
+                with_conditional_score(
+                    candidate,
+                    metadata=self.metadata,
+                    n_total=n_total,
+                    predicate_probabilities=predicate_probabilities,
+                    threshold=minimum_expected_context_support,
+                    root_table=root,
+                )
+                for candidate in candidates
+                if candidate.probability > 0.0
+            ]
+            seeds = tuple(
+                sorted(rescored, key=lambda item: (-item.support_deficit, item.stratum_id))[
+                    : max(1, int(conjunctive.get("seed_width", 32)))
+                ]
+            )
+            conjunctions = self.extend_with_conjunctions(
+                seeds,
+                n_total=n_total,
+                predicate_probabilities=predicate_probabilities,
+                threshold=minimum_expected_context_support,
+                max_depth=int(conjunctive.get("max_depth", 2)),
+                beam_width=int(conjunctive.get("beam_width", 32)),
+                minimum_joint_rows=float(conjunctive.get("minimum_joint_rows", 32.0)),
+                require_distinct_tables=bool(
+                    conjunctive.get("require_distinct_tables", True)
+                ),
+            )
+            candidates = list(rescored) + list(conjunctions)
+            self.conjunctive_status["applied"] = True
+            self.conjunctive_status["conjunctive_candidates"] = len(conjunctions)
         selected = sorted(
             (
                 candidate
@@ -349,12 +598,16 @@ class ExactRootStratumProvider:
             ),
             key=lambda item: (-item.support_deficit, item.expected_target_rows, item.stratum_id),
         )[: max(0, int(max_selected_strata))]
+        self.conjunctive_status["conjunctive_selected"] = sum(
+            1 for item in selected if item.is_conjunctive
+        )
         if not selected:
             return ()
         deficits = np.array([max(0.0, item.support_deficit) for item in selected], dtype=float)
         if float(deficits.sum()) <= 0.0:
             return ()
         alpha = deficits / float(deficits.sum())
+        alpha = _capped_allocation(alpha, float(conjunctive.get("max_stratum_share", 0.0)))
         return tuple(
             RootDataStratum(**{**item.to_json_dict(), "alpha": float(alpha[index])})
             for index, item in enumerate(selected)
@@ -378,12 +631,13 @@ class ExactRootStratumProvider:
         return self.encoded_rows[selected]
 
     def row_membership(self, encoded_rows: np.ndarray, stratum: RootDataStratum) -> np.ndarray:
-        column = self.metadata.columns[stratum.column_index]
-        values = np.array(
-            [column.domain[int(index)] for index in np.asarray(encoded_rows)[:, stratum.column_index]],
-            dtype=object,
-        )
-        return np.array([stratum.contains_value(value) for value in values], dtype=bool)
+        rows = np.asarray(encoded_rows)
+        mask = np.ones(rows.shape[0], dtype=bool)
+        for term in stratum.terms:
+            column = self.metadata.columns[term.column_index]
+            values = [column.domain[int(index)] for index in rows[:, term.column_index]]
+            mask &= np.array([term.contains_value(value) for value in values], dtype=bool)
+        return mask
 
     def membership_lookup(
         self,
@@ -426,16 +680,21 @@ def membership_matrix(
     lookup: RootStratumMembershipLookup | None = None,
 ) -> np.ndarray:
     rows = np.asarray(encoded_rows, dtype=np.int64)
+    # A stratum is a conjunction, so membership starts true and each term's
+    # column mask is ANDed in.  Within one column key every stratum appears at
+    # most once, which is what makes the in-place AND well defined.
+    matrix = np.ones((rows.shape[0], len(strata)), dtype=bool)
     if lookup is not None:
-        matrix = np.zeros((rows.shape[0], len(strata)), dtype=bool)
         for column_index, (stratum_indices, lookup_matrix) in lookup.by_column.items():
-            matrix[:, stratum_indices] = lookup_matrix[rows[:, column_index]]
+            matrix[:, stratum_indices] &= lookup_matrix[rows[:, column_index]]
         return matrix
-    matrix = np.zeros((rows.shape[0], len(strata)), dtype=bool)
     for stratum_index, stratum in enumerate(strata):
-        column = metadata.columns[stratum.column_index]
-        values = [column.domain[int(value)] for value in rows[:, stratum.column_index]]
-        matrix[:, stratum_index] = [stratum.contains_value(value) for value in values]
+        for term in stratum.terms:
+            column = metadata.columns[term.column_index]
+            values = [column.domain[int(value)] for value in rows[:, term.column_index]]
+            matrix[:, stratum_index] &= np.array(
+                [term.contains_value(value) for value in values], dtype=bool
+            )
     return matrix
 
 
@@ -443,20 +702,20 @@ def build_membership_lookup(
     metadata: ModelMetadata,
     strata: tuple[RootDataStratum, ...],
 ) -> RootStratumMembershipLookup:
-    grouped: dict[int, list[int]] = {}
+    grouped: dict[int, list[tuple[int, StratumTerm]]] = {}
     for stratum_index, stratum in enumerate(strata):
-        grouped.setdefault(stratum.column_index, []).append(stratum_index)
+        for term in stratum.terms:
+            grouped.setdefault(term.column_index, []).append((stratum_index, term))
     by_column: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    for column_index, stratum_indices in grouped.items():
+    for column_index, entries in grouped.items():
         column = metadata.columns[column_index]
-        lookup_matrix = np.zeros((column.domain_size, len(stratum_indices)), dtype=bool)
-        for local_index, stratum_index in enumerate(stratum_indices):
-            stratum = strata[stratum_index]
+        lookup_matrix = np.zeros((column.domain_size, len(entries)), dtype=bool)
+        for local_index, (_, term) in enumerate(entries):
             lookup_matrix[:, local_index] = [
-                stratum.contains_value(value) for value in column.domain
+                term.contains_value(value) for value in column.domain
             ]
         by_column[column_index] = (
-            np.asarray(stratum_indices, dtype=int),
+            np.asarray([stratum_index for stratum_index, _ in entries], dtype=int),
             lookup_matrix,
         )
     return RootStratumMembershipLookup(by_column=by_column)
@@ -691,6 +950,130 @@ def _expected_native_range_interval_counts(
     return equality, lower, upper
 
 
+TERM_OPERATOR_FAMILY = {
+    "equality": "equality",
+    "lower_tail": "lower",
+    "upper_tail": "upper",
+    "range": "range",
+}
+
+
+def table_subset_inclusion_probability(
+    required_tables: frozenset[str] | set[str],
+    *,
+    metadata: ModelMetadata,
+    root_table: str | None,
+) -> float:
+    """Probability that NeuroCard table dropout keeps every required table.
+
+    The upstream law, as recorded in the trainer diagnostics, is
+    ``num_dropped ~ Uniform{1..T-1}`` and ``P(drop table | num_dropped) =
+    num_dropped / T`` with the root always kept.  Treating the required tables
+    as conditionally independent given ``num_dropped`` gives the closed form
+    below.  It is an approximation of a without-replacement draw, so it is
+    only ever used to rank and threshold candidates, never as an exact mass.
+    """
+
+    tables = {table for table in required_tables if table is not None and table != root_table}
+    total = len({column.table for column in metadata.columns if column.table is not None})
+    if total <= 1 or not tables:
+        return 1.0
+    k = len(tables)
+    return float(
+        sum((1.0 - dropped / total) ** k for dropped in range(1, total))
+        / float(total - 1)
+    )
+
+
+def conditional_head_support(
+    stratum: RootDataStratum,
+    head_index: int,
+    *,
+    metadata: ModelMetadata,
+    n_total: int,
+    predicate_probabilities: Mapping[str, float],
+    root_table: str | None,
+) -> float:
+    """Expected contexts carrying the whole conjunction with ``head_index`` served.
+
+    This is the quantity the marginal bottleneck missed: a stratum only helps a
+    suffix head when every one of its terms is actually emitted as a predicate,
+    every table it touches survives table dropout along with the head's own
+    table, and the head sits strictly after the last term.
+    """
+
+    if head_index <= stratum.column_indices[-1]:
+        return 0.0
+    support = float(n_total) * float(stratum.probability)
+    for term in stratum.terms:
+        family = TERM_OPERATOR_FAMILY.get(term.region_type)
+        if family is None:
+            raise ValueError(f"unsupported region_type {term.region_type!r}")
+        support *= float(predicate_probabilities.get(family, 0.0))
+    required = set(stratum.tables(metadata))
+    head_table = metadata.columns[head_index].table
+    if head_table is not None:
+        required.add(head_table)
+    return support * table_subset_inclusion_probability(
+        frozenset(required), metadata=metadata, root_table=root_table
+    )
+
+
+def served_head_indices(stratum: RootDataStratum, metadata: ModelMetadata) -> tuple[int, ...]:
+    """DATA heads the stratum can condition, i.e. strictly after its last term."""
+
+    last = stratum.column_indices[-1]
+    return tuple(
+        index
+        for index, column in enumerate(metadata.columns)
+        if index > last and column.kind == ColumnKind.DATA
+    )
+
+
+def with_conditional_score(
+    stratum: RootDataStratum,
+    *,
+    metadata: ModelMetadata,
+    n_total: int,
+    predicate_probabilities: Mapping[str, float],
+    threshold: float,
+    root_table: str | None,
+) -> RootDataStratum:
+    """Score by total repairable deficit across the heads the stratum serves.
+
+    Summing the deficit over served heads is what makes allocation prefer a
+    stratum that repairs five suffix heads over one that repairs a single head,
+    and what makes a conjunction over late columns -- which serves almost no
+    heads -- rank low without a special case.
+    """
+
+    heads = served_head_indices(stratum, metadata)
+    supports = [
+        conditional_head_support(
+            stratum,
+            head,
+            metadata=metadata,
+            n_total=n_total,
+            predicate_probabilities=predicate_probabilities,
+            root_table=root_table,
+        )
+        for head in heads
+    ]
+    deficient = [value for value in supports if value < threshold]
+    bottleneck = min(supports) if supports else 0.0
+    deficit = float(sum(max(0.0, threshold - value) for value in deficient))
+    return RootDataStratum(
+        **{
+            **stratum.to_json_dict(),
+            "support_score": float(bottleneck),
+            "support_deficit": deficit,
+            "support_bottleneck": (
+                f"conditional_head_support:{len(deficient)}/{len(heads)}_heads"
+            ),
+        }
+    )
+
+
 def _with_score(stratum: RootDataStratum, threshold: float) -> RootDataStratum:
     support_candidates = [
         ("target_rows", stratum.expected_target_rows),
@@ -716,6 +1099,32 @@ def _with_score(stratum: RootDataStratum, threshold: float) -> RootDataStratum:
             "support_bottleneck": support_bottleneck,
         }
     )
+
+
+def _capped_allocation(alpha: np.ndarray, cap: float) -> np.ndarray:
+    """Limit any one stratum's share of the auxiliary batch.
+
+    A conjunction can have a far larger deficit than every depth-1 stratum and
+    would otherwise take almost the whole batch, which means resampling its few
+    rows every step.  Water-fill instead: clip, redistribute, repeat.  A cap at
+    or below ``1/n`` is unsatisfiable and is ignored.
+    """
+
+    if cap <= 0.0 or alpha.size == 0 or cap <= 1.0 / float(alpha.size):
+        return alpha
+    capped = alpha.astype(float).copy()
+    for _ in range(64):
+        excess = np.maximum(0.0, capped - cap)
+        if float(excess.sum()) <= 1.0e-12:
+            break
+        capped = np.minimum(capped, cap)
+        headroom = cap - capped
+        room = float(headroom.sum())
+        if room <= 1.0e-12:
+            break
+        capped = capped + headroom * (float(excess.sum()) / room)
+    total = float(capped.sum())
+    return capped / total if total > 0 else alpha
 
 
 def _ordered_numeric_values(values: tuple[Any, ...]) -> bool:

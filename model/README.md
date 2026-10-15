@@ -1104,6 +1104,85 @@ Important settings:
 Startup validation fails for incompatible settings, including factorization with
 direct input-output connections.
 
+## Conjunctive Rare-Support Strata
+
+A rare-support stratum is a region of the full outer join that the predicate
+generator almost never produces, so the auxiliary batch oversamples it. Until
+now a stratum was a single column region, which made the deficit objective a
+*marginal* one: a stratum could report a large expected support while the joint
+prefix that actually starves the model had almost none. Reported per-head
+auxiliary effective sample sizes in the tens of millions were therefore
+measuring the wrong quantity.
+
+A stratum is now a conjunction of per-column terms. `RootDataStratum.terms` is
+the full conjunction, ordered by column index, and the legacy scalar fields
+(`column_index`, `region_type`, `value`, `lower`, `upper`) describe its last
+term, so depth-1 strata and every existing consumer behave exactly as before.
+Scoring changed with it: `conditional_head_support` is the expected number of
+contexts in which *every* term is emitted as a predicate, every table the
+conjunction touches survives NeuroCard table dropout along with the scored
+head's own table, and the head sits strictly after the last term. A stratum's
+`support_score` is the minimum over the heads it can serve and its
+`support_deficit` is the summed shortfall against the threshold, so a
+conjunction that starves three suffix heads outranks a marginal that starves
+one.
+
+Candidates are found by beam search over the depth-1 seeds, with exact joint
+counts taken from the provider's materialized rows. Regions whose joint row
+count falls below `minimum_joint_rows` are pruned, because oversampling a
+region with a handful of rows means resampling those same rows every step.
+
+Configuration lives under `rare_support.discovery.conjunctive`:
+
+- `enabled`: turns conjunctive discovery on. Default `false`, which keeps the
+  previous depth-1 behaviour exactly.
+- `max_depth`: maximum number of terms per stratum; must be at least `2`.
+- `beam_width`: candidates carried forward per search level.
+- `seed_width`: depth-1 strata used to seed the search.
+- `minimum_joint_rows`: joint row floor below which a region is pruned.
+- `require_distinct_tables`: when true, each term must come from a table not
+  already used by the conjunction, which targets the cross-table prefixes that
+  single-column strata cannot express.
+- `max_stratum_share`: caps any one stratum's share of the auxiliary batch. The
+  surplus is water-filled toward the cap across the remaining strata rather
+  than renormalized away, so capping a dominant conjunction does not silently
+  reorder the strata underneath it. A cap at or below `1/n` is unsatisfiable
+  and is ignored.
+
+And under `rare_auxiliary`:
+
+- `term_subset_probability`: probability that an auxiliary context pins a
+  uniformly chosen non-empty proper subset of a conjunction's terms rather than
+  all of them, so the model also sees each prefix with one term left
+  unconstrained. Default `0.0`, which always forces the whole conjunction.
+
+### Capability gate
+
+Imposing a conjunction requires a source that can condition on several columns
+at once. `ExactRootStratumProvider` can do this only when it holds materialized
+encoded rows, which is the fixture and prepared-directory path. The live
+NeuroCard sampler imposes a stratum by filtering the root join-count table one
+column at a time (`model/src/data/full_join_sampler.py`), so it cannot sample a
+conjunction that spans non-root tables and reports
+`supports_conjunctive_strata = False`.
+
+When conjunctive discovery is requested on a source that cannot serve it,
+discovery falls back to depth-1 and records why in `conjunctive_status`, which
+is surfaced in the rare-support summary and printed once at startup. It is a
+loud fallback, not a silent one. In practice this means the JOB-light configs
+that run `sampling_mode: live` keep the previous depth-1 behaviour; a run that
+needs conjunctions has to use a fixture or prepared-directory source.
+
+### Diagnostics
+
+`prefix_head_coverage` in the rare-auxiliary diagnostics reports, per stratum,
+its depth, how many auxiliary contexts it produced, how many of those forced
+the complete conjunction, how many were dropped because a required table was
+absent from the sampled table subset, the histogram of how many terms were
+forced, and which heads the resulting contexts actually cover. This is the
+quantity to watch when a joint prefix is suspected of starving: a global
+auxiliary effective sample size says nothing about it.
+
 ## Factorization Status
 
 The baseline and unfactorized configs leave factorization disabled. The

@@ -1022,7 +1022,15 @@ class RareSupportSampleSource:
                 discovery.get("minimum_expected_context_support", 100.0)
             ),
             max_selected_strata=int(discovery.get("max_selected_strata", 64)),
+            conjunctive=dict(discovery.get("conjunctive", {})),
         )
+        self.conjunctive_status = dict(getattr(self.provider, "conjunctive_status", {}))
+        if self.conjunctive_status.get("requested") and not self.conjunctive_status.get("applied"):
+            print(
+                "[rare_support] conjunctive discovery requested but unavailable:",
+                self.conjunctive_status.get("reason"),
+                flush=True,
+            )
         self.discovery_seconds = time.perf_counter() - started
         if diagnostics_enabled:
             print(
@@ -1150,6 +1158,17 @@ class RareSupportSampleSource:
                 "memberships": memberships,
             },
         )
+
+    def conjunctive_summary(self) -> dict[str, Any]:
+        selected = [stratum for stratum in self.selected_strata if stratum.is_conjunctive]
+        return {
+            **self.conjunctive_status,
+            "selected_strata": len(self.selected_strata),
+            "selected_conjunctive_strata": len(selected),
+            "selected_depths": dict(
+                sorted(Counter(stratum.depth for stratum in self.selected_strata).items())
+            ),
+        }
 
     def rare_support_summary(
         self,

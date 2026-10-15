@@ -1516,6 +1516,9 @@ def _train_one_batch(
                 debug_allow_row_dependent_native_range_tail=bool(
                     rare_config.get("debug_allow_row_dependent_native_range_tail", False)
                 ),
+                term_subset_probability=float(
+                    rare_config.get("term_subset_probability", 0.0) or 0.0
+                ),
             )
         )
         rare_token_rows = [list(context.tokens) for context in rare_contexts]
@@ -1529,10 +1532,18 @@ def _train_one_batch(
             rare_generation_stats.source_row_indices,
             dtype=int,
         )
+        # Eligibility follows what the context actually pinned, not what the
+        # stratum nominally covers: a term-subset draw stops earlier, and a
+        # context whose forced tables were absent pinned nothing at all.
         rare_selected_column_indices = np.asarray(
-            rare_batch.importance_metadata["selected_stratum_column_index"],  # type: ignore[index]
+            [
+                max(context.forced_term_columns)
+                if context.forced_term_columns
+                else len(metadata.columns)  # type: ignore[arg-type]
+                for context in rare_contexts
+            ],
             dtype=int,
-        )[rare_source_indices]
+        )
         eligibility = auxiliary_eligibility_mask(
             metadata,
             rare_selected_column_indices,
@@ -2050,6 +2061,64 @@ def auxiliary_eligibility_mask(
     return column_indices[None, :] > selected[:, None]
 
 
+def prefix_head_coverage(
+    *,
+    metadata: object,
+    contexts: list[GeneratedTrainingContext],
+    strata_for_context: tuple[object, ...],
+) -> dict[str, Any]:
+    """Per-stratum, per-head context counts for the exact forced prefix.
+
+    The per-head auxiliary ESS answers "did this head get gradient from rare
+    rows at all", which stays large even when no context carried the prefix the
+    head actually needs.  This answers the narrower question: how many contexts
+    pinned this stratum's whole conjunction, left the head strictly downstream
+    of it, and kept the head's own table in the subset.  A zero here is
+    recorded rather than merely absent.
+    """
+
+    columns = metadata.columns  # type: ignore[attr-defined]
+    per_stratum: dict[str, dict[str, Any]] = {}
+    distinct_prefixes: set[tuple[int, ...]] = set()
+    for context, stratum in zip(contexts, strata_for_context):
+        forced = tuple(context.forced_term_columns)
+        entry = per_stratum.setdefault(
+            str(stratum.stratum_id),
+            {
+                "depth": int(len(getattr(stratum, "terms", ()) or (stratum,))),
+                "contexts": 0,
+                "full_conjunction_contexts": 0,
+                "forced_tables_absent_contexts": 0,
+                "terms_forced_histogram": {},
+                "head_coverage": {},
+            },
+        )
+        entry["contexts"] += 1
+        if not forced:
+            entry["forced_tables_absent_contexts"] += 1
+            continue
+        distinct_prefixes.add(forced)
+        histogram = entry["terms_forced_histogram"]
+        histogram[str(len(forced))] = int(histogram.get(str(len(forced)), 0)) + 1
+        expected = int(len(getattr(stratum, "terms", ()) or (stratum,)))
+        if len(forced) != expected:
+            continue
+        entry["full_conjunction_contexts"] += 1
+        last = max(forced)
+        for index in range(last + 1, len(columns)):
+            column = columns[index]
+            if column.kind != ColumnKind.DATA:
+                continue
+            if column.table is not None and column.table not in context.included_tables:
+                continue
+            coverage = entry["head_coverage"]
+            coverage[column.name] = int(coverage.get(column.name, 0)) + 1
+    return {
+        "distinct_forced_prefixes": int(len(distinct_prefixes)),
+        "per_stratum": per_stratum,
+    }
+
+
 def rare_auxiliary_diagnostics(
     *,
     metadata: object,
@@ -2068,7 +2137,8 @@ def rare_auxiliary_diagnostics(
     forced_operator_counts: dict[str, int] = {}
     per_stratum: dict[str, dict[str, Any]] = {}
     for context, stratum, row_eligible in zip(contexts, selected_for_context, eligibility):
-        token = context.tokens[int(stratum.column_index)]
+        forced_columns = context.forced_term_columns or (int(stratum.column_index),)
+        token = context.tokens[int(forced_columns[-1])]
         forced_operator_counts[token.op.value] = int(forced_operator_counts.get(token.op.value, 0)) + 1
         entry = per_stratum.setdefault(
             stratum.stratum_id,
@@ -2152,6 +2222,11 @@ def rare_auxiliary_diagnostics(
             generation_stats.included_indicator_contradictions
         ),
         "per_stratum": per_stratum,
+        "prefix_head_coverage": prefix_head_coverage(
+            metadata=metadata,
+            contexts=contexts,
+            strata_for_context=selected_for_context,
+        ),
         "auxiliary_inv_only_ess_by_fanout": auxiliary_inv_ess_by_fanout,
         "common_auxiliary_fanout_token_signatures": dict(
             sorted(fanout_signatures.items(), key=lambda item: (-item[1], item[0]))[:32]

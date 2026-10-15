@@ -388,6 +388,33 @@ def validate_config(config: dict[str, Any]) -> None:
         allocation = str(rare_support.get("allocation", {}).get("strategy", "support_deficit"))
         if allocation != "support_deficit":
             raise ValueError("rare_support.allocation.strategy must be support_deficit")
+        conjunctive = discovery.get("conjunctive", {})
+        if bool(conjunctive.get("enabled", False)):
+            if int(conjunctive.get("max_depth", 2)) < 2:
+                raise ValueError(
+                    "rare_support.discovery.conjunctive.max_depth must be at least 2 "
+                    "when conjunctive discovery is enabled"
+                )
+            for key, minimum in (("beam_width", 1), ("seed_width", 1)):
+                if int(conjunctive.get(key, 32)) < minimum:
+                    raise ValueError(
+                        f"rare_support.discovery.conjunctive.{key} must be >= {minimum}"
+                    )
+            if float(conjunctive.get("minimum_joint_rows", 32.0)) <= 0.0:
+                raise ValueError(
+                    "rare_support.discovery.conjunctive.minimum_joint_rows must be "
+                    "positive; a region with no rows cannot be conditionally sampled"
+                )
+            share = float(conjunctive.get("max_stratum_share", 0.0) or 0.0)
+            if share < 0.0 or share > 1.0:
+                raise ValueError(
+                    "rare_support.discovery.conjunctive.max_stratum_share must lie in [0, 1]"
+                )
+        subset_probability = float(
+            rare_auxiliary.get("term_subset_probability", 0.0) or 0.0
+        )
+        if subset_probability < 0.0 or subset_probability > 1.0:
+            raise ValueError("rare_auxiliary.term_subset_probability must lie in [0, 1]")
 
 
 def resolve_device(config: dict[str, Any]) -> str:

@@ -31,6 +31,11 @@ class GeneratedTrainingContext:
     ordinary_predicates: Mapping[str, PredicateToken]
     trajectory_query: Any | None = None
     encoded_two_slot_row: tuple[tuple[int, int, int, int], ...] | None = None
+    #: Column indices whose token was pinned by a rare stratum term.  Empty for
+    #: ordinary contexts.  The trainer derives the eligible suffix heads from
+    #: the last entry, which is not the stratum's last column when only a
+    #: subset of its terms was forced.
+    forced_term_columns: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -300,12 +305,20 @@ class PredicateTrainingContextGenerator:
         strata: tuple[Any, ...] | list[Any],
         rng: np.random.Generator,
         debug_allow_row_dependent_native_range_tail: bool = False,
+        term_subset_probability: float = 0.0,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
-        """Generate row-satisfied contexts with an exact stratum predicate forced.
+        """Generate row-satisfied contexts with exact stratum predicates forced.
 
         The table subset and all non-stratum ordinary predicates follow the
-        normal row-specific generator.  The stratum's DATA column is then forced
-        to the support-deficient event that caused the rare row to be sampled.
+        normal row-specific generator.  Every term of the stratum is then forced
+        to the support-deficient event that caused the rare row to be sampled,
+        and the tables those terms live on are added to the subset so a forced
+        token can never land on an excluded table.
+
+        ``term_subset_probability`` is the chance that a conjunctive stratum
+        forces a random non-empty proper subset of its terms instead of all of
+        them.  Without it every auxiliary context carries every term, so a query
+        that constrains only part of the conjunction is never represented.
         """
 
         encoded_rows = np.asarray(encoded_rows, dtype=int)
@@ -328,6 +341,7 @@ class PredicateTrainingContextGenerator:
                 debug_allow_row_dependent_native_range_tail=(
                     debug_allow_row_dependent_native_range_tail
                 ),
+                term_subset_probability=term_subset_probability,
             )
             contradictions += included_indicator_contradictions(context, row, metadata)
             if not context_satisfies_row(context, row, metadata):
@@ -358,13 +372,20 @@ class PredicateTrainingContextGenerator:
         compiled: _CompiledGenerationMetadata | None = None,
         *,
         debug_allow_row_dependent_native_range_tail: bool = False,
+        term_subset_probability: float = 0.0,
     ) -> GeneratedTrainingContext:
         compiled = compiled or self._compiled(metadata)
         included_tables = set(self._sample_included_tables(encoded_row, metadata, rng, compiled))
-        column = metadata.columns[int(stratum.column_index)]
-        if column.table is not None:
+        terms = _forced_terms_for_stratum(stratum, rng, term_subset_probability)
+        forced_columns = tuple(int(term.column_index) for term in terms)
+        forced_tables = {
+            metadata.columns[index].table
+            for index in forced_columns
+            if metadata.columns[index].table is not None
+        }
+        if forced_tables:
             present = self._present_tables_for_row(encoded_row, metadata, compiled)
-            if column.table not in present:
+            if not forced_tables <= present:
                 tokens = tuple([_WILDCARD_TOKEN] * len(metadata.columns))
                 return GeneratedTrainingContext(
                     tokens=tokens,
@@ -373,7 +394,7 @@ class PredicateTrainingContextGenerator:
                     ordinary_predicates={},
                     encoded_two_slot_row=_wildcard_two_slot_row(metadata),
                 )
-            included_tables.add(column.table)
+            included_tables |= forced_tables
             if self.table_subset_sampling == "neurocard_table_dropout_rooted":
                 graph = compiled.graph
                 included_tables = _root_connected_component(
@@ -381,7 +402,7 @@ class PredicateTrainingContextGenerator:
                     graph.root_table,
                     graph.edges,
                 )
-                included_tables.add(column.table)
+                included_tables |= forced_tables
         inverse_fanouts = self._inverse_fanouts_for_table_subset(compiled, included_tables)
         ordinary = self._ordinary_predicates(
             encoded_row,
@@ -390,14 +411,19 @@ class PredicateTrainingContextGenerator:
             frozenset(included_tables),
             compiled=compiled,
         )
-        ordinary[column.name] = forced_predicate_for_stratum(
-            stratum,
-            encoded_row=encoded_row,
-            metadata=metadata,
-            debug_allow_row_dependent_native_range_tail=(
-                debug_allow_row_dependent_native_range_tail
-            ),
-        )
+        for term in terms:
+            term_column = metadata.columns[int(term.column_index)]
+            # A depth-1 stratum is passed through whole so the native-range
+            # bottleneck handling keeps its exact previous behaviour.
+            source = stratum if len(terms) == 1 and not _is_conjunctive(stratum) else term
+            ordinary[term_column.name] = forced_predicate_for_stratum(
+                source,
+                encoded_row=encoded_row,
+                metadata=metadata,
+                debug_allow_row_dependent_native_range_tail=(
+                    debug_allow_row_dependent_native_range_tail
+                ),
+            )
         tokens, encoded_two_slot_row = self._tokens_and_two_slot_for_query_tables(
             metadata,
             compiled,
@@ -411,6 +437,7 @@ class PredicateTrainingContextGenerator:
             inverse_fanout_columns=frozenset(inverse_fanouts),
             ordinary_predicates=ordinary,
             encoded_two_slot_row=encoded_two_slot_row,
+            forced_term_columns=forced_columns,
         )
 
     def _generate_duet_row_specific(
@@ -1995,6 +2022,33 @@ def context_satisfies_row(
             return False
     present = present_tables_for_row(encoded_row, metadata)
     return set(context.included_tables).issubset(present)
+
+
+def _is_conjunctive(stratum: Any) -> bool:
+    return len(getattr(stratum, "terms", ())) > 1
+
+
+def _forced_terms_for_stratum(
+    stratum: Any,
+    rng: np.random.Generator,
+    term_subset_probability: float,
+) -> tuple[Any, ...]:
+    """Pick which of a stratum's terms this context pins.
+
+    Always every term for a depth-1 stratum.  For a conjunction, with
+    probability ``term_subset_probability`` a uniformly chosen non-empty proper
+    subset instead, so the model also sees the prefix with one term left
+    unconstrained rather than only ever in its complete form.
+    """
+
+    terms = tuple(getattr(stratum, "terms", ()) or (stratum,))
+    if len(terms) <= 1 or term_subset_probability <= 0.0:
+        return terms
+    if float(rng.random()) >= float(term_subset_probability):
+        return terms
+    size = int(rng.integers(1, len(terms)))
+    chosen = rng.choice(len(terms), size=size, replace=False)
+    return tuple(terms[int(index)] for index in sorted(int(value) for value in chosen))
 
 
 def forced_predicate_for_stratum(

@@ -290,22 +290,25 @@ class NeuroCardFullJoinSampleSource:
         cached = self._fixture_stratum_index_cache.get(stratum.stratum_id)
         if cached is not None:
             return cached
-        column_index = int(stratum.column_index)
-        column = self.metadata.columns[column_index]
-        encoded_values = np.asarray(rows[:, column_index], dtype=np.int64)
-        encoded_ids = _encoded_domain_ids_for_stratum(column, stratum)
-        if encoded_ids is None:
-            decoded_values = np.asarray(
-                [column.domain[int(value)] for value in encoded_values],
-                dtype=object,
-            )
-            mask = _vectorized_root_stratum_mask(decoded_values, stratum)
-        elif encoded_ids.size == 0:
-            candidates = np.empty(0, dtype=int)
-            self._fixture_stratum_index_cache[stratum.stratum_id] = candidates
-            return candidates
-        else:
-            mask = np.isin(encoded_values, encoded_ids, assume_unique=False)
+        # A stratum is a conjunction: every term has to hold on the same row.
+        mask = np.ones(rows.shape[0], dtype=bool)
+        for term in getattr(stratum, "terms", (stratum,)):
+            column_index = int(term.column_index)
+            column = self.metadata.columns[column_index]
+            encoded_values = np.asarray(rows[:, column_index], dtype=np.int64)
+            encoded_ids = _encoded_domain_ids_for_stratum(column, term)
+            if encoded_ids is None:
+                decoded_values = np.asarray(
+                    [column.domain[int(value)] for value in encoded_values],
+                    dtype=object,
+                )
+                mask &= _vectorized_root_stratum_mask(decoded_values, term)
+            elif encoded_ids.size == 0:
+                candidates = np.empty(0, dtype=int)
+                self._fixture_stratum_index_cache[stratum.stratum_id] = candidates
+                return candidates
+            else:
+                mask &= np.isin(encoded_values, encoded_ids, assume_unique=False)
         candidates = np.flatnonzero(mask)
         self._fixture_stratum_index_cache[stratum.stratum_id] = candidates
         return candidates
@@ -646,7 +649,27 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         for stratum in strata:
             self._root_stratum_candidates(stratum)
 
+    @property
+    def supports_conjunctive_strata(self) -> bool:
+        """Live sampling imposes a stratum by filtering the root JCT.
+
+        That mechanism can only express conditions on root columns of a single
+        column at a time, so a conjunction would be silently reduced to one of
+        its terms.  Refuse instead.
+        """
+
+        return False
+
     def _root_stratum_candidates(self, stratum: Any) -> tuple[np.ndarray, np.ndarray]:
+        # Argument validation first: a conjunctive stratum is unusable here
+        # whatever state the sampler is in, and saying so is more useful than
+        # an initialization error.
+        if len(getattr(stratum, "terms", ())) > 1:
+            raise ValueError(
+                f"stratum {stratum.stratum_id!r} is conjunctive; live conditional "
+                "sampling filters the root JCT one column at a time and cannot "
+                "impose a conjunction. Use a materialized-row sample source."
+            )
         if self._sampler is None:
             raise RuntimeError("live NeuroCard sampler was not initialized")
         cached = self._root_stratum_candidate_cache.get(stratum.stratum_id)
