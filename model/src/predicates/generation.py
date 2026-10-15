@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from model.src.data.schema import ColumnKind, ModelMetadata
+from model.src.data.schema import ColumnKind, ModelMetadata, root_paths_closure
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.vocabulary import TWO_SLOT_EMPTY_OPERATOR_ID, TWO_SLOT_OP_TO_ID
 
@@ -390,7 +390,7 @@ class PredicateTrainingContextGenerator:
             # has to actually carry every one of those: a path table that is
             # outer-missing for this row cannot be in the query subset.
             required = (
-                _root_paths_closure(set(forced_tables), graph.root_table, graph.edges)
+                root_paths_closure(set(forced_tables), graph.root_table, graph.edges)
                 if rooted
                 else set(forced_tables)
             )
@@ -2054,7 +2054,19 @@ def forced_predicate_for_stratum(
     column_index = int(stratum.column_index)
     column = metadata.columns[column_index]
     row_value = column.domain[int(encoded_row[column_index])]
-    if getattr(stratum, "support_bottleneck", None) == "native_range":
+    # The realization route lives on the term, because a conjunction is forced
+    # term by term and one scoring string on the stratum cannot describe more
+    # than one of them.  ``support_bottleneck`` remains the fallback for a
+    # stratum that never went through realization filling.
+    family = getattr(stratum, "realization_family", None)
+    if family is None and getattr(stratum, "terms", None):
+        family = getattr(stratum.terms[-1], "realization_family", None)
+    native_range = (
+        family == "range"
+        if family is not None
+        else getattr(stratum, "support_bottleneck", None) == "native_range"
+    )
+    if native_range:
         if stratum.region_type == "equality":
             return PredicateToken.range(stratum.value, stratum.value)
         if stratum.region_type == "lower_tail":
@@ -2325,56 +2337,6 @@ def forced_prefix_is_complete(context: GeneratedTrainingContext, stratum: Any) -
 
     forced = tuple(int(index) for index in (context.forced_term_columns or ()))
     return bool(forced) and forced == stratum_column_indices(stratum)
-
-
-def _root_paths_closure(
-    required: set[str],
-    root_table: str,
-    edges: tuple[tuple[str, str], ...],
-) -> set[str]:
-    """Every table on a root-to-``required`` path, over the *full* join graph.
-
-    Forcing a stratum term pulls that term's table into the subset, but a
-    rooted query subset has to stay connected to the root.  In a chain
-    ``root -> parent -> child``, forcing the child while the sampled subset
-    dropped the parent would otherwise leave ``{root, child}``, which is not a
-    rooted query and produces meaningless indicator and fanout tokens.  So the
-    intermediate tables come along.
-
-    Raises when a required table has no path to the root at all, which is a
-    schema error rather than a sampling outcome.
-    """
-
-    closure = set(required) | {root_table}
-    if not edges:
-        if closure - {root_table}:
-            raise ValueError(
-                f"tables {sorted(closure - {root_table})!r} cannot reach root "
-                f"{root_table!r}: the join graph has no edges"
-            )
-        return closure
-    adjacency: dict[str, set[str]] = {}
-    for left, right in edges:
-        adjacency.setdefault(left, set()).add(right)
-        adjacency.setdefault(right, set()).add(left)
-    parent: dict[str, str | None] = {root_table: None}
-    queue = [root_table]
-    while queue:
-        table = queue.pop(0)
-        for neighbor in sorted(adjacency.get(table, ())):
-            if neighbor not in parent:
-                parent[neighbor] = table
-                queue.append(neighbor)
-    for table in sorted(required):
-        if table not in parent:
-            raise ValueError(
-                f"table {table!r} is not reachable from join root {root_table!r}"
-            )
-        walk = table
-        while walk is not None:
-            closure.add(walk)
-            walk = parent[walk]
-    return closure
 
 
 def _root_connected_component(

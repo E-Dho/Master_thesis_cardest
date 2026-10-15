@@ -380,3 +380,53 @@ class ForeignKey:
     left_column: str
     right_table: str
     right_column: str
+
+
+def root_paths_closure(
+    required: set[str],
+    root_table: str,
+    edges: tuple[tuple[str, str], ...],
+) -> set[str]:
+    """Every table on a root-to-``required`` path, over the *full* join graph.
+
+    Forcing a stratum term pulls that term's table into the subset, but a
+    rooted query subset has to stay connected to the root.  In a chain
+    ``root -> parent -> child``, forcing the child while the sampled subset
+    dropped the parent would otherwise leave ``{root, child}``, which is not a
+    rooted query and produces meaningless indicator and fanout tokens.  So the
+    intermediate tables come along.
+
+    Raises when a required table has no path to the root at all, which is a
+    schema error rather than a sampling outcome.
+    """
+
+    closure = set(required) | {root_table}
+    if not edges:
+        if closure - {root_table}:
+            raise ValueError(
+                f"tables {sorted(closure - {root_table})!r} cannot reach root "
+                f"{root_table!r}: the join graph has no edges"
+            )
+        return closure
+    adjacency: dict[str, set[str]] = {}
+    for left, right in edges:
+        adjacency.setdefault(left, set()).add(right)
+        adjacency.setdefault(right, set()).add(left)
+    parent: dict[str, str | None] = {root_table: None}
+    queue = [root_table]
+    while queue:
+        table = queue.pop(0)
+        for neighbor in sorted(adjacency.get(table, ())):
+            if neighbor not in parent:
+                parent[neighbor] = table
+                queue.append(neighbor)
+    for table in sorted(required):
+        if table not in parent:
+            raise ValueError(
+                f"table {table!r} is not reachable from join root {root_table!r}"
+            )
+        walk = table
+        while walk is not None:
+            closure.add(walk)
+            walk = parent[walk]
+    return closure

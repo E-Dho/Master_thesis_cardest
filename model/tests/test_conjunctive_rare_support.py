@@ -16,7 +16,10 @@ from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
     ExactRootStratumProvider,
     _expected_lower_threshold_counts,
+    _expected_native_range_interval_counts,
+    _expected_upper_threshold_counts,
     auxiliary_eligibility_mask,
+    per_value_realization_factors,
     RootColumnMass,
     RootDataStratum,
     StratumTerm,
@@ -24,16 +27,19 @@ from model.src.data.strata import (
     build_membership_lookup,
     conditional_head_support,
     membership_matrix,
+    TERM_OPERATOR_FAMILY,
     served_head_indices,
     table_subset_inclusion_probability,
     with_realization_probabilities,
     with_conditional_score,
 )
 from model.src.data.full_join_sampler import LiveNeuroCardFullJoinSampleSource
+from model.src.data.schema import root_paths_closure
+from model.src.predicates.operators import PredicateOp
 from model.src.predicates.generation import (
     GeneratedTrainingContext,
     PredicateTrainingContextGenerator,
-    _root_paths_closure,
+    forced_predicate_for_stratum,
     forced_prefix_is_complete,
 )
 
@@ -101,8 +107,30 @@ def term(column_index: int, name: str, value) -> StratumTerm:
     )
 
 
-def stratum(*terms: StratumTerm, probability: float = 0.1) -> RootDataStratum:
+def stratum(
+    *terms: StratumTerm,
+    probability: float = 0.1,
+    realized_support_mass: float | None = None,
+) -> RootDataStratum:
+    """Build a stratum, defaulting the joint mass to the independent product.
+
+    Real conjunctions get their mass from the provider, which averages the
+    product of per-row factors over the joint rows.  A hand-built fixture has
+    no rows, so tests that are not about correlation state the independent
+    product explicitly instead of having it assumed for them.
+    """
+
+    if realized_support_mass is None and len(terms) > 1:
+        factors = 1.0
+        for item in terms:
+            factors *= (
+                item.realization_probability
+                if item.realization_probability is not None
+                else PROBABILITIES[TERM_OPERATOR_FAMILY[item.region_type]]
+            )
+        realized_support_mass = probability * factors
     return RootDataStratum(
+        realized_support_mass=realized_support_mass,
         stratum_id="&".join(item.column_name for item in terms),
         column_index=terms[0].column_index,
         column_name=terms[0].column_name,
@@ -617,6 +645,7 @@ class RealizationProbabilityTest(unittest.TestCase):
             terms=(tail.terms[0], term(2, "T.phonetic", 1)),
             probability=0.25,
             expected_target_rows=1000.0,
+            realized_support_mass=0.25 * 0.05 * PROBABILITIES["equality"],
         )
         # Head 3 is on the child table, so the table-subset factor applies too.
         table_factor = table_subset_inclusion_probability(
@@ -654,19 +683,19 @@ class RootPathClosureTest(unittest.TestCase):
 
     def test_forcing_a_grandchild_pulls_in_its_parent(self):
         self.assertEqual(
-            _root_paths_closure({"C"}, "R", self.EDGES), {"R", "P", "C"}
+            root_paths_closure({"C"}, "R", self.EDGES), {"R", "P", "C"}
         )
 
     def test_the_root_alone_needs_nothing_added(self):
-        self.assertEqual(_root_paths_closure({"R"}, "R", self.EDGES), {"R"})
+        self.assertEqual(root_paths_closure({"R"}, "R", self.EDGES), {"R"})
 
     def test_an_unreachable_table_is_an_error_not_a_silent_drop(self):
         with self.assertRaisesRegex(ValueError, "not reachable"):
-            _root_paths_closure({"Z"}, "R", self.EDGES + (("Z", "Y"),))
+            root_paths_closure({"Z"}, "R", self.EDGES + (("Z", "Y"),))
 
     def test_an_edgeless_graph_refuses_a_non_root_table(self):
         with self.assertRaisesRegex(ValueError, "no edges"):
-            _root_paths_closure({"P"}, "R", ())
+            root_paths_closure({"P"}, "R", ())
 
 
 class ForcedSubsetConnectivityTest(unittest.TestCase):
@@ -768,6 +797,334 @@ class ExactSupportEventTest(unittest.TestCase):
     def test_a_depth_one_stratum_still_counts(self):
         self.assertTrue(
             forced_prefix_is_complete(self.context((0,)), stratum(term(0, "T.year", 1952)))
+        )
+
+
+class RealizationRouteTest(unittest.TestCase):
+    """The rarest route decides both the score and the forced predicate."""
+
+    def equality_stratum(self, *, equality, native_range):
+        return RootDataStratum(
+            stratum_id="T.year:eq:1952",
+            column_index=0,
+            column_name="T.year",
+            region_type="equality",
+            value=1952,
+            probability=0.25,
+            expected_target_rows=250.0,
+            expected_equality_count=equality,
+            expected_range_support=native_range,
+        )
+
+    def test_a_native_range_bottleneck_is_recorded_on_the_term(self):
+        filled = with_realization_probabilities(
+            self.equality_stratum(equality=50.0, native_range=1.0), PROBABILITIES
+        )
+        self.assertEqual(filled.terms[0].realization_family, "range")
+        self.assertAlmostEqual(filled.terms[0].realization_probability, 1.0 / 250.0)
+
+    def test_the_equality_route_wins_when_it_is_the_rarer_one(self):
+        filled = with_realization_probabilities(
+            self.equality_stratum(equality=1.0, native_range=50.0), PROBABILITIES
+        )
+        self.assertEqual(filled.terms[0].realization_family, "equality")
+
+    def test_a_native_range_bottleneck_is_forced_as_a_range_not_an_equality(self):
+        # This is the regression: scoring used to overwrite support_bottleneck,
+        # so the generator emitted "= v" for a stratum found rare as "[v, v]"
+        # and trained a different event from the one discovery selected.
+        meta = ModelMetadata(
+            columns=(
+                ColumnMetadata("T.year", ColumnKind.DATA, (1950, 1951, 1952), table="T"),
+            ),
+            full_join_cardinality=3.0,
+            join_root="T",
+            join_tables=("T",),
+            join_edges=(),
+        )
+        filled = with_realization_probabilities(
+            self.equality_stratum(equality=50.0, native_range=1.0), PROBABILITIES
+        )
+        row = np.array([2], dtype=np.int64)
+        for source in (filled, filled.terms[-1]):
+            token = forced_predicate_for_stratum(
+                source, encoded_row=row, metadata=meta
+            )
+            self.assertEqual(token.op, PredicateOp.RANGE, source)
+            self.assertEqual((token.value, token.upper), (1952, 1952))
+
+    def test_the_route_survives_conditional_rescoring(self):
+        # with_conditional_score rewrites support_bottleneck, which is exactly
+        # why the route cannot live there.
+        scored = with_conditional_score(
+            self.equality_stratum(equality=50.0, native_range=1.0),
+            metadata=metadata(),
+            n_total=1000,
+            predicate_probabilities=PROBABILITIES,
+            threshold=100.0,
+            root_table="T",
+        )
+        self.assertNotEqual(scored.support_bottleneck, "native_range")
+        self.assertEqual(scored.terms[-1].realization_family, "range")
+
+
+class PerRowFactorTest(unittest.TestCase):
+    """Per-row factors must reproduce the depth-1 expectation vectors."""
+
+    VALUES = (10.0, 20.0, 30.0, 40.0)
+    COUNTS = np.array([4.0, 3.0, 2.0, 1.0])
+
+    def probabilities(self):
+        return self.COUNTS / self.COUNTS.sum()
+
+    def factors(self, region_type, boundary, family):
+        kwargs = {"value": boundary} if region_type == "equality" else (
+            {"lower": boundary} if region_type == "lower_tail" else {"upper": boundary}
+        )
+        return per_value_realization_factors(
+            StratumTerm(
+                column_index=0,
+                column_name="c",
+                region_type=region_type,
+                realization_family=family,
+                **kwargs,
+            ),
+            values=self.VALUES,
+            predicate_probabilities=PROBABILITIES,
+        )
+
+    def test_every_route_matches_its_discovery_vector(self):
+        probabilities = self.probabilities()
+        lower = _expected_lower_threshold_counts(probabilities, n_total=1, p_lower=0.2)
+        upper = _expected_upper_threshold_counts(probabilities, n_total=1, p_upper=0.2)
+        range_eq, range_lower, range_upper = _expected_native_range_interval_counts(
+            probabilities, n_total=1, p_range=0.2
+        )
+        cases = [
+            ("lower_tail", "lower", lower),
+            ("upper_tail", "upper", upper),
+            ("equality", "range", range_eq),
+            ("lower_tail", "range", range_lower),
+            ("upper_tail", "range", range_upper),
+        ]
+        for region_type, family, expected in cases:
+            for rank, boundary in enumerate(self.VALUES):
+                factors = self.factors(region_type, boundary, family)
+                self.assertAlmostEqual(
+                    float(factors @ probabilities),
+                    float(expected[rank]),
+                    places=12,
+                    msg=f"{region_type}/{family} at rank {rank}",
+                )
+
+    def test_a_boundary_outside_the_domain_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, "outside the column domain"):
+            self.factors("lower_tail", 99.0, "lower")
+
+    def test_the_factor_is_zero_outside_the_region(self):
+        factors = self.factors("lower_tail", 30.0, "lower")
+        self.assertEqual(list(factors[:2]), [0.0, 0.0])
+        self.assertTrue(all(value > 0.0 for value in factors[2:]))
+
+
+class JointRealizationMassTest(unittest.TestCase):
+    """Correlated terms must be averaged jointly, not multiplied marginally."""
+
+    def provider_and_terms(self):
+        # 40 rows.  year id 2 covers rows 0..9; keyword id 1 covers rows 0..3.
+        # The two overlap on 4 rows, far from independent.
+        source = provider()
+        filled = [
+            with_realization_probabilities(seed, PROBABILITIES).terms[0]
+            for seed in (
+                RootDataStratum(
+                    stratum_id="T.year:eq:2",
+                    column_index=0,
+                    column_name="T.year",
+                    region_type="equality",
+                    value=1952,
+                    probability=10.0 / 40.0,
+                    expected_target_rows=10.0,
+                    expected_equality_count=10.0 * PROBABILITIES["equality"],
+                ),
+                RootDataStratum(
+                    stratum_id="K.keyword:eq:1",
+                    column_index=1,
+                    column_name="K.keyword",
+                    region_type="equality",
+                    value=1,
+                    probability=4.0 / 40.0,
+                    expected_target_rows=4.0,
+                    expected_equality_count=4.0 * PROBABILITIES["equality"],
+                ),
+            )
+        ]
+        return source, tuple(filled)
+
+    def test_the_joint_mass_is_the_exact_overlap_not_the_product(self):
+        source, terms = self.provider_and_terms()
+        joint = source.realized_support_mass(terms, PROBABILITIES)
+        # 4 of 40 rows satisfy both, each realizing at p_equality squared.
+        self.assertAlmostEqual(
+            joint, (4.0 / 40.0) * PROBABILITIES["equality"] ** 2, places=12
+        )
+        independent = (10.0 / 40.0) * (4.0 / 40.0) * PROBABILITIES["equality"] ** 2
+        self.assertGreater(joint, independent)
+        self.assertAlmostEqual(joint / independent, 4.0, places=9)
+
+    def test_a_depth_one_mass_matches_the_discovery_statistic(self):
+        source, terms = self.provider_and_terms()
+        self.assertAlmostEqual(
+            source.realized_support_mass(terms[:1], PROBABILITIES),
+            (10.0 / 40.0) * PROBABILITIES["equality"],
+            places=12,
+        )
+
+    def test_disjoint_terms_give_zero_rather_than_a_positive_product(self):
+        source, terms = self.provider_and_terms()
+        disjoint = StratumTerm(
+            column_index=0,
+            column_name="T.year",
+            region_type="equality",
+            value=1950,
+            realization_probability=PROBABILITIES["equality"],
+            realization_family="equality",
+        )
+        # year 1950 and year 1952 cannot both hold, and the terms are on the
+        # same column, so the marginal product would be positive nonsense.
+        self.assertEqual(
+            source.realized_support_mass((terms[0], disjoint), PROBABILITIES), 0.0
+        )
+
+    def test_a_conjunction_scored_without_the_joint_mass_is_refused(self):
+        conjunction = RootDataStratum(
+            stratum_id="a&b",
+            column_index=0,
+            column_name="T.year",
+            region_type="equality",
+            terms=(term(0, "T.year", 1952), term(1, "K.keyword", 1)),
+            probability=0.1,
+        )
+        with self.assertRaisesRegex(ValueError, "realized support mass"):
+            conditional_head_support(
+                conjunction,
+                2,
+                metadata=metadata(),
+                n_total=1000,
+                predicate_probabilities=PROBABILITIES,
+                root_table="T",
+            )
+
+    def test_the_beam_search_attaches_the_exact_mass(self):
+        seeds = (
+            stratum(term(0, "T.year", 1952), probability=0.25),
+            stratum(term(1, "K.keyword", 1), probability=0.1),
+        )
+        found = provider().extend_with_conjunctions(
+            seeds,
+            n_total=1000,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1000.0,
+            max_depth=2,
+            beam_width=8,
+            minimum_joint_rows=1.0,
+            require_distinct_tables=True,
+        )
+        self.assertTrue(found)
+        for candidate in found:
+            self.assertIsNotNone(candidate.realized_support_mass)
+            # Exactly the overlap, not the product of the two marginals.
+            self.assertAlmostEqual(
+                candidate.realized_support_mass,
+                (4.0 / 40.0) * PROBABILITIES["equality"] ** 2,
+                places=12,
+            )
+
+    def test_the_search_result_scores_from_the_joint_mass(self):
+        seeds = (
+            stratum(term(0, "T.year", 1952), probability=0.25),
+            stratum(term(1, "K.keyword", 1), probability=0.1),
+        )
+        found = provider().extend_with_conjunctions(
+            seeds,
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e12,
+            max_depth=2,
+            beam_width=8,
+            minimum_joint_rows=1.0,
+            require_distinct_tables=True,
+        )
+        meta = metadata()
+        for candidate in found:
+            head = served_head_indices(candidate, meta)[0]
+            expected = (
+                1_000_000
+                * candidate.realized_support_mass
+                * table_subset_inclusion_probability(
+                    candidate.tables(meta) | {meta.columns[head].table},
+                    metadata=meta,
+                    root_table="T",
+                )
+            )
+            self.assertAlmostEqual(
+                conditional_head_support(
+                    candidate,
+                    head,
+                    metadata=meta,
+                    n_total=1_000_000,
+                    predicate_probabilities=PROBABILITIES,
+                    root_table="T",
+                ),
+                expected,
+                places=6,
+            )
+
+
+class MultiHopTableSurvivalTest(unittest.TestCase):
+    """Keeping a grandchild also means keeping its parent."""
+
+    def meta(self):
+        return chain_metadata()
+
+    def test_a_grandchild_pays_for_its_ancestor_too(self):
+        factor = table_subset_inclusion_probability(
+            frozenset({"C"}), metadata=self.meta(), root_table="R"
+        )
+        # Three tables, num_dropped ~ U{1,2}, P(drop|d) = d/3 per non-root
+        # table, and both P and C must survive: ((2/3)^2 + (1/3)^2) / 2.
+        self.assertAlmostEqual(factor, 5.0 / 18.0, places=12)
+
+    def test_a_direct_child_is_unchanged(self):
+        self.assertAlmostEqual(
+            table_subset_inclusion_probability(
+                frozenset({"P"}), metadata=self.meta(), root_table="R"
+            ),
+            0.5,
+            places=12,
+        )
+
+    def test_the_grandchild_is_strictly_rarer_than_the_child(self):
+        meta = self.meta()
+        self.assertLess(
+            table_subset_inclusion_probability(
+                frozenset({"C"}), metadata=meta, root_table="R"
+            ),
+            table_subset_inclusion_probability(
+                frozenset({"P"}), metadata=meta, root_table="R"
+            ),
+        )
+
+    def test_requiring_both_hops_matches_requiring_the_grandchild(self):
+        meta = self.meta()
+        self.assertAlmostEqual(
+            table_subset_inclusion_probability(
+                frozenset({"P", "C"}), metadata=meta, root_table="R"
+            ),
+            table_subset_inclusion_probability(
+                frozenset({"C"}), metadata=meta, root_table="R"
+            ),
+            places=12,
         )
 
 

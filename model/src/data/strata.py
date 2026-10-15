@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 from model.src.data.full_join_sampler import OUTER_MISSING
-from model.src.data.schema import ColumnKind, ModelMetadata
+from model.src.data.schema import ColumnKind, ModelMetadata, root_paths_closure
 from model.src.predicates.operators import PredicateOp
 
 
@@ -20,8 +20,16 @@ SQL_NULL = "__SQL_NULL__"
 class StratumTerm:
     """One column region inside a (possibly conjunctive) stratum.
 
+    ``realization_family`` is the operator route the region is rarest through,
+    which is the route the auxiliary context must actually force: an equality
+    region whose native-range support is lower than its equality support has to
+    be forced as ``range(v, v)``, not as ``= v``, or training reinforces a
+    different event from the one discovery found to be rare.  It travels on the
+    term because a conjunction is forced term by term and a scoring string on
+    the stratum cannot describe more than one of them.
+
     ``realization_probability`` is the probability that a row already inside
-    this region emits exactly this predicate.  For an equality term that is
+    this region emits exactly this predicate, through that route.  For an equality term that is
     just ``p_equality``, because the row determines the literal.  For a tail or
     a native range the generator must also pick this exact threshold or
     interval out of all the ones the row admits, and on a high-cardinality
@@ -38,6 +46,7 @@ class StratumTerm:
     lower: Any | None = None
     upper: Any | None = None
     realization_probability: float | None = None
+    realization_family: str | None = None
 
     def contains_value(self, value: Any) -> bool:
         if _is_structural_value(value):
@@ -84,6 +93,7 @@ class RootDataStratum:
     expected_lower_count: float | None = None
     expected_upper_count: float | None = None
     expected_range_support: float | None = None
+    realized_support_mass: float | None = None
     support_score: float = 0.0
     support_deficit: float = 0.0
     support_bottleneck: str | None = None
@@ -425,6 +435,50 @@ class ExactRootStratumProvider:
             return float(mask.sum())
         return float(weights[mask].sum())
 
+    def realized_support_mass(
+        self,
+        terms: "tuple[StratumTerm, ...]",
+        predicate_probabilities: Mapping[str, float],
+    ) -> float:
+        """Exact ``E[1[row in S] * prod_i p_i(predicate_i | row)]`` over FOJ rows.
+
+        Multiplying each term's *marginal* average realization probability
+        assumes the terms are independent, which they are not: for a tail or a
+        range the factor depends on the row's rank, and the other terms change
+        the rank distribution inside the conjunction.  Since the provider holds
+        the materialized rows and their weights, the product is averaged over
+        the joint rows instead, which is exact rather than an approximation.
+        """
+
+        if self.encoded_rows is None:
+            raise ValueError(
+                "realized support mass needs materialized rows; this provider has none"
+            )
+        rows = self.encoded_rows
+        weights = (
+            self.row_weights
+            if self.row_weights is not None
+            else np.ones(rows.shape[0], dtype=float)
+        )
+        total = float(weights.sum())
+        if total <= 0.0:
+            return 0.0
+        accumulated = weights.astype(float).copy()
+        for term in terms:
+            mass = self.column_masses.get(int(term.column_index))
+            values = (
+                mass.values
+                if mass is not None
+                else self.metadata.columns[int(term.column_index)].domain
+            )
+            factors = per_value_realization_factors(
+                term, values=values, predicate_probabilities=predicate_probabilities
+            )
+            accumulated = accumulated * factors[rows[:, int(term.column_index)]]
+            if not np.any(accumulated):
+                return 0.0
+        return float(accumulated.sum()) / total
+
     def extend_with_conjunctions(
         self,
         seeds: "tuple[RootDataStratum, ...]",
@@ -456,7 +510,10 @@ class ExactRootStratumProvider:
         if total <= 0.0:
             return ()
         root = self.metadata.join_root
-        pool = [stratum.terms[0] for stratum in seeds]
+        seeds = tuple(
+            with_realization_probabilities(seed, predicate_probabilities) for seed in seeds
+        )
+        pool = [seed.terms[0] for seed in seeds]
         beam = list(seeds)
         produced: dict[str, RootDataStratum] = {}
         for _ in range(max_depth - 1):
@@ -489,6 +546,9 @@ class ExactRootStratumProvider:
                         foj_count=count,
                         probability=count / total,
                         expected_target_rows=n_total * (count / total),
+                        realized_support_mass=self.realized_support_mass(
+                            terms, predicate_probabilities
+                        ),
                         source=self.source,
                         semantic_type="conjunctive",
                     )
@@ -986,7 +1046,15 @@ def table_subset_inclusion_probability(
     only ever used to rank and threshold candidates, never as an exact mass.
     """
 
-    tables = {table for table in required_tables if table is not None and table != root_table}
+    # Keeping a table also means keeping every table between it and the root:
+    # the sampler runs the subset through the root-connected component, so a
+    # grandchild whose parent was dropped does not survive either.  Counting
+    # only the explicitly required tables overestimates survival on any join
+    # deeper than one hop.
+    required = {table for table in required_tables if table is not None}
+    if root_table is not None and required:
+        required = root_paths_closure(required, root_table, tuple(metadata.join_edges))
+    tables = {table for table in required if table != root_table}
     total = len({column.table for column in metadata.columns if column.table is not None})
     if total <= 1 or not tables:
         return 1.0
@@ -1005,36 +1073,130 @@ EXPECTED_SUPPORT_FIELD = {
 }
 
 
+def per_value_realization_factors(
+    term: StratumTerm,
+    *,
+    values: tuple[Any, ...],
+    predicate_probabilities: Mapping[str, float],
+) -> np.ndarray:
+    """Per-encoded-id probability that a row with that value emits this term.
+
+    These are the per-row factors whose mass-weighted mean is exactly the
+    ``_expected_*`` vectors used during depth-1 discovery, written out per row
+    so that a conjunction can average their *product* over the joint rows
+    instead of multiplying marginal averages.  The predicate generator draws a
+    lower bound uniformly among the ranks at or below the row's value and an
+    upper bound uniformly among the ranks at or above it, which is where the
+    ``1 / rank`` and ``1 / (size - rank + 1)`` factors come from.
+    """
+
+    family = term.realization_family or TERM_OPERATOR_FAMILY.get(term.region_type)
+    if family is None:
+        raise ValueError(f"unsupported region_type {term.region_type!r}")
+    factors = np.zeros(len(values), dtype=float)
+    if family == "equality" or term.region_type == "equality":
+        matching = [index for index, value in enumerate(values) if term.contains_value(value)]
+    else:
+        matching = None
+    if family == "equality":
+        probability = float(predicate_probabilities.get("equality", 0.0))
+        for index in matching or ():
+            factors[index] = probability
+        return factors
+
+    comparable = sorted(
+        (
+            (float(value), index)
+            for index, value in enumerate(values)
+            if _is_plain_number(value) and not _is_structural_value(value)
+        ),
+    )
+    size = len(comparable)
+    if size == 0:
+        return factors
+    rank_of_index = {index: rank for rank, (_, index) in enumerate(comparable, start=1)}
+    boundary = term.value if term.value is not None else (
+        term.lower if term.lower is not None else term.upper
+    )
+    boundary_rank = None
+    for rank, (value, index) in enumerate(comparable, start=1):
+        if _is_plain_number(boundary) and value == float(boundary):
+            boundary_rank = rank
+            break
+    if boundary_rank is None:
+        raise ValueError(
+            f"term on {term.column_name!r} has boundary {boundary!r} outside the column domain"
+        )
+
+    p_lower = float(predicate_probabilities.get("lower", 0.0))
+    p_upper = float(predicate_probabilities.get("upper", 0.0))
+    p_range = float(predicate_probabilities.get("range", 0.0))
+    for index, rank in rank_of_index.items():
+        if not term.contains_value(values[index]):
+            continue
+        if family == "lower":
+            factors[index] = p_lower / float(rank)
+        elif family == "upper":
+            factors[index] = p_upper / float(size - rank + 1)
+        elif family == "range":
+            if term.region_type == "equality":
+                factors[index] = p_range / float(rank * (size - rank + 1))
+            elif term.region_type == "lower_tail":
+                factors[index] = p_range * (1.0 - (boundary_rank - 1.0) / float(rank))
+            elif term.region_type == "upper_tail":
+                factors[index] = p_range * (
+                    float(boundary_rank - rank + 1) / float(size - rank + 1)
+                )
+            else:
+                factors[index] = p_range
+        else:
+            raise ValueError(f"unsupported realization family {family!r}")
+    return factors
+
+
 def with_realization_probabilities(
     stratum: RootDataStratum,
     predicate_probabilities: Mapping[str, float],
 ) -> RootDataStratum:
-    """Fill each term's realization probability from depth-1 statistics.
+    """Fill each term's rarest realization route and its probability.
 
-    A depth-1 candidate already carries ``expected_<family>_count``, which is
-    the expected number of contexts that generate *this exact* predicate and so
-    already includes the threshold or interval selection.  Dividing it by
-    ``expected_target_rows`` turns it back into a per-row probability, which is
-    the factor ``conditional_head_support`` needs.  For equality the ratio
-    reduces to ``p_equality`` exactly, which is why equality terms can also be
+    A depth-1 candidate carries ``expected_<family>_count`` for every operator
+    route that can produce its region: the expected number of contexts that
+    generate exactly this predicate through that route, threshold or interval
+    selection already included.  The route with the smallest expected count is
+    the bottleneck -- the same choice ``_with_score`` makes -- and it is the one
+    that has to be recorded, because it decides both the support estimate and
+    which predicate the auxiliary context forces.  Dividing by
+    ``expected_target_rows`` turns the count back into a per-row probability.
+
+    For an equality region realized through the equality route the ratio
+    reduces to ``p_equality`` exactly, which is why such a term can also be
     scored without this step.
     """
 
     terms = []
+    target_rows = float(stratum.expected_target_rows)
     for term in stratum.terms:
-        if term.realization_probability is not None:
+        if term.realization_probability is not None and term.realization_family:
             terms.append(term)
             continue
-        family = TERM_OPERATOR_FAMILY.get(term.region_type)
-        if family is None:
+        own_family = TERM_OPERATOR_FAMILY.get(term.region_type)
+        if own_family is None:
             raise ValueError(f"unsupported region_type {term.region_type!r}")
-        expected = getattr(stratum, EXPECTED_SUPPORT_FIELD[family], None)
-        target_rows = float(stratum.expected_target_rows)
-        if expected is None or not isfinite(float(expected)) or target_rows <= 0.0:
-            # Nothing to derive it from.  Equality needs no derivation; any
-            # other family is left unset so that scoring refuses it rather than
-            # silently falling back to the bare operator probability.
-            if family == "equality":
+        routes: list[tuple[float, str]] = []
+        for family in (own_family, "range"):
+            expected = getattr(stratum, EXPECTED_SUPPORT_FIELD[family], None)
+            if expected is None or not isfinite(float(expected)):
+                continue
+            if target_rows <= 0.0:
+                continue
+            routes.append((float(expected) / target_rows, family))
+        if not routes:
+            # Nothing to derive it from.  An equality region realized through
+            # the equality route needs no derivation; anything else is left
+            # unset so that scoring refuses it rather than silently falling
+            # back to the bare operator probability.
+            if own_family == "equality":
                 terms.append(
                     StratumTerm(
                         **{
@@ -1042,21 +1204,32 @@ def with_realization_probabilities(
                             "realization_probability": float(
                                 predicate_probabilities.get("equality", 0.0)
                             ),
+                            "realization_family": "equality",
                         }
                     )
                 )
             else:
                 terms.append(term)
             continue
+        probability, family = min(routes)
+        chosen = probability
         terms.append(
             StratumTerm(
                 **{
                     **asdict(term),
-                    "realization_probability": float(expected) / target_rows,
+                    "realization_probability": probability,
+                    "realization_family": family,
                 }
             )
         )
-    return RootDataStratum(**{**stratum.to_json_dict(), "terms": tuple(terms)})
+    payload = {**stratum.to_json_dict(), "terms": tuple(terms)}
+    if payload.get("realized_support_mass") is None and len(terms) == 1:
+        # One term means there is no joint to average over, so the marginal
+        # per-row probability times the region mass is already exact.
+        factor = terms[0].realization_probability
+        if factor is not None:
+            payload["realized_support_mass"] = float(stratum.probability) * float(factor)
+    return RootDataStratum(**payload)
 
 
 def _term_realization(
@@ -1098,9 +1271,22 @@ def conditional_head_support(
 
     if head_index <= stratum.column_indices[-1]:
         return 0.0
-    support = float(n_total) * float(stratum.probability)
-    for term in stratum.terms:
-        support *= _term_realization(stratum, term, predicate_probabilities)
+    mass = stratum.realized_support_mass
+    if mass is None:
+        if stratum.is_conjunctive:
+            raise ValueError(
+                f"stratum {stratum.stratum_id!r} is conjunctive and has no realized "
+                "support mass. Multiplying the terms' marginal realization "
+                "probabilities would assume they are independent, which correlated "
+                "terms are not; compute it with "
+                "ExactRootStratumProvider.realized_support_mass."
+            )
+        # Exactly one term, so there is no joint to average over and the
+        # region mass times the per-row probability is already exact.
+        mass = float(stratum.probability) * _term_realization(
+            stratum, stratum.terms[0], predicate_probabilities
+        )
+    support = float(n_total) * float(mass)
     required = set(stratum.tables(metadata))
     head_table = metadata.columns[head_index].table
     if head_table is not None:

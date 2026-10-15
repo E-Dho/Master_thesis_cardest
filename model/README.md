@@ -1121,7 +1121,13 @@ term, so depth-1 strata and every existing consumer behave exactly as before.
 Scoring changed with it: `conditional_head_support` is the expected number of
 contexts in which *every* term is emitted as a predicate, every table the
 conjunction touches survives NeuroCard table dropout along with the scored
-head's own table, and the head sits strictly after the last term. A stratum's
+head's own table, and the head sits strictly after the last term. Surviving a
+table means surviving every table between it and the join root, because the
+sampler runs the subset through the root-connected component: on a chain
+`root -> parent -> child`, keeping the child requires the parent too. Counting
+only the explicitly required tables overestimates survival on any join deeper
+than one hop, so the required set is closed over its root paths first, using
+the same `root_paths_closure` the context generator uses. A stratum's
 `support_score` is the minimum over the heads it can serve and its
 `support_deficit` is the summed shortfall against the threshold, so a
 conjunction that starves three suffix heads outranks a marginal that starves
@@ -1132,17 +1138,40 @@ exactly: the two functions state the same contract and live side by side in
 heads would leave out the fanout heads whose effective sample size motivated
 rare-support training in the first place.
 
-Each term also carries a realization probability: the chance that a row already
-inside the term's region emits exactly that predicate. For equality that is
-just `p_equality`, because the row determines the literal. For a tail or a
-native range the generator must also pick that exact threshold or interval out
-of the ones the row admits, and on a high-cardinality ordered column that
-selection probability is small. Leaving it out would overestimate support by
-the mass-weighted mean number of admissible thresholds, which is how a rare
-tail predicate ends up ranked as sufficiently covered. The factor is derived
-from the depth-1 `expected_<family>_count` statistics, and a non-equality term
-that reaches scoring without one raises rather than falling back to the bare
-operator probability.
+Each term also carries a realization route and its probability: which operator
+the region is rarest through, and the chance that a row already inside the
+region emits exactly that predicate through it. For an equality region realized
+as an equality that is just `p_equality`, because the row determines the
+literal. For a tail or a native range the generator must also pick that exact
+threshold or interval out of the ones the row admits, and on a
+high-cardinality ordered column that selection probability is small. Leaving it
+out would overestimate support by the mass-weighted mean number of admissible
+thresholds, which is how a rare tail predicate ends up ranked as sufficiently
+covered. The factor is derived from the depth-1 `expected_<family>_count`
+statistics, and a non-equality term that reaches scoring without one raises
+rather than falling back to the bare operator probability.
+
+The route matters beyond scoring, because it decides which predicate the
+auxiliary context actually forces: an equality region whose native-range
+support is lower than its equality support is rare as `[v, v]`, not as `= v`,
+and forcing the wrong one trains a different event from the one discovery
+selected. The route therefore lives on the term rather than in the stratum's
+`support_bottleneck` string, which conditional rescoring overwrites and which
+cannot describe more than one term of a conjunction anyway.
+
+Support itself is the realized support mass: the expectation over full
+outer-join rows of the indicator that the row is in the region times the
+product of the per-row realization probabilities. For a single term that is the
+region mass times the per-row factor, which is exactly the depth-1 statistic.
+For a conjunction it is **not** the product of the terms' marginal averages:
+a tail or range factor depends on the row's rank, and the other terms change
+the rank distribution inside the conjunction, so correlated terms would be
+over- or underestimated. The provider already holds the materialized rows and
+their weights, so it averages the product of the per-row factors over the joint
+rows instead, which is exact. A conjunction scored without that mass raises
+rather than falling back to the independence product. `per_value_realization_factors`
+is the per-row form of the same quantities the depth-1 vectors compute, and a
+test asserts the two agree for every route at every rank.
 
 Forcing a term pulls its table into the query subset, and with it every table
 on the path from the join root. In a chain `root -> parent -> child`, forcing a
