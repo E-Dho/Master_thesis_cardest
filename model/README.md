@@ -1202,8 +1202,15 @@ Configuration lives under `rare_support.discovery.conjunctive`:
 - `beam_width`: candidates carried forward per search level.
 - `seed_width`: depth-1 strata used to seed the search.
 - `minimum_joint_rows`: joint row floor below which a region is pruned.
-- `extension_width`: how many scored extension candidates the search may draw
-  terms from, across all DATA columns. Defaults to `seed_width`.
+- `extension_width`: how many extension candidates the search may draw terms
+  from, across all DATA columns. Defaults to `seed_width`. The width is applied
+  only after candidates that cannot extend any seed are dropped -- those on a
+  column a seed already pins, or on a table a seed already covers when distinct
+  tables are required. Ranking first would let high-scoring but unusable
+  root-table regions consume the whole budget, which on a real root table with
+  many candidate regions makes discovery inert in the same way a root-only pool
+  does. `scored_extension_candidates` and `eligible_extension_candidates` in
+  `conjunctive_status` report both sides of that filter.
 - `require_distinct_tables`: when true, each term must come from a table not
   already used by the conjunction, which targets the cross-table prefixes that
   single-column strata cannot express.

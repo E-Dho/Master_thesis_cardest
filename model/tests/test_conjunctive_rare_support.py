@@ -15,6 +15,7 @@ from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
     ExactRootStratumProvider,
+    _can_extend_any_seed,
     _expected_lower_threshold_counts,
     _expected_native_range_interval_counts,
     _expected_upper_threshold_counts,
@@ -1237,6 +1238,7 @@ class ProductionProviderDiscoveryTest(unittest.TestCase):
         self.assertIn(
             "require_distinct_tables", str(source.conjunctive_status["reason"])
         )
+        self.assertIn("root table", str(source.conjunctive_status["reason"]))
         self.assertEqual({item.depth for item in selected}, {1})
 
     def test_an_impossible_joint_row_floor_reports_the_search_not_the_pool(self):
@@ -1264,6 +1266,100 @@ class ProductionProviderDiscoveryTest(unittest.TestCase):
     def test_the_extension_width_caps_the_pool(self):
         source, _ = self.discover(extension_width=1)
         self.assertEqual(source.conjunctive_status["extension_candidates"], 1)
+
+    def test_the_narrowest_width_still_spends_itself_on_a_usable_extension(self):
+        # The width is a budget, so it must not be spent on candidates the
+        # search cannot use.  Ranking before filtering let high-scoring
+        # root-table regions consume it and left discovery inert.
+        meta = chain_data_metadata()
+        source, selected = self.discover(extension_width=1)
+        status = source.conjunctive_status
+        self.assertEqual(status["cross_table_extension_candidates"], 1)
+        self.assertGreater(status["conjunctive_candidates"], 0)
+        self.assertTrue(status["applied"])
+        self.assertTrue(
+            [item for item in selected if item.is_conjunctive and len(item.tables(meta)) > 1]
+        )
+
+    def test_every_width_from_one_upward_produces_a_conjunction(self):
+        # The defect showed as a threshold: widths 1..3 were inert and only 4
+        # happened to reach a usable candidate.
+        for width in range(1, 6):
+            with self.subTest(extension_width=width):
+                source, _ = self.discover(extension_width=width)
+                self.assertGreater(
+                    source.conjunctive_status["conjunctive_candidates"], 0
+                )
+                self.assertTrue(source.conjunctive_status["applied"])
+
+    def test_ineligible_candidates_are_reported_but_not_pooled(self):
+        source, _ = self.discover(extension_width=8)
+        status = source.conjunctive_status
+        # Root-table regions are still scored; they just cannot be spent.
+        self.assertGreater(
+            status["scored_extension_candidates"], status["eligible_extension_candidates"]
+        )
+        self.assertEqual(
+            status["eligible_extension_candidates"],
+            status["cross_table_extension_candidates"],
+        )
+
+    def test_no_eligible_candidate_is_reported_as_such(self):
+        source = self.provider()
+        source.extension_column_masses = dict(source.column_masses)
+        source, _ = self.discover(source=source)
+        self.assertEqual(source.conjunctive_status["eligible_extension_candidates"], 0)
+        self.assertFalse(source.conjunctive_status["applied"])
+        self.assertIn("extend any seed", str(source.conjunctive_status["reason"]))
+
+
+class ExtensionEligibilityTest(unittest.TestCase):
+    """What may spend a slot of the extension width."""
+
+    def meta(self):
+        return metadata()
+
+    def can_extend(self, candidate, seeds, *, require_distinct_tables=True):
+        return _can_extend_any_seed(
+            candidate,
+            seeds,
+            metadata=self.meta(),
+            require_distinct_tables=require_distinct_tables,
+        )
+
+    def test_a_candidate_on_a_seeds_own_column_cannot_extend_it(self):
+        # A stratum pins one region per column, so a second region on the same
+        # column is not an extension.  This holds with or without the distinct
+        # table rule, which would otherwise mask it.
+        seed = stratum(term(0, "T.year", 1952))
+        other_region = stratum(term(0, "T.year", 1951))
+        self.assertFalse(self.can_extend(other_region, (seed,)))
+        self.assertFalse(
+            self.can_extend(other_region, (seed,), require_distinct_tables=False)
+        )
+
+    def test_a_candidate_on_the_seeds_table_is_refused_under_the_distinct_rule(self):
+        seed = stratum(term(0, "T.year", 1952))
+        same_table = stratum(term(2, "T.phonetic", 1))
+        self.assertFalse(self.can_extend(same_table, (seed,)))
+        self.assertTrue(
+            self.can_extend(same_table, (seed,), require_distinct_tables=False)
+        )
+
+    def test_a_candidate_on_another_table_can_extend(self):
+        seed = stratum(term(0, "T.year", 1952))
+        self.assertTrue(self.can_extend(stratum(term(1, "K.keyword", 1)), (seed,)))
+
+    def test_extending_any_one_seed_is_enough(self):
+        seeds = (
+            stratum(term(1, "K.keyword", 1)),
+            stratum(term(0, "T.year", 1952)),
+        )
+        # Blocked by the first seed, usable with the second.
+        self.assertTrue(self.can_extend(stratum(term(3, "K.extra", 1)), seeds))
+
+    def test_no_seeds_means_nothing_is_eligible(self):
+        self.assertFalse(self.can_extend(stratum(term(1, "K.keyword", 1)), ()))
 
 
 if __name__ == "__main__":  # pragma: no cover

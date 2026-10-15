@@ -701,22 +701,40 @@ class ExactRootStratumProvider:
             # column, or a root-only pool would make require_distinct_tables
             # reject every extension and leave discovery inert.
             extension_masses = self.extension_column_masses or self.column_masses
-            extension_pool = by_deficit(
-                rescore(
-                    self._candidates_for_masses(
-                        extension_masses,
-                        n_total=n_total,
-                        predicate_probabilities=predicate_probabilities,
-                        threshold=minimum_expected_context_support,
-                    )
-                ),
-                conjunctive.get("extension_width", conjunctive.get("seed_width", 32)),
+            scored_extensions = rescore(
+                self._candidates_for_masses(
+                    extension_masses,
+                    n_total=n_total,
+                    predicate_probabilities=predicate_probabilities,
+                    threshold=minimum_expected_context_support,
+                )
             )
+            # Drop candidates that cannot extend any seed *before* applying the
+            # width.  Ranking first lets high-scoring but unusable root-table
+            # regions consume the whole budget, which on a real root table with
+            # many candidate regions makes discovery inert again -- the same
+            # failure as a root-only pool, just harder to see.
+            eligible = [
+                candidate
+                for candidate in scored_extensions
+                if _can_extend_any_seed(
+                    candidate,
+                    seeds,
+                    metadata=self.metadata,
+                    require_distinct_tables=require_distinct_tables,
+                )
+            ]
+            extension_pool = by_deficit(
+                eligible,
+                conjunctive.get("extension_width", conjunctive.get("seed_width", 32)),
+            ) if eligible else ()
             cross_table = tuple(
                 candidate
                 for candidate in extension_pool
                 if self.metadata.columns[candidate.column_index].table != root
             )
+            self.conjunctive_status["scored_extension_candidates"] = len(scored_extensions)
+            self.conjunctive_status["eligible_extension_candidates"] = len(eligible)
             self.conjunctive_status["extension_candidates"] = len(extension_pool)
             self.conjunctive_status["cross_table_extension_candidates"] = len(cross_table)
             conjunctions = self.extend_with_conjunctions(
@@ -733,15 +751,21 @@ class ExactRootStratumProvider:
             candidates = list(rescored) + list(conjunctions)
             self.conjunctive_status["conjunctive_candidates"] = len(conjunctions)
             if not conjunctions:
-                self.conjunctive_status["reason"] = (
-                    "require_distinct_tables=true but every extension candidate is on "
-                    f"the root table {root!r}, so no conjunction can be formed"
-                    if require_distinct_tables and not cross_table
-                    else (
+                if not eligible:
+                    self.conjunctive_status["reason"] = (
+                        "no extension candidate can extend any seed"
+                        + (
+                            f"; require_distinct_tables=true and every candidate is on "
+                            f"the root table {root!r}"
+                            if require_distinct_tables
+                            else ""
+                        )
+                    )
+                else:
+                    self.conjunctive_status["reason"] = (
                         "the beam search found no region above minimum_joint_rows; "
                         "lower it or widen beam_width/extension_width"
                     )
-                )
         selected = sorted(
             (
                 candidate
@@ -1242,6 +1266,33 @@ def per_value_realization_factors(
         else:
             raise ValueError(f"unsupported realization family {family!r}")
     return factors
+
+
+def _can_extend_any_seed(
+    candidate: RootDataStratum,
+    seeds: "tuple[RootDataStratum, ...]",
+    *,
+    metadata: ModelMetadata,
+    require_distinct_tables: bool,
+) -> bool:
+    """Whether this candidate could become a term of at least one seed.
+
+    The extension width is a budget, so it has to be spent on candidates the
+    beam search can actually use.  A candidate on a column a seed already pins,
+    or on a table a seed already covers when distinct tables are required, can
+    never extend that seed; if it can extend none of them it is not a candidate
+    at all.
+    """
+
+    column_index = int(candidate.column_index)
+    table = metadata.columns[column_index].table
+    for seed in seeds:
+        if column_index in seed.column_indices:
+            continue
+        if require_distinct_tables and table in seed.tables(metadata):
+            continue
+        return True
+    return False
 
 
 def with_realization_probabilities(
