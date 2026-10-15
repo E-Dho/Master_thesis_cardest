@@ -305,7 +305,6 @@ class PredicateTrainingContextGenerator:
         strata: tuple[Any, ...] | list[Any],
         rng: np.random.Generator,
         debug_allow_row_dependent_native_range_tail: bool = False,
-        term_subset_probability: float = 0.0,
     ) -> tuple[list[GeneratedTrainingContext], np.ndarray, PredicateGenerationStats]:
         """Generate row-satisfied contexts with exact stratum predicates forced.
 
@@ -315,10 +314,13 @@ class PredicateTrainingContextGenerator:
         and the tables those terms live on are added to the subset so a forced
         token can never land on an excluded table.
 
-        ``term_subset_probability`` is the chance that a conjunctive stratum
-        forces a random non-empty proper subset of its terms instead of all of
-        them.  Without it every auxiliary context carries every term, so a query
-        that constrains only part of the conjunction is never represented.
+        Every term is forced, never a subset.  A context that stated only part
+        of a conjunction would still be paired with a row drawn from the whole
+        conjunction, so the omitted terms would leak into the targets and the
+        heads on those columns would be trained toward the wrong conditional.
+        Representing partial conjunctions correctly means drawing the rows from
+        the partial stratum, which is a decision that has to be made before
+        sampling rather than here.
         """
 
         encoded_rows = np.asarray(encoded_rows, dtype=int)
@@ -341,7 +343,6 @@ class PredicateTrainingContextGenerator:
                 debug_allow_row_dependent_native_range_tail=(
                     debug_allow_row_dependent_native_range_tail
                 ),
-                term_subset_probability=term_subset_probability,
             )
             contradictions += included_indicator_contradictions(context, row, metadata)
             if not context_satisfies_row(context, row, metadata):
@@ -372,11 +373,10 @@ class PredicateTrainingContextGenerator:
         compiled: _CompiledGenerationMetadata | None = None,
         *,
         debug_allow_row_dependent_native_range_tail: bool = False,
-        term_subset_probability: float = 0.0,
     ) -> GeneratedTrainingContext:
         compiled = compiled or self._compiled(metadata)
         included_tables = set(self._sample_included_tables(encoded_row, metadata, rng, compiled))
-        terms = _forced_terms_for_stratum(stratum, rng, term_subset_probability)
+        terms = tuple(getattr(stratum, "terms", ()) or (stratum,))
         forced_columns = tuple(int(term.column_index) for term in terms)
         forced_tables = {
             metadata.columns[index].table
@@ -384,8 +384,18 @@ class PredicateTrainingContextGenerator:
             if metadata.columns[index].table is not None
         }
         if forced_tables:
+            graph = compiled.graph
+            rooted = self.table_subset_sampling == "neurocard_table_dropout_rooted"
+            # The forced tables drag their root paths in with them, and the row
+            # has to actually carry every one of those: a path table that is
+            # outer-missing for this row cannot be in the query subset.
+            required = (
+                _root_paths_closure(set(forced_tables), graph.root_table, graph.edges)
+                if rooted
+                else set(forced_tables)
+            )
             present = self._present_tables_for_row(encoded_row, metadata, compiled)
-            if not forced_tables <= present:
+            if not required <= present:
                 tokens = tuple([_WILDCARD_TOKEN] * len(metadata.columns))
                 return GeneratedTrainingContext(
                     tokens=tokens,
@@ -394,15 +404,21 @@ class PredicateTrainingContextGenerator:
                     ordinary_predicates={},
                     encoded_two_slot_row=_wildcard_two_slot_row(metadata),
                 )
-            included_tables |= forced_tables
-            if self.table_subset_sampling == "neurocard_table_dropout_rooted":
-                graph = compiled.graph
+            included_tables |= required
+            if rooted:
                 included_tables = _root_connected_component(
                     included_tables,
                     graph.root_table,
                     graph.edges,
                 )
-                included_tables |= forced_tables
+                # The closure above is exactly what makes this hold; re-adding
+                # the forced tables here instead would reintroduce the
+                # disconnected subset it prevents.
+                if not forced_tables <= included_tables:
+                    raise AssertionError(
+                        f"forced tables {sorted(forced_tables)!r} dropped out of the "
+                        f"root-connected subset {sorted(included_tables)!r}"
+                    )
         inverse_fanouts = self._inverse_fanouts_for_table_subset(compiled, included_tables)
         ordinary = self._ordinary_predicates(
             encoded_row,
@@ -2028,29 +2044,6 @@ def _is_conjunctive(stratum: Any) -> bool:
     return len(getattr(stratum, "terms", ())) > 1
 
 
-def _forced_terms_for_stratum(
-    stratum: Any,
-    rng: np.random.Generator,
-    term_subset_probability: float,
-) -> tuple[Any, ...]:
-    """Pick which of a stratum's terms this context pins.
-
-    Always every term for a depth-1 stratum.  For a conjunction, with
-    probability ``term_subset_probability`` a uniformly chosen non-empty proper
-    subset instead, so the model also sees the prefix with one term left
-    unconstrained rather than only ever in its complete form.
-    """
-
-    terms = tuple(getattr(stratum, "terms", ()) or (stratum,))
-    if len(terms) <= 1 or term_subset_probability <= 0.0:
-        return terms
-    if float(rng.random()) >= float(term_subset_probability):
-        return terms
-    size = int(rng.integers(1, len(terms)))
-    chosen = rng.choice(len(terms), size=size, replace=False)
-    return tuple(terms[int(index)] for index in sorted(int(value) for value in chosen))
-
-
 def forced_predicate_for_stratum(
     stratum: Any,
     *,
@@ -2310,6 +2303,78 @@ def _is_connected_subset(subset: frozenset[str], edges: tuple[tuple[str, str], .
         seen.add(table)
         stack.extend(adjacency[table] - seen)
     return seen == set(subset)
+
+
+def stratum_column_indices(stratum: Any) -> tuple[int, ...]:
+    """The columns a stratum's terms pin, in order."""
+
+    indices = getattr(stratum, "column_indices", None)
+    if indices is None:
+        return (int(stratum.column_index),)
+    return tuple(int(index) for index in indices)
+
+
+def forced_prefix_is_complete(context: GeneratedTrainingContext, stratum: Any) -> bool:
+    """True when this context pinned every term of ``stratum``.
+
+    A context whose required tables were absent from the sampled subset
+    degrades to all wildcards and pins nothing, so it is not an exact support
+    event and must not be counted as one: a diagnostic meant to reveal
+    starvation that counts empty contexts as covered reads backwards.
+    """
+
+    forced = tuple(int(index) for index in (context.forced_term_columns or ()))
+    return bool(forced) and forced == stratum_column_indices(stratum)
+
+
+def _root_paths_closure(
+    required: set[str],
+    root_table: str,
+    edges: tuple[tuple[str, str], ...],
+) -> set[str]:
+    """Every table on a root-to-``required`` path, over the *full* join graph.
+
+    Forcing a stratum term pulls that term's table into the subset, but a
+    rooted query subset has to stay connected to the root.  In a chain
+    ``root -> parent -> child``, forcing the child while the sampled subset
+    dropped the parent would otherwise leave ``{root, child}``, which is not a
+    rooted query and produces meaningless indicator and fanout tokens.  So the
+    intermediate tables come along.
+
+    Raises when a required table has no path to the root at all, which is a
+    schema error rather than a sampling outcome.
+    """
+
+    closure = set(required) | {root_table}
+    if not edges:
+        if closure - {root_table}:
+            raise ValueError(
+                f"tables {sorted(closure - {root_table})!r} cannot reach root "
+                f"{root_table!r}: the join graph has no edges"
+            )
+        return closure
+    adjacency: dict[str, set[str]] = {}
+    for left, right in edges:
+        adjacency.setdefault(left, set()).add(right)
+        adjacency.setdefault(right, set()).add(left)
+    parent: dict[str, str | None] = {root_table: None}
+    queue = [root_table]
+    while queue:
+        table = queue.pop(0)
+        for neighbor in sorted(adjacency.get(table, ())):
+            if neighbor not in parent:
+                parent[neighbor] = table
+                queue.append(neighbor)
+    for table in sorted(required):
+        if table not in parent:
+            raise ValueError(
+                f"table {table!r} is not reachable from join root {root_table!r}"
+            )
+        walk = table
+        while walk is not None:
+            closure.add(walk)
+            walk = parent[walk]
+    return closure
 
 
 def _root_connected_component(

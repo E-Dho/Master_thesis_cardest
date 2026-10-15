@@ -410,11 +410,13 @@ def validate_config(config: dict[str, Any]) -> None:
                 raise ValueError(
                     "rare_support.discovery.conjunctive.max_stratum_share must lie in [0, 1]"
                 )
-        subset_probability = float(
-            rare_auxiliary.get("term_subset_probability", 0.0) or 0.0
-        )
-        if subset_probability < 0.0 or subset_probability > 1.0:
-            raise ValueError("rare_auxiliary.term_subset_probability must lie in [0, 1]")
+        if "term_subset_probability" in rare_auxiliary:
+            raise ValueError(
+                "rare_auxiliary.term_subset_probability was removed: an auxiliary "
+                "context that forced only part of a conjunction was still paired "
+                "with a row drawn from the whole conjunction, which leaks the "
+                "omitted terms into the targets. Remove the key."
+            )
 
 
 def resolve_device(config: dict[str, Any]) -> str:

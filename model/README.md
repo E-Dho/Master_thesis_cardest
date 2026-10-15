@@ -1125,7 +1125,31 @@ head's own table, and the head sits strictly after the last term. A stratum's
 `support_score` is the minimum over the heads it can serve and its
 `support_deficit` is the summed shortfall against the threshold, so a
 conjunction that starves three suffix heads outranks a marginal that starves
-one.
+one. The heads it serves are every original column after its last term,
+indicator and fanout heads included, matching `auxiliary_eligibility_mask`
+exactly: the two functions state the same contract and live side by side in
+`model/src/data/strata.py` so they cannot drift apart. Scoring only the DATA
+heads would leave out the fanout heads whose effective sample size motivated
+rare-support training in the first place.
+
+Each term also carries a realization probability: the chance that a row already
+inside the term's region emits exactly that predicate. For equality that is
+just `p_equality`, because the row determines the literal. For a tail or a
+native range the generator must also pick that exact threshold or interval out
+of the ones the row admits, and on a high-cardinality ordered column that
+selection probability is small. Leaving it out would overestimate support by
+the mass-weighted mean number of admissible thresholds, which is how a rare
+tail predicate ends up ranked as sufficiently covered. The factor is derived
+from the depth-1 `expected_<family>_count` statistics, and a non-equality term
+that reaches scoring without one raises rather than falling back to the bare
+operator probability.
+
+Forcing a term pulls its table into the query subset, and with it every table
+on the path from the join root. In a chain `root -> parent -> child`, forcing a
+predicate on the child when table dropout removed the parent would otherwise
+leave `{root, child}`, which is not a rooted query and produces meaningless
+indicator and fanout tokens. If the row does not carry every table on that
+path, the context degrades to all wildcards instead.
 
 Candidates are found by beam search over the depth-1 seeds, with exact joint
 counts taken from the provider's materialized rows. Regions whose joint row
@@ -1149,12 +1173,14 @@ Configuration lives under `rare_support.discovery.conjunctive`:
   reorder the strata underneath it. A cap at or below `1/n` is unsatisfiable
   and is ignored.
 
-And under `rare_auxiliary`:
-
-- `term_subset_probability`: probability that an auxiliary context pins a
-  uniformly chosen non-empty proper subset of a conjunction's terms rather than
-  all of them, so the model also sees each prefix with one term left
-  unconstrained. Default `0.0`, which always forces the whole conjunction.
+Every auxiliary context pins the complete conjunction. Pinning only part of it
+would be unsound here: the row is drawn from the whole conjunction, so the
+omitted terms stay in the targets and the heads on those columns get trained
+toward `p(row | complete conjunction)` while the model is shown a partial one.
+Representing partial conjunctions honestly means drawing the rows from the
+partial stratum, which is a decision that has to be made before sampling, not
+during context generation. `rare_auxiliary.term_subset_probability` is rejected
+by config validation rather than ignored.
 
 ### Capability gate
 
@@ -1179,7 +1205,10 @@ needs conjunctions has to use a fixture or prepared-directory source.
 its depth, how many auxiliary contexts it produced, how many of those forced
 the complete conjunction, how many were dropped because a required table was
 absent from the sampled table subset, the histogram of how many terms were
-forced, and which heads the resulting contexts actually cover. This is the
+forced, and which heads the resulting contexts actually cover. A context that
+degraded to wildcards is counted under `incomplete_forced_context_count` and
+not as a `generated_exact_support_event_count`, so amplification and coverage
+do not read better than they are. This is the
 quantity to watch when a joint prefix is suspected of starving: a global
 auxiliary effective sample size says nothing about it.
 

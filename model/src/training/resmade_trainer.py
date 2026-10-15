@@ -13,6 +13,7 @@ import numpy as np
 from model.src.config import resolve_device
 from model.src.data.full_join_sampler import FullJoinBatch
 from model.src.data.schema import ColumnKind
+from model.src.data.strata import auxiliary_eligibility_mask, served_head_indices
 from model.src.data.trajectory_distinct import (
     TRAJECTORY_TARGET_SEMANTICS_VERSION,
     trajectory_base_measure_support,
@@ -23,6 +24,8 @@ from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.model.resmade import TrajectoryDistinctConfig
 from model.src.predicates.generation import (
     GeneratedTrainingContext,
+    forced_prefix_is_complete,
+    stratum_column_indices,
     PredicateTrainingContextGenerator,
     predicate_context_diagnostics,
     literal_token_occurrences,
@@ -1516,9 +1519,6 @@ def _train_one_batch(
                 debug_allow_row_dependent_native_range_tail=bool(
                     rare_config.get("debug_allow_row_dependent_native_range_tail", False)
                 ),
-                term_subset_probability=float(
-                    rare_config.get("term_subset_probability", 0.0) or 0.0
-                ),
             )
         )
         rare_token_rows = [list(context.tokens) for context in rare_contexts]
@@ -2046,21 +2046,6 @@ def trajectory_dedup_loss_for_batch(
     return loss, stats
 
 
-def auxiliary_eligibility_mask(
-    metadata: object,
-    selected_column_indices: np.ndarray,
-    *,
-    row_count: int,
-) -> np.ndarray:
-    """Return [rare_rows, original_columns] mask for strict AR suffix heads."""
-
-    selected = np.asarray(selected_column_indices, dtype=int).reshape(-1)
-    if selected.shape != (row_count,):
-        raise ValueError("selected_column_indices must have one entry per rare row")
-    column_indices = np.arange(len(metadata.columns), dtype=int)  # type: ignore[attr-defined]
-    return column_indices[None, :] > selected[:, None]
-
-
 def prefix_head_coverage(
     *,
     metadata: object,
@@ -2100,15 +2085,17 @@ def prefix_head_coverage(
         distinct_prefixes.add(forced)
         histogram = entry["terms_forced_histogram"]
         histogram[str(len(forced))] = int(histogram.get(str(len(forced)), 0)) + 1
-        expected = int(len(getattr(stratum, "terms", ()) or (stratum,)))
-        if len(forced) != expected:
+        if not forced_prefix_is_complete(context, stratum):
+            # Not the whole conjunction, so it says nothing about this
+            # stratum's prefix coverage.
             continue
         entry["full_conjunction_contexts"] += 1
         last = max(forced)
         for index in range(last + 1, len(columns)):
             column = columns[index]
-            if column.kind != ColumnKind.DATA:
-                continue
+            # Every original column, matching auxiliary_eligibility_mask and
+            # served_head_indices: the indicator and fanout heads are trained
+            # too, and the fanout ones are the reason this exists.
             if column.table is not None and column.table not in context.included_tables:
                 continue
             coverage = entry["head_coverage"]
@@ -2137,29 +2124,39 @@ def rare_auxiliary_diagnostics(
     forced_operator_counts: dict[str, int] = {}
     per_stratum: dict[str, dict[str, Any]] = {}
     for context, stratum, row_eligible in zip(contexts, selected_for_context, eligibility):
-        forced_columns = context.forced_term_columns or (int(stratum.column_index),)
-        token = context.tokens[int(forced_columns[-1])]
-        forced_operator_counts[token.op.value] = int(forced_operator_counts.get(token.op.value, 0)) + 1
+        stratum_columns = stratum_column_indices(stratum)
+        forced_columns = tuple(int(index) for index in (context.forced_term_columns or ()))
+        is_exact = forced_prefix_is_complete(context, stratum)
+        token = context.tokens[forced_columns[-1] if forced_columns else stratum_columns[-1]]
         entry = per_stratum.setdefault(
             stratum.stratum_id,
             {
                 "rare_context_count": 0,
                 "raw_rare_row_count": 0,
                 "generated_exact_support_event_count": 0,
+                "incomplete_forced_context_count": 0,
                 "downstream_eligible_head_context_count": 0,
                 "forced_operator_count": {},
             },
         )
         entry["rare_context_count"] = int(entry["rare_context_count"]) + 1
         entry["raw_rare_row_count"] = int(entry["raw_rare_row_count"]) + 1
-        entry["generated_exact_support_event_count"] = int(
-            entry["generated_exact_support_event_count"]
-        ) + 1
+        if is_exact:
+            forced_operator_counts[token.op.value] = (
+                int(forced_operator_counts.get(token.op.value, 0)) + 1
+            )
+            entry["generated_exact_support_event_count"] = int(
+                entry["generated_exact_support_event_count"]
+            ) + 1
+            op_counts = entry["forced_operator_count"]
+            op_counts[token.op.value] = int(op_counts.get(token.op.value, 0)) + 1
+        else:
+            entry["incomplete_forced_context_count"] = int(
+                entry["incomplete_forced_context_count"]
+            ) + 1
         entry["downstream_eligible_head_context_count"] = int(
             entry["downstream_eligible_head_context_count"]
         ) + int(np.sum(row_eligible))
-        op_counts = entry["forced_operator_count"]
-        op_counts[token.op.value] = int(op_counts.get(token.op.value, 0)) + 1
 
     column_diagnostics: dict[str, Any] = {}
     auxiliary_inv_ess_by_fanout: dict[str, float] = {}

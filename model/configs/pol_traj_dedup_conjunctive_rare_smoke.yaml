@@ -126,9 +126,6 @@ rare_auxiliary:
   enabled: true
   batch_size: 32
   beta: 0.25
-  # Half the auxiliary contexts pin a proper subset of each conjunction's
-  # terms, so the model also sees the prefix with one term unconstrained.
-  term_subset_probability: 0.5
 
 trajectory_distinct:
   enabled: true

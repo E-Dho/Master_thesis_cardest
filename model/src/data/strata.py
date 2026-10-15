@@ -18,7 +18,18 @@ SQL_NULL = "__SQL_NULL__"
 
 @dataclass(frozen=True)
 class StratumTerm:
-    """One column region inside a (possibly conjunctive) stratum."""
+    """One column region inside a (possibly conjunctive) stratum.
+
+    ``realization_probability`` is the probability that a row already inside
+    this region emits exactly this predicate.  For an equality term that is
+    just ``p_equality``, because the row determines the literal.  For a tail or
+    a native range the generator must also pick this exact threshold or
+    interval out of all the ones the row admits, and on a high-cardinality
+    ordered column that selection probability is small; leaving it out
+    overestimates support by the mass-weighted mean number of admissible
+    thresholds.  It is filled in from the depth-1 discovery statistics by
+    ``with_realization_probabilities`` and is ``None`` until then.
+    """
 
     column_index: int
     column_name: str
@@ -26,6 +37,7 @@ class StratumTerm:
     value: Any | None = None
     lower: Any | None = None
     upper: Any | None = None
+    realization_probability: float | None = None
 
     def contains_value(self, value: Any) -> bool:
         if _is_structural_value(value):
@@ -985,6 +997,88 @@ def table_subset_inclusion_probability(
     )
 
 
+EXPECTED_SUPPORT_FIELD = {
+    "equality": "expected_equality_count",
+    "lower": "expected_lower_count",
+    "upper": "expected_upper_count",
+    "range": "expected_range_support",
+}
+
+
+def with_realization_probabilities(
+    stratum: RootDataStratum,
+    predicate_probabilities: Mapping[str, float],
+) -> RootDataStratum:
+    """Fill each term's realization probability from depth-1 statistics.
+
+    A depth-1 candidate already carries ``expected_<family>_count``, which is
+    the expected number of contexts that generate *this exact* predicate and so
+    already includes the threshold or interval selection.  Dividing it by
+    ``expected_target_rows`` turns it back into a per-row probability, which is
+    the factor ``conditional_head_support`` needs.  For equality the ratio
+    reduces to ``p_equality`` exactly, which is why equality terms can also be
+    scored without this step.
+    """
+
+    terms = []
+    for term in stratum.terms:
+        if term.realization_probability is not None:
+            terms.append(term)
+            continue
+        family = TERM_OPERATOR_FAMILY.get(term.region_type)
+        if family is None:
+            raise ValueError(f"unsupported region_type {term.region_type!r}")
+        expected = getattr(stratum, EXPECTED_SUPPORT_FIELD[family], None)
+        target_rows = float(stratum.expected_target_rows)
+        if expected is None or not isfinite(float(expected)) or target_rows <= 0.0:
+            # Nothing to derive it from.  Equality needs no derivation; any
+            # other family is left unset so that scoring refuses it rather than
+            # silently falling back to the bare operator probability.
+            if family == "equality":
+                terms.append(
+                    StratumTerm(
+                        **{
+                            **asdict(term),
+                            "realization_probability": float(
+                                predicate_probabilities.get("equality", 0.0)
+                            ),
+                        }
+                    )
+                )
+            else:
+                terms.append(term)
+            continue
+        terms.append(
+            StratumTerm(
+                **{
+                    **asdict(term),
+                    "realization_probability": float(expected) / target_rows,
+                }
+            )
+        )
+    return RootDataStratum(**{**stratum.to_json_dict(), "terms": tuple(terms)})
+
+
+def _term_realization(
+    stratum: RootDataStratum,
+    term: StratumTerm,
+    predicate_probabilities: Mapping[str, float],
+) -> float:
+    family = TERM_OPERATOR_FAMILY.get(term.region_type)
+    if family is None:
+        raise ValueError(f"unsupported region_type {term.region_type!r}")
+    if term.realization_probability is not None:
+        return float(term.realization_probability)
+    if family == "equality":
+        return float(predicate_probabilities.get("equality", 0.0))
+    raise ValueError(
+        f"stratum {stratum.stratum_id!r} term on {term.column_name!r} is a "
+        f"{term.region_type!r} region with no realization probability. Scoring it "
+        "with the bare operator probability would ignore threshold selection and "
+        "overestimate support; call with_realization_probabilities first."
+    )
+
+
 def conditional_head_support(
     stratum: RootDataStratum,
     head_index: int,
@@ -1006,10 +1100,7 @@ def conditional_head_support(
         return 0.0
     support = float(n_total) * float(stratum.probability)
     for term in stratum.terms:
-        family = TERM_OPERATOR_FAMILY.get(term.region_type)
-        if family is None:
-            raise ValueError(f"unsupported region_type {term.region_type!r}")
-        support *= float(predicate_probabilities.get(family, 0.0))
+        support *= _term_realization(stratum, term, predicate_probabilities)
     required = set(stratum.tables(metadata))
     head_table = metadata.columns[head_index].table
     if head_table is not None:
@@ -1019,14 +1110,41 @@ def conditional_head_support(
     )
 
 
+def auxiliary_eligibility_mask(
+    metadata: ModelMetadata,
+    selected_column_indices: np.ndarray,
+    *,
+    row_count: int,
+) -> np.ndarray:
+    """Return [rare_rows, original_columns] mask for strict AR suffix heads.
+
+    This lives next to ``served_head_indices`` on purpose: the two state the
+    same contract, one per row at training time and one per stratum at
+    selection time, and they must not drift apart.
+    """
+
+    selected = np.asarray(selected_column_indices, dtype=int).reshape(-1)
+    if selected.shape != (row_count,):
+        raise ValueError("selected_column_indices must have one entry per rare row")
+    column_indices = np.arange(len(metadata.columns), dtype=int)
+    return column_indices[None, :] > selected[:, None]
+
+
 def served_head_indices(stratum: RootDataStratum, metadata: ModelMetadata) -> tuple[int, ...]:
-    """DATA heads the stratum can condition, i.e. strictly after its last term."""
+    """Heads the stratum can condition, i.e. strictly after its last term.
+
+    This must match ``auxiliary_eligibility_mask``, which trains every original
+    column after the forced prefix, indicator and fanout heads included.  The
+    fanout heads are the ones whose effective sample size motivated rare-support
+    training in the first place, so scoring only the DATA heads would leave them
+    out of the deficit that decides the allocation.
+    """
 
     last = stratum.column_indices[-1]
     return tuple(
         index
         for index, column in enumerate(metadata.columns)
-        if index > last and column.kind == ColumnKind.DATA
+        if index > last
     )
 
 
@@ -1047,6 +1165,10 @@ def with_conditional_score(
     heads -- rank low without a special case.
     """
 
+    # Fill the per-term realization probabilities here rather than relying on
+    # every caller to remember: a tail term scored without one would silently
+    # ignore threshold selection, which is the overestimate this guards.
+    stratum = with_realization_probabilities(stratum, predicate_probabilities)
     heads = served_head_indices(stratum, metadata)
     supports = [
         conditional_head_support(

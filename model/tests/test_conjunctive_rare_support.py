@@ -11,9 +11,12 @@ import unittest
 import numpy as np
 
 from model.src.config import validate_config
+from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
     ExactRootStratumProvider,
+    _expected_lower_threshold_counts,
+    auxiliary_eligibility_mask,
     RootColumnMass,
     RootDataStratum,
     StratumTerm,
@@ -23,10 +26,16 @@ from model.src.data.strata import (
     membership_matrix,
     served_head_indices,
     table_subset_inclusion_probability,
+    with_realization_probabilities,
     with_conditional_score,
 )
 from model.src.data.full_join_sampler import LiveNeuroCardFullJoinSampleSource
-from model.src.predicates.generation import _forced_terms_for_stratum
+from model.src.predicates.generation import (
+    GeneratedTrainingContext,
+    PredicateTrainingContextGenerator,
+    _root_paths_closure,
+    forced_prefix_is_complete,
+)
 
 
 PROBABILITIES = {
@@ -265,10 +274,31 @@ class ConditionalSupportTest(unittest.TestCase):
         self.assertGreater(child, 0.0)
         self.assertLess(child, 1.0)
 
-    def test_served_heads_are_the_data_columns_after_the_last_term(self):
+    def test_served_heads_are_every_column_after_the_last_term(self):
+        # Indicator and fanout heads included: the fanout heads are the ones
+        # whose effective sample size motivated rare-support training.
         meta = metadata()
         conjunction = stratum(term(0, "T.year", 1952), term(1, "K.keyword", 1))
-        self.assertEqual(served_head_indices(conjunction, meta), (2, 3))
+        self.assertEqual(served_head_indices(conjunction, meta), (2, 3, 4, 5))
+        kinds = {meta.columns[index].kind for index in served_head_indices(conjunction, meta)}
+        self.assertIn(ColumnKind.FANOUT, kinds)
+        self.assertIn(ColumnKind.INDICATOR, kinds)
+
+    def test_served_heads_agree_with_the_auxiliary_eligibility_mask(self):
+        # These two must not drift apart: scoring fewer heads than the loss
+        # actually trains is what left the fanout heads out of the deficit.
+        meta = metadata()
+        for selected in (stratum(term(0, "T.year", 1952)),
+                         stratum(term(0, "T.year", 1952), term(2, "T.phonetic", 1))):
+            mask = auxiliary_eligibility_mask(
+                meta,
+                np.array([max(selected.column_indices)], dtype=int),
+                row_count=1,
+            )
+            self.assertEqual(
+                served_head_indices(selected, meta),
+                tuple(int(index) for index in np.flatnonzero(mask[0])),
+            )
 
     def test_deficit_sums_over_served_heads_so_earlier_strata_rank_higher(self):
         meta = metadata()
@@ -281,8 +311,8 @@ class ConditionalSupportTest(unittest.TestCase):
         )
         early = with_conditional_score(stratum(term(0, "T.year", 1952)), **kwargs)
         late = with_conditional_score(stratum(term(2, "T.phonetic", 3)), **kwargs)
-        self.assertEqual(len(served_head_indices(early, meta)), 3)
-        self.assertEqual(len(served_head_indices(late, meta)), 1)
+        self.assertEqual(len(served_head_indices(early, meta)), 5)
+        self.assertEqual(len(served_head_indices(late, meta)), 3)
         self.assertGreater(early.support_deficit, late.support_deficit)
         self.assertIn("heads", str(early.support_bottleneck))
 
@@ -418,37 +448,6 @@ class AllocationCapTest(unittest.TestCase):
         np.testing.assert_allclose(_capped_allocation(alpha, 0.0), alpha)
 
 
-class TermSubsetTest(unittest.TestCase):
-    def terms(self, probability, seed):
-        conjunction = stratum(
-            term(0, "T.year", 1952), term(1, "K.keyword", 1), term(2, "T.phonetic", 3)
-        )
-        return _forced_terms_for_stratum(
-            conjunction, np.random.default_rng(seed), probability
-        )
-
-    def test_zero_probability_always_forces_the_whole_conjunction(self):
-        for seed in range(20):
-            self.assertEqual(len(self.terms(0.0, seed)), 3)
-
-    def test_certain_subsetting_always_forces_a_non_empty_proper_subset(self):
-        sizes = {len(self.terms(1.0, seed)) for seed in range(40)}
-        self.assertTrue(sizes)
-        self.assertTrue(all(1 <= size <= 2 for size in sizes), sizes)
-
-    def test_a_depth_one_stratum_is_never_subsetted(self):
-        single = stratum(term(0, "T.year", 1952))
-        self.assertEqual(
-            len(_forced_terms_for_stratum(single, np.random.default_rng(0), 1.0)), 1
-        )
-
-    def test_terms_stay_ordered_by_column(self):
-        for seed in range(20):
-            chosen = self.terms(1.0, seed)
-            indices = [item.column_index for item in chosen]
-            self.assertEqual(indices, sorted(indices))
-
-
 class ConfigValidationTest(unittest.TestCase):
     def config(self, **conjunctive):
         return {
@@ -478,10 +477,12 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_stratum_share"):
             validate_config(self.config(max_stratum_share=1.5))
 
-    def test_an_out_of_range_term_subset_probability_is_rejected(self):
+    def test_the_removed_term_subset_key_is_rejected_rather_than_ignored(self):
+        # Silently ignoring it would leave a config that reads as if partial
+        # conjunctions were still being generated.
         config = self.config(max_depth=2)
-        config["rare_auxiliary"]["term_subset_probability"] = 1.5
-        with self.assertRaisesRegex(ValueError, "term_subset_probability"):
+        config["rare_auxiliary"]["term_subset_probability"] = 0.5
+        with self.assertRaisesRegex(ValueError, "was removed"):
             validate_config(config)
 
 
@@ -510,6 +511,264 @@ class LiveSourceCapabilityTest(unittest.TestCase):
         # conjunction guard did not swallow it.
         with self.assertRaises(RuntimeError):
             self.source()._root_stratum_candidates(stratum(term(0, "T.year", 1952)))
+
+
+class RealizationProbabilityTest(unittest.TestCase):
+    """A tail predicate also has to pick its exact threshold."""
+
+    def tail(self, *, expected_lower, target_rows, probability=0.25):
+        return RootDataStratum(
+            stratum_id="T.year:ge:1951",
+            column_index=0,
+            column_name="T.year",
+            region_type="lower_tail",
+            lower=1951,
+            probability=probability,
+            expected_target_rows=target_rows,
+            expected_lower_count=expected_lower,
+        )
+
+    def kwargs(self):
+        return dict(
+            metadata=metadata(),
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            root_table="T",
+        )
+
+    def test_a_tail_term_without_its_factor_is_refused_not_guessed(self):
+        # Scoring it with the bare operator probability is the overestimate.
+        bare = stratum(
+            StratumTerm(
+                column_index=0,
+                column_name="T.year",
+                region_type="lower_tail",
+                lower=1951,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "realization probability"):
+            conditional_head_support(bare, 2, **self.kwargs())
+
+    def test_the_factor_is_the_threshold_weighted_operator_probability(self):
+        # 1000 rows in the region, but only 50 of the expected contexts pick
+        # this exact threshold, so the per-row factor is 0.05, not p_lower=0.2.
+        filled = with_realization_probabilities(
+            self.tail(expected_lower=50.0, target_rows=1000.0), PROBABILITIES
+        )
+        self.assertAlmostEqual(filled.terms[0].realization_probability, 0.05, places=9)
+        support = conditional_head_support(filled, 2, **self.kwargs())
+        self.assertAlmostEqual(support, 1_000_000 * 0.25 * 0.05, places=3)
+
+    def test_ignoring_threshold_selection_would_overestimate_fourfold_here(self):
+        filled = with_realization_probabilities(
+            self.tail(expected_lower=50.0, target_rows=1000.0), PROBABILITIES
+        )
+        honest = conditional_head_support(filled, 2, **self.kwargs())
+        naive = 1_000_000 * 0.25 * PROBABILITIES["lower"]
+        self.assertAlmostEqual(naive / honest, PROBABILITIES["lower"] / 0.05, places=6)
+        self.assertLess(honest, naive)
+
+    def test_the_gap_grows_with_column_cardinality(self):
+        # The omitted factor is the mass-weighted mean of 1 / #valid thresholds,
+        # so it shrinks as the ordered domain grows.  This is why the
+        # overestimate reaches orders of magnitude on a real column.
+        factors = []
+        for size in (4, 64, 1024):
+            probabilities = np.full(size, 1.0 / size)
+            expected = _expected_lower_threshold_counts(
+                probabilities, n_total=1_000_000, p_lower=0.2
+            )
+            # Lowest threshold: the whole column is in the region.
+            factors.append(float(expected[0]) / 1_000_000.0)
+        self.assertTrue(
+            all(later < earlier for earlier, later in zip(factors, factors[1:])), factors
+        )
+        self.assertLess(factors[-1], 0.2)
+        self.assertGreater(0.2 / factors[-1], 50.0)
+
+    def test_an_equality_term_reduces_to_the_plain_operator_probability(self):
+        filled = with_realization_probabilities(
+            RootDataStratum(
+                stratum_id="T.year:eq:1952",
+                column_index=0,
+                column_name="T.year",
+                region_type="equality",
+                value=1952,
+                probability=0.25,
+                expected_target_rows=1000.0,
+                expected_equality_count=1000.0 * PROBABILITIES["equality"],
+            ),
+            PROBABILITIES,
+        )
+        self.assertAlmostEqual(
+            filled.terms[0].realization_probability, PROBABILITIES["equality"], places=9
+        )
+
+    def test_a_conjunction_multiplies_both_terms_realized_factors(self):
+        meta = metadata()
+        tail = with_realization_probabilities(
+            self.tail(expected_lower=50.0, target_rows=1000.0), PROBABILITIES
+        )
+        conjunction = RootDataStratum(
+            stratum_id="tail&eq",
+            column_index=0,
+            column_name="T.year",
+            region_type="lower_tail",
+            terms=(tail.terms[0], term(2, "T.phonetic", 1)),
+            probability=0.25,
+            expected_target_rows=1000.0,
+        )
+        # Head 3 is on the child table, so the table-subset factor applies too.
+        table_factor = table_subset_inclusion_probability(
+            frozenset({"K"}), metadata=meta, root_table="T"
+        )
+        support = conditional_head_support(conjunction, 3, **self.kwargs())
+        self.assertAlmostEqual(
+            support,
+            1_000_000 * 0.25 * 0.05 * PROBABILITIES["equality"] * table_factor,
+            places=3,
+        )
+
+
+def chain_metadata() -> ModelMetadata:
+    """Chain schema ``R -> P -> C``: forcing C needs P to stay rooted."""
+
+    return ModelMetadata(
+        columns=(
+            ColumnMetadata("R.a", ColumnKind.DATA, (0, 1, OUTER_MISSING), table="R"),
+            ColumnMetadata("P.b", ColumnKind.DATA, (0, 1, OUTER_MISSING), table="P"),
+            ColumnMetadata("C.c", ColumnKind.DATA, (0, 1, OUTER_MISSING), table="C"),
+            ColumnMetadata("I_R", ColumnKind.INDICATOR, (0, 1), table="R"),
+            ColumnMetadata("I_P", ColumnKind.INDICATOR, (0, 1), table="P"),
+            ColumnMetadata("I_C", ColumnKind.INDICATOR, (0, 1), table="C"),
+        ),
+        full_join_cardinality=8.0,
+        join_root="R",
+        join_tables=("R", "P", "C"),
+        join_edges=(("R", "P"), ("P", "C")),
+    )
+
+
+class RootPathClosureTest(unittest.TestCase):
+    EDGES = (("R", "P"), ("P", "C"))
+
+    def test_forcing_a_grandchild_pulls_in_its_parent(self):
+        self.assertEqual(
+            _root_paths_closure({"C"}, "R", self.EDGES), {"R", "P", "C"}
+        )
+
+    def test_the_root_alone_needs_nothing_added(self):
+        self.assertEqual(_root_paths_closure({"R"}, "R", self.EDGES), {"R"})
+
+    def test_an_unreachable_table_is_an_error_not_a_silent_drop(self):
+        with self.assertRaisesRegex(ValueError, "not reachable"):
+            _root_paths_closure({"Z"}, "R", self.EDGES + (("Z", "Y"),))
+
+    def test_an_edgeless_graph_refuses_a_non_root_table(self):
+        with self.assertRaisesRegex(ValueError, "no edges"):
+            _root_paths_closure({"P"}, "R", ())
+
+
+class ForcedSubsetConnectivityTest(unittest.TestCase):
+    """A forced term must never produce a subset disconnected from the root."""
+
+    def generator(self) -> PredicateTrainingContextGenerator:
+        return PredicateTrainingContextGenerator(
+            {
+                "enabled": True,
+                "table_subset_sampling": "neurocard_table_dropout_rooted",
+                "wildcard_probability": 0.0,
+                "equality_probability": 1.0,
+                "lower_bound_probability": 0.0,
+                "upper_bound_probability": 0.0,
+                "native_range_probability": 0.0,
+                "seed": 0,
+            }
+        )
+
+    def child_stratum(self) -> RootDataStratum:
+        return RootDataStratum(
+            stratum_id="C.c:eq:1",
+            column_index=2,
+            column_name="C.c",
+            region_type="equality",
+            value=1,
+        )
+
+    def contexts_for(self, rows, seed):
+        generated, _, _ = self.generator().generate_forced_stratum_batch(
+            encoded_rows=np.asarray(rows, dtype=np.int64),
+            metadata=chain_metadata(),
+            strata=tuple([self.child_stratum()] * len(rows)),
+            rng=np.random.default_rng(seed),
+        )
+        return generated
+
+    def test_forcing_the_grandchild_keeps_the_subset_rooted(self):
+        # Table dropout will omit P on many of these rows.  Before the
+        # root-path closure, forcing C back in afterwards produced {R, C},
+        # with C hanging off nothing.
+        rows = [[1, 1, 1, 1, 1, 1]] * 64
+        forced_any = False
+        for context in self.contexts_for(rows, seed=7):
+            tables = set(context.included_tables)
+            if not tables:
+                continue
+            forced_any = True
+            self.assertEqual(context.forced_term_columns, (2,))
+            self.assertEqual(tables, {"R", "P", "C"}, context.included_tables)
+        self.assertTrue(forced_any, "no context forced the stratum")
+
+    def test_a_row_without_the_forced_table_degrades_to_wildcards(self):
+        # P and C are both outer-missing, so no rooted subset can carry the
+        # forced term and the context must pin nothing at all.
+        missing = 2  # encoded id of OUTER_MISSING in the data domains
+        rows = [[1, missing, missing, 1, 0, 0]] * 16
+        contexts = self.contexts_for(rows, seed=3)
+        self.assertTrue(contexts)
+        for context in contexts:
+            self.assertEqual(context.forced_term_columns, ())
+            self.assertEqual(set(context.included_tables), set())
+
+    def test_a_path_table_missing_from_the_row_also_degrades_to_wildcards(self):
+        # C present but its parent P outer-missing: there is no rooted path to
+        # the forced table, so the context must not be emitted as if there were.
+        missing = 2
+        rows = [[1, missing, 1, 1, 0, 1]] * 16
+        for context in self.contexts_for(rows, seed=11):
+            self.assertEqual(context.forced_term_columns, ())
+            self.assertEqual(set(context.included_tables), set())
+
+
+class ExactSupportEventTest(unittest.TestCase):
+    """Only a context that pinned every term counts as an exact event."""
+
+    def context(self, forced):
+        return GeneratedTrainingContext(
+            tokens=(),
+            included_tables=frozenset(),
+            inverse_fanout_columns=frozenset(),
+            ordinary_predicates={},
+            encoded_two_slot_row=None,
+            forced_term_columns=tuple(forced),
+        )
+
+    def test_the_complete_conjunction_counts(self):
+        conjunction = stratum(term(0, "T.year", 1952), term(1, "K.keyword", 1))
+        self.assertTrue(forced_prefix_is_complete(self.context((0, 1)), conjunction))
+
+    def test_an_absent_table_wildcard_context_does_not_count(self):
+        conjunction = stratum(term(0, "T.year", 1952), term(1, "K.keyword", 1))
+        self.assertFalse(forced_prefix_is_complete(self.context(()), conjunction))
+
+    def test_a_partial_prefix_does_not_count(self):
+        conjunction = stratum(term(0, "T.year", 1952), term(1, "K.keyword", 1))
+        self.assertFalse(forced_prefix_is_complete(self.context((0,)), conjunction))
+
+    def test_a_depth_one_stratum_still_counts(self):
+        self.assertTrue(
+            forced_prefix_is_complete(self.context((0,)), stratum(term(0, "T.year", 1952)))
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
