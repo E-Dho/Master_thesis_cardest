@@ -1027,7 +1027,7 @@ class RareSupportSampleSource:
         self.conjunctive_status = dict(getattr(self.provider, "conjunctive_status", {}))
         if self.conjunctive_status.get("requested") and not self.conjunctive_status.get("applied"):
             print(
-                "[rare_support] conjunctive discovery requested but unavailable:",
+                "[rare_support] conjunctive discovery requested but not applied:",
                 self.conjunctive_status.get("reason"),
                 flush=True,
             )
@@ -1221,6 +1221,7 @@ def _provider_for_source(
             source.dataset.encoded_rows,
             source="synthetic_materialized_full_join",
             root_column_semantics=discovery_config.get("root_column_semantics"),
+            max_domain_size=discovery_config.get("max_candidate_domain_size"),
         )
     dataset = getattr(source, "dataset", None)
     if dataset is not None and hasattr(dataset, "encoded_rows"):
@@ -1229,6 +1230,7 @@ def _provider_for_source(
             dataset.encoded_rows,
             source="materialized_full_join",
             root_column_semantics=discovery_config.get("root_column_semantics"),
+            max_domain_size=discovery_config.get("max_candidate_domain_size"),
         )
     base = getattr(source, "base_source", None)
     if base is not None:
@@ -1257,6 +1259,7 @@ def _provider_for_source(
                 rows,
                 source="prepared_sample_rows_fixture",
                 root_column_semantics=discovery_config.get("root_column_semantics"),
+                max_domain_size=discovery_config.get("max_candidate_domain_size"),
             )
     raise NotImplementedError(
         "importance sampling requires exact root-stratum support from a live "

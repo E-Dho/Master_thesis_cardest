@@ -202,9 +202,17 @@ class ExactRootStratumProvider:
         row_weights: np.ndarray | None = None,
         source: str = "exact",
         mass_diagnostics: Mapping[str, Any] | None = None,
+        extension_column_masses: Mapping[int, "RootColumnMass"] | None = None,
     ) -> None:
         self.metadata = metadata
         self.column_masses = dict(column_masses)
+        # Depth-1 strata stay root-only, because the live sampler imposes them
+        # by filtering the root join-count table.  A conjunction is only ever
+        # sampled from materialized rows, so its *extension* terms may come
+        # from any DATA column; without a separate pool every extension term
+        # would be a root column and require_distinct_tables would reject all
+        # of them, leaving conjunctive discovery silently inert.
+        self.extension_column_masses = dict(extension_column_masses or {})
         self.encoded_rows = None if encoded_rows is None else np.asarray(encoded_rows, dtype=np.int64)
         self.row_weights = None if row_weights is None else np.asarray(row_weights, dtype=float)
         self.source = source
@@ -220,18 +228,26 @@ class ExactRootStratumProvider:
         *,
         source: str = "materialized_full_join",
         root_column_semantics: Mapping[str, str] | None = None,
+        max_domain_size: int | None = None,
     ) -> "ExactRootStratumProvider":
         encoded_rows = np.asarray(encoded_rows, dtype=np.int64)
         root = metadata.join_root
         masses: dict[int, RootColumnMass] = {}
+        extensions: dict[int, RootColumnMass] = {}
+        limit = None if max_domain_size is None else int(max_domain_size)
         for column_index, column in enumerate(metadata.columns):
-            if column.kind != ColumnKind.DATA or column.table != root:
+            if column.kind != ColumnKind.DATA:
+                continue
+            # The same cap the root-JCT provider honours, applied to both pools
+            # so widening the extension pool cannot quietly allocate a mass
+            # vector per high-cardinality column.
+            if limit is not None and column.domain_size > limit:
                 continue
             counts = np.bincount(
                 encoded_rows[:, column_index],
                 minlength=column.domain_size,
             ).astype(float)
-            masses[column_index] = RootColumnMass(
+            mass = RootColumnMass(
                 column_index=column_index,
                 values=column.domain,
                 counts=counts,
@@ -239,7 +255,18 @@ class ExactRootStratumProvider:
                 source=source,
                 semantic_type=_semantic_for_column(column.name, root_column_semantics),
             )
-        return cls(metadata, masses, encoded_rows=encoded_rows, source=source)
+            # Every DATA column can extend a conjunction; only root columns can
+            # seed a depth-1 stratum.
+            extensions[column_index] = mass
+            if column.table == root:
+                masses[column_index] = mass
+        return cls(
+            metadata,
+            masses,
+            encoded_rows=encoded_rows,
+            source=source,
+            extension_column_masses=extensions,
+        )
 
     @classmethod
     def from_neurocard_root_jct(
@@ -479,6 +506,40 @@ class ExactRootStratumProvider:
                 return 0.0
         return float(accumulated.sum()) / total
 
+    def _candidates_for_masses(
+        self,
+        masses: Mapping[int, "RootColumnMass"],
+        *,
+        n_total: int,
+        predicate_probabilities: Mapping[str, float],
+        threshold: float,
+    ) -> list[RootDataStratum]:
+        """Depth-1 region candidates for a set of column masses."""
+
+        candidates: list[RootDataStratum] = []
+        for column_index, mass in masses.items():
+            column = self.metadata.columns[column_index]
+            builder = (
+                _numeric_root_candidates
+                if mass.semantic_type == "ordered"
+                else _categorical_root_candidates
+            )
+            candidates.extend(
+                builder(
+                    column_index,
+                    column.name,
+                    mass.values,
+                    mass.counts,
+                    mass.total_count,
+                    n_total=n_total,
+                    predicate_probabilities=predicate_probabilities,
+                    threshold=threshold,
+                    source=mass.source,
+                    semantic_type=mass.semantic_type,
+                )
+            )
+        return candidates
+
     def extend_with_conjunctions(
         self,
         seeds: "tuple[RootDataStratum, ...]",
@@ -490,6 +551,7 @@ class ExactRootStratumProvider:
         beam_width: int,
         minimum_joint_rows: float,
         require_distinct_tables: bool,
+        extensions: "tuple[RootDataStratum, ...] | None" = None,
     ) -> "tuple[RootDataStratum, ...]":
         """Beam search for conjunctions, scored by repairable per-head deficit.
 
@@ -513,7 +575,15 @@ class ExactRootStratumProvider:
         seeds = tuple(
             with_realization_probabilities(seed, predicate_probabilities) for seed in seeds
         )
-        pool = [seed.terms[0] for seed in seeds]
+        # Extension terms default to the seeds' own, which is only useful when
+        # the seeds already span several tables.  Discovery passes an explicit
+        # all-DATA-column pool so a root-only seed set can still reach across
+        # tables.
+        extension_strata = tuple(
+            with_realization_probabilities(candidate, predicate_probabilities)
+            for candidate in (seeds if extensions is None else extensions)
+        )
+        pool = [candidate.terms[0] for candidate in extension_strata]
         beam = list(seeds)
         produced: dict[str, RootDataStratum] = {}
         for _ in range(max_depth - 1):
@@ -593,60 +663,62 @@ class ExactRootStratumProvider:
                 "unavailable; falling back to depth-1 strata"
             )
             conjunctive_requested = False
-        candidates: list[RootDataStratum] = []
-        for column_index, mass in self.column_masses.items():
-            column = self.metadata.columns[column_index]
-            values = mass.values
-            counts = mass.counts
-            if mass.semantic_type == "ordered":
-                candidates.extend(
-                    _numeric_root_candidates(
-                        column_index,
-                        column.name,
-                        values,
-                        counts,
-                        mass.total_count,
-                        n_total=n_total,
-                        predicate_probabilities=predicate_probabilities,
-                        threshold=minimum_expected_context_support,
-                        source=mass.source,
-                        semantic_type=mass.semantic_type,
-                    )
-                )
-            else:
-                candidates.extend(
-                    _categorical_root_candidates(
-                        column_index,
-                        column.name,
-                        values,
-                        counts,
-                        mass.total_count,
-                        n_total=n_total,
-                        predicate_probabilities=predicate_probabilities,
-                        threshold=minimum_expected_context_support,
-                        source=mass.source,
-                        semantic_type=mass.semantic_type,
-                    )
-                )
+        candidates = self._candidates_for_masses(
+            self.column_masses,
+            n_total=n_total,
+            predicate_probabilities=predicate_probabilities,
+            threshold=minimum_expected_context_support,
+        )
         if conjunctive_requested:
             root = self.metadata.join_root
-            rescored = [
-                with_conditional_score(
-                    candidate,
-                    metadata=self.metadata,
-                    n_total=n_total,
-                    predicate_probabilities=predicate_probabilities,
-                    threshold=minimum_expected_context_support,
-                    root_table=root,
-                )
-                for candidate in candidates
-                if candidate.probability > 0.0
-            ]
-            seeds = tuple(
-                sorted(rescored, key=lambda item: (-item.support_deficit, item.stratum_id))[
-                    : max(1, int(conjunctive.get("seed_width", 32)))
+            require_distinct_tables = bool(conjunctive.get("require_distinct_tables", True))
+
+            def rescore(items: Iterable[RootDataStratum]) -> list[RootDataStratum]:
+                return [
+                    with_conditional_score(
+                        item,
+                        metadata=self.metadata,
+                        n_total=n_total,
+                        predicate_probabilities=predicate_probabilities,
+                        threshold=minimum_expected_context_support,
+                        root_table=root,
+                    )
+                    for item in items
+                    if item.probability > 0.0
                 ]
+
+            def by_deficit(items: list[RootDataStratum], width: int) -> tuple[RootDataStratum, ...]:
+                return tuple(
+                    sorted(items, key=lambda item: (-item.support_deficit, item.stratum_id))[
+                        : max(1, int(width))
+                    ]
+                )
+
+            rescored = rescore(candidates)
+            seeds = by_deficit(rescored, conjunctive.get("seed_width", 32))
+            # Seeds are root-only because a depth-1 stratum has to be samplable
+            # on the live path too.  Extension terms are drawn from every DATA
+            # column, or a root-only pool would make require_distinct_tables
+            # reject every extension and leave discovery inert.
+            extension_masses = self.extension_column_masses or self.column_masses
+            extension_pool = by_deficit(
+                rescore(
+                    self._candidates_for_masses(
+                        extension_masses,
+                        n_total=n_total,
+                        predicate_probabilities=predicate_probabilities,
+                        threshold=minimum_expected_context_support,
+                    )
+                ),
+                conjunctive.get("extension_width", conjunctive.get("seed_width", 32)),
             )
+            cross_table = tuple(
+                candidate
+                for candidate in extension_pool
+                if self.metadata.columns[candidate.column_index].table != root
+            )
+            self.conjunctive_status["extension_candidates"] = len(extension_pool)
+            self.conjunctive_status["cross_table_extension_candidates"] = len(cross_table)
             conjunctions = self.extend_with_conjunctions(
                 seeds,
                 n_total=n_total,
@@ -655,13 +727,21 @@ class ExactRootStratumProvider:
                 max_depth=int(conjunctive.get("max_depth", 2)),
                 beam_width=int(conjunctive.get("beam_width", 32)),
                 minimum_joint_rows=float(conjunctive.get("minimum_joint_rows", 32.0)),
-                require_distinct_tables=bool(
-                    conjunctive.get("require_distinct_tables", True)
-                ),
+                require_distinct_tables=require_distinct_tables,
+                extensions=extension_pool,
             )
             candidates = list(rescored) + list(conjunctions)
-            self.conjunctive_status["applied"] = True
             self.conjunctive_status["conjunctive_candidates"] = len(conjunctions)
+            if not conjunctions:
+                self.conjunctive_status["reason"] = (
+                    "require_distinct_tables=true but every extension candidate is on "
+                    f"the root table {root!r}, so no conjunction can be formed"
+                    if require_distinct_tables and not cross_table
+                    else (
+                        "the beam search found no region above minimum_joint_rows; "
+                        "lower it or widen beam_width/extension_width"
+                    )
+                )
         selected = sorted(
             (
                 candidate
@@ -670,9 +750,19 @@ class ExactRootStratumProvider:
             ),
             key=lambda item: (-item.support_deficit, item.expected_target_rows, item.stratum_id),
         )[: max(0, int(max_selected_strata))]
-        self.conjunctive_status["conjunctive_selected"] = sum(
-            1 for item in selected if item.is_conjunctive
-        )
+        conjunctive_selected = sum(1 for item in selected if item.is_conjunctive)
+        self.conjunctive_status["conjunctive_selected"] = conjunctive_selected
+        # "applied" means conjunctions are actually in the selection.  Reporting
+        # applied=true with a null reason while every selected stratum is
+        # depth-1 is how a run can look like it exercised the feature when it
+        # did not.
+        self.conjunctive_status["applied"] = bool(conjunctive_selected)
+        if conjunctive_requested and not conjunctive_selected:
+            if self.conjunctive_status.get("reason") is None:
+                self.conjunctive_status["reason"] = (
+                    "conjunctions were discovered but none ranked into the top "
+                    "max_selected_strata by support deficit"
+                )
         if not selected:
             return ()
         deficits = np.array([max(0.0, item.support_deficit) for item in selected], dtype=float)

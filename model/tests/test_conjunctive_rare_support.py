@@ -1128,5 +1128,143 @@ class MultiHopTableSurvivalTest(unittest.TestCase):
         )
 
 
+def chain_rows() -> np.ndarray:
+    """40 rows on the R -> P -> C chain, all three tables present."""
+
+    return np.array(
+        [[index % 3, index % 3, index % 2, 1, 1, 1] for index in range(40)],
+        dtype=np.int64,
+    )
+
+
+def chain_data_metadata() -> ModelMetadata:
+    """``chain_metadata`` with wider DATA domains so regions are non-trivial."""
+
+    return ModelMetadata(
+        columns=(
+            ColumnMetadata("R.a", ColumnKind.DATA, (0, 1, 2), table="R"),
+            ColumnMetadata("P.b", ColumnKind.DATA, (0, 1, 2), table="P"),
+            ColumnMetadata("C.c", ColumnKind.DATA, (0, 1), table="C"),
+            ColumnMetadata("I_R", ColumnKind.INDICATOR, (0, 1), table="R"),
+            ColumnMetadata("I_P", ColumnKind.INDICATOR, (0, 1), table="P"),
+            ColumnMetadata("I_C", ColumnKind.INDICATOR, (0, 1), table="C"),
+        ),
+        full_join_cardinality=40.0,
+        join_root="R",
+        join_tables=("R", "P", "C"),
+        join_edges=(("R", "P"), ("P", "C")),
+    )
+
+
+class ProductionProviderDiscoveryTest(unittest.TestCase):
+    """The provider the training pipeline actually builds must find conjunctions."""
+
+    def provider(self):
+        return ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows()
+        )
+
+    def discover(self, source=None, **conjunctive):
+        options = dict(
+            enabled=True,
+            max_depth=2,
+            beam_width=8,
+            seed_width=8,
+            minimum_joint_rows=1.0,
+            require_distinct_tables=True,
+        )
+        options.update(conjunctive)
+        source = source or self.provider()
+        selected = source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=8,
+            conjunctive=options,
+        )
+        return source, selected
+
+    def test_seed_masses_stay_root_only(self):
+        source = self.provider()
+        meta = chain_data_metadata()
+        self.assertEqual(
+            [meta.columns[index].table for index in source.column_masses], ["R"]
+        )
+
+    def test_extension_masses_cover_every_data_column(self):
+        source = self.provider()
+        meta = chain_data_metadata()
+        self.assertEqual(
+            sorted(meta.columns[index].name for index in source.extension_column_masses),
+            ["C.c", "P.b", "R.a"],
+        )
+
+    def test_cross_table_conjunctions_are_actually_discovered(self):
+        # The regression: with a root-only extension pool every extension was
+        # rejected by require_distinct_tables and discovery was silently inert.
+        source, selected = self.discover()
+        self.assertGreater(source.conjunctive_status["conjunctive_candidates"], 0)
+        self.assertGreater(source.conjunctive_status["conjunctive_selected"], 0)
+        self.assertIn(2, [item.depth for item in selected])
+
+    def test_the_conjunctions_span_tables(self):
+        meta = chain_data_metadata()
+        _, selected = self.discover()
+        spanning = [
+            item for item in selected if item.is_conjunctive and len(item.tables(meta)) > 1
+        ]
+        self.assertTrue(spanning, [item.stratum_id for item in selected])
+
+    def test_depth_one_strata_remain_root_only(self):
+        # Non-root columns may extend a conjunction but must never become a
+        # depth-1 stratum, which the live sampler could not impose.
+        meta = chain_data_metadata()
+        _, selected = self.discover()
+        for item in selected:
+            if item.depth == 1:
+                self.assertEqual(
+                    meta.columns[item.column_index].table, "R", item.stratum_id
+                )
+
+    def test_applied_is_false_when_nothing_conjunctive_was_selected(self):
+        # A root-only extension pool is exactly the old behaviour; it must now
+        # report itself instead of claiming the feature was applied.
+        source = self.provider()
+        source.extension_column_masses = dict(source.column_masses)
+        source, selected = self.discover(source=source)
+        self.assertEqual(source.conjunctive_status["cross_table_extension_candidates"], 0)
+        self.assertFalse(source.conjunctive_status["applied"])
+        self.assertIn(
+            "require_distinct_tables", str(source.conjunctive_status["reason"])
+        )
+        self.assertEqual({item.depth for item in selected}, {1})
+
+    def test_an_impossible_joint_row_floor_reports_the_search_not_the_pool(self):
+        source, _ = self.discover(minimum_joint_rows=1e9)
+        self.assertEqual(source.conjunctive_status["conjunctive_candidates"], 0)
+        self.assertFalse(source.conjunctive_status["applied"])
+        self.assertIn("minimum_joint_rows", str(source.conjunctive_status["reason"]))
+
+    def test_a_successful_run_reports_no_reason(self):
+        source, _ = self.discover()
+        self.assertTrue(source.conjunctive_status["applied"])
+        self.assertIsNone(source.conjunctive_status["reason"])
+
+    def test_a_too_wide_column_is_excluded_from_both_pools(self):
+        # Widening the extension pool must honour the same cap the root-JCT
+        # provider does, or a high-cardinality column allocates a mass vector.
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows(), max_domain_size=2
+        )
+        meta = chain_data_metadata()
+        kept = {meta.columns[index].name for index in source.extension_column_masses}
+        self.assertEqual(kept, {"C.c"})
+        self.assertEqual(dict(source.column_masses), {})
+
+    def test_the_extension_width_caps_the_pool(self):
+        source, _ = self.discover(extension_width=1)
+        self.assertEqual(source.conjunctive_status["extension_candidates"], 1)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

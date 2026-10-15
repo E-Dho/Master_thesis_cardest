@@ -1185,6 +1185,15 @@ counts taken from the provider's materialized rows. Regions whose joint row
 count falls below `minimum_joint_rows` are pruned, because oversampling a
 region with a handful of rows means resampling those same rows every step.
 
+Seeds and extension terms come from different pools. A depth-1 stratum has to
+be imposable on the live path, which filters the root join-count table, so
+seeds stay root-only exactly as before. A conjunction is only ever sampled
+from materialized rows, so its extension terms are drawn from every DATA
+column. With a root-only extension pool, `require_distinct_tables` rejects
+every extension and discovery finds nothing at all, which is inert rather than
+conservative. The extension pool honours the same
+`max_candidate_domain_size` cap as the root pool.
+
 Configuration lives under `rare_support.discovery.conjunctive`:
 
 - `enabled`: turns conjunctive discovery on. Default `false`, which keeps the
@@ -1193,6 +1202,8 @@ Configuration lives under `rare_support.discovery.conjunctive`:
 - `beam_width`: candidates carried forward per search level.
 - `seed_width`: depth-1 strata used to seed the search.
 - `minimum_joint_rows`: joint row floor below which a region is pruned.
+- `extension_width`: how many scored extension candidates the search may draw
+  terms from, across all DATA columns. Defaults to `seed_width`.
 - `require_distinct_tables`: when true, each term must come from a table not
   already used by the conjunction, which targets the cross-table prefixes that
   single-column strata cannot express.
@@ -1224,7 +1235,16 @@ conjunction that spans non-root tables and reports
 When conjunctive discovery is requested on a source that cannot serve it,
 discovery falls back to depth-1 and records why in `conjunctive_status`, which
 is surfaced in the rare-support summary and printed once at startup. It is a
-loud fallback, not a silent one. In practice this means the JOB-light configs
+loud fallback, not a silent one.
+
+`conjunctive_status.applied` means conjunctions are actually present in the
+selection, not merely that the search ran: a run where none were found or none
+ranked into `max_selected_strata` reports `applied: false` with a reason naming
+the cause, alongside `extension_candidates` and
+`cross_table_extension_candidates` so an empty cross-table pool is visible
+rather than inferred. Reporting `applied: true` with no reason while every
+selected stratum is depth-1 is how a run can look like it exercised the feature
+when it did not. In practice this means the JOB-light configs
 that run `sampling_mode: live` keep the previous depth-1 behaviour; a run that
 needs conjunctions has to use a fixture or prepared-directory source.
 

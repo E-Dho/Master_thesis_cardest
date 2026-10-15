@@ -395,7 +395,11 @@ def validate_config(config: dict[str, Any]) -> None:
                     "rare_support.discovery.conjunctive.max_depth must be at least 2 "
                     "when conjunctive discovery is enabled"
                 )
-            for key, minimum in (("beam_width", 1), ("seed_width", 1)):
+            for key, minimum in (
+                ("beam_width", 1),
+                ("seed_width", 1),
+                ("extension_width", 1),
+            ):
                 if int(conjunctive.get(key, 32)) < minimum:
                     raise ValueError(
                         f"rare_support.discovery.conjunctive.{key} must be >= {minimum}"
