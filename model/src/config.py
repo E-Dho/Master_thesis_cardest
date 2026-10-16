@@ -445,6 +445,12 @@ def validate_config(config: dict[str, Any]) -> None:
                 required_columns,
                 "rare_support.discovery.conjunctive.required_extension_columns",
             )
+            if "conditional_extension_width" in conjunctive:
+                if int(conjunctive["conditional_extension_width"]) < 0:
+                    raise ValueError(
+                        "rare_support.discovery.conjunctive.conditional_extension_width "
+                        "must be nonnegative (0 disables conditional ranking)"
+                    )
             rows_floor = int(conjunctive.get("minimum_materialized_rows", 0) or 0)
             if rows_floor < 0:
                 raise ValueError(

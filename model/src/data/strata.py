@@ -498,7 +498,11 @@ class ExactRootStratumProvider:
         term: "StratumTerm",
         predicate_probabilities: Mapping[str, float],
     ) -> np.ndarray:
-        key = _term_cache_key(term)
+        # The vector depends on the operator probabilities as well as the term,
+        # so they belong in the key: a provider reused across two discovery
+        # calls with different probabilities would otherwise answer with the
+        # first call's factors.
+        key = _term_cache_key(term) + _probability_cache_key(predicate_probabilities)
         cached = self._term_factor_cache.get(key)
         if cached is not None:
             return cached
@@ -614,6 +618,153 @@ class ExactRootStratumProvider:
                 )
             )
         return candidates
+
+    def _rows_matching(self, stratum: RootDataStratum) -> np.ndarray:
+        mask = np.ones(self.encoded_rows.shape[0], dtype=bool)
+        for term in stratum.terms:
+            mask &= self._term_domain_mask(term)[
+                self.encoded_rows[:, int(term.column_index)]
+            ]
+        return mask
+
+    def conditional_extension_counts(
+        self,
+        seeds: "tuple[RootDataStratum, ...]",
+        masses: Mapping[int, "RootColumnMass"],
+        *,
+        minimum_joint_rows: float,
+        per_seed_width: int,
+        require_distinct_tables: bool,
+    ) -> dict[tuple[int, int], float]:
+        """Smallest joint count of each (column, value) with any seed.
+
+        Ranking extensions by their *marginal* count is the wrong objective for
+        this search: a value can be common overall and almost absent alongside
+        a particular seed, and that dependence is exactly what a conjunctive
+        stratum is for.  Marginal pruning drops those values before the beam
+        ever sees them.
+
+        One ``bincount`` of a column over the rows a seed matches gives the
+        joint count for *every* value of that column at once, so conditioning
+        costs one pass per (seed, column) rather than one per candidate pair,
+        and the count it returns is the exact joint count the beam would have
+        computed anyway.
+        """
+
+        if self.encoded_rows is None:
+            return {}
+        weights = self.row_weights
+        best: dict[tuple[int, int], float] = {}
+        width = int(per_seed_width)
+        if width <= 0:
+            # Explicitly disabled, which leaves the marginal pool as the only
+            # route.  Useful for isolating that path; not a sensible default,
+            # because marginal ranking cannot see a joint tail.
+            return {}
+        for seed in seeds:
+            seed_mask = self._rows_matching(seed)
+            if not seed_mask.any():
+                continue
+            seed_columns = set(seed.column_indices)
+            seed_tables = seed.tables(self.metadata)
+            seed_rows = self.encoded_rows[seed_mask]
+            seed_weights = None if weights is None else weights[seed_mask]
+            for column_index in masses:
+                if column_index in seed_columns:
+                    continue
+                column = self.metadata.columns[column_index]
+                if require_distinct_tables and column.table in seed_tables:
+                    continue
+                counts = np.bincount(
+                    seed_rows[:, column_index],
+                    weights=seed_weights,
+                    minlength=len(column.domain),
+                ).astype(float)
+                eligible = np.flatnonzero(counts >= float(minimum_joint_rows))
+                if eligible.size == 0:
+                    continue
+                rarest = eligible[np.argsort(counts[eligible], kind="stable")[:width]]
+                for encoded_id in rarest:
+                    key = (int(column_index), int(encoded_id))
+                    value = float(counts[int(encoded_id)])
+                    if key not in best or value < best[key]:
+                        best[key] = value
+        return best
+
+    def _conditional_extension_candidates(
+        self,
+        seeds: "tuple[RootDataStratum, ...]",
+        masses: Mapping[int, "RootColumnMass"],
+        *,
+        n_total: int,
+        predicate_probabilities: Mapping[str, float],
+        threshold: float,
+        minimum_joint_rows: float,
+        per_seed_width: int,
+        require_distinct_tables: bool,
+    ) -> list[RootDataStratum]:
+        """Equality candidates for the values that are rarest given a seed."""
+
+        counts = self.conditional_extension_counts(
+            seeds,
+            masses,
+            minimum_joint_rows=minimum_joint_rows,
+            per_seed_width=per_seed_width,
+            require_distinct_tables=require_distinct_tables,
+        )
+        if not counts:
+            return []
+        total = self._total_mass()
+        if total <= 0.0:
+            return []
+        candidates: list[RootDataStratum] = []
+        for (column_index, encoded_id), joint_count in counts.items():
+            mass = masses.get(column_index)
+            if mass is None:
+                continue
+            value = mass.values[encoded_id]
+            if _is_structural_value(value):
+                continue
+            marginal = float(np.asarray(mass.counts, dtype=float)[encoded_id])
+            if marginal <= 0.0 or mass.total_count <= 0.0:
+                continue
+            probability = marginal / float(mass.total_count)
+            candidates.append(
+                _with_score(
+                    RootDataStratum(
+                        stratum_id=(
+                            f"{self.metadata.columns[column_index].name}"
+                            f":eq:{_literal_id(value)}"
+                        ),
+                        column_index=column_index,
+                        column_name=self.metadata.columns[column_index].name,
+                        region_type="equality",
+                        value=value,
+                        # foj_count carries the *conditional* count here, which
+                        # is what ranks the pool; probability stays marginal so
+                        # downstream scoring is unchanged.
+                        foj_count=float(joint_count),
+                        probability=probability,
+                        expected_target_rows=n_total * probability,
+                        expected_equality_count=(
+                            n_total
+                            * probability
+                            * float(predicate_probabilities.get("equality", 0.0))
+                        ),
+                        source=f"{self.source}_conditional",
+                        semantic_type="categorical",
+                    ),
+                    threshold,
+                )
+            )
+        return candidates
+
+    def _total_mass(self) -> float:
+        if self.row_weights is not None:
+            return float(self.row_weights.sum())
+        if self.encoded_rows is not None:
+            return float(self.encoded_rows.shape[0])
+        return float(sum(mass.total_count for mass in self.column_masses.values()))
 
     def extend_with_conjunctions(
         self,
@@ -876,10 +1027,54 @@ class ExactRootStratumProvider:
                     require_distinct_tables=require_distinct_tables,
                 )
             ]
-            extension_pool = by_deficit(
-                eligible,
-                conjunctive.get("extension_width", conjunctive.get("seed_width", 32)),
-            ) if eligible else ()
+            extension_width = max(
+                1, int(conjunctive.get("extension_width", conjunctive.get("seed_width", 32)))
+            )
+            # Conditional candidates come first.  They are the ones chosen for
+            # being rare *given a seed*, which is the dependence this search
+            # exists to find; the marginal pool above is only a prior and on its
+            # own prunes away any value that is common overall.
+            conditional = self._conditional_extension_candidates(
+                seeds,
+                extension_masses,
+                n_total=n_total,
+                predicate_probabilities=predicate_probabilities,
+                threshold=minimum_expected_context_support,
+                minimum_joint_rows=float(conjunctive.get("minimum_joint_rows", 32.0)),
+                per_seed_width=int(conjunctive.get("conditional_extension_width", 8)),
+                require_distinct_tables=require_distinct_tables,
+            )
+            conditional = [
+                with_conditional_score(
+                    item,
+                    metadata=self.metadata,
+                    n_total=n_total,
+                    predicate_probabilities=predicate_probabilities,
+                    threshold=minimum_expected_context_support,
+                    root_table=root,
+                )
+                for item in conditional
+            ]
+            chosen: list[RootDataStratum] = []
+            seen_ids: set[str] = set()
+            for item in sorted(
+                conditional, key=lambda entry: (entry.foj_count, entry.stratum_id)
+            ):
+                if len(chosen) >= extension_width:
+                    break
+                if item.stratum_id in seen_ids:
+                    continue
+                seen_ids.add(item.stratum_id)
+                chosen.append(item)
+            for item in by_deficit(eligible, extension_width) if eligible else ():
+                if len(chosen) >= extension_width:
+                    break
+                if item.stratum_id in seen_ids:
+                    continue
+                seen_ids.add(item.stratum_id)
+                chosen.append(item)
+            extension_pool = tuple(chosen)
+            self.conjunctive_status["conditional_extension_candidates"] = len(conditional)
             cross_table = tuple(
                 candidate
                 for candidate in extension_pool
@@ -940,6 +1135,31 @@ class ExactRootStratumProvider:
         # depth-1 is how a run can look like it exercised the feature when it
         # did not.
         self.conjunctive_status["applied"] = bool(conjunctive_selected)
+        if conjunctive_requested:
+            required_columns = tuple(conjunctive.get("required_extension_columns", ()) or ())
+            covered = {
+                self.metadata.columns[index].name
+                for item in selected
+                if item.is_conjunctive
+                for index in item.column_indices
+            }
+            uncovered = [name for name in required_columns if name not in covered]
+            self.conjunctive_status["required_columns_covered"] = [
+                name for name in required_columns if name in covered
+            ]
+            self.conjunctive_status["required_columns_uncovered"] = uncovered
+            # Being in the candidate pool is not the same as surviving capping,
+            # global ranking, the beam and the final deficit sort.  A run can
+            # otherwise select conjunctions that use none of the columns the
+            # experiment is about and still report success.
+            if uncovered and bool(conjunctive.get("require_conjunctions", False)):
+                raise ValueError(
+                    f"required_extension_columns {uncovered!r} appear in no selected "
+                    f"conjunctive stratum ({conjunctive_selected} were selected). The "
+                    "columns reached the candidate pool but did not survive ranking "
+                    "and selection; widen extension_width or max_selected_strata, or "
+                    "lower minimum_joint_rows"
+                )
         if conjunctive_requested and not conjunctive_selected:
             if self.conjunctive_status.get("reason") is None:
                 self.conjunctive_status["reason"] = (
@@ -1374,6 +1594,17 @@ EXPECTED_SUPPORT_FIELD = {
     "upper": "expected_upper_count",
     "range": "expected_range_support",
 }
+
+
+def _probability_cache_key(
+    predicate_probabilities: Mapping[str, float],
+) -> tuple[Any, ...]:
+    """The operator probabilities a realization factor can depend on."""
+
+    return tuple(
+        float(predicate_probabilities.get(family, 0.0))
+        for family in ("equality", "lower", "upper", "range")
+    )
 
 
 def _term_cache_key(term: "StratumTerm") -> tuple[Any, ...]:

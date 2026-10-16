@@ -1362,6 +1362,17 @@ class ProductionProviderDiscoveryTest(unittest.TestCase):
                 )
                 self.assertTrue(source.conjunctive_status["applied"])
 
+    def test_the_marginal_pool_alone_still_filters_before_truncating(self):
+        # With the conditional route switched off the marginal pool is the only
+        # one, so its filter-then-truncate order is what decides whether a
+        # usable cross-table extension survives a single slot.
+        source, _ = self.discover(extension_width=1, conditional_extension_width=0)
+        status = source.conjunctive_status
+        self.assertEqual(status["conditional_extension_candidates"], 0)
+        self.assertEqual(status["extension_candidates"], 1)
+        self.assertEqual(status["cross_table_extension_candidates"], 1)
+        self.assertGreater(status["conjunctive_candidates"], 0)
+
     def test_ineligible_candidates_are_reported_but_not_pooled(self):
         source, _ = self.discover(extension_width=8)
         status = source.conjunctive_status
@@ -2139,6 +2150,436 @@ class ScaleTest(unittest.TestCase):
             [item.support_deficit for item in capped],
             [item.support_deficit for item in uncapped],
         )
+
+
+class ConditionalExtensionRankingTest(unittest.TestCase):
+    """A marginally common value can still be jointly rare, and must survive.
+
+    The fixture is the case the marginal cap destroys: keyword 0 is the most
+    common keyword overall, but almost never appears with the latest production
+    year.  Ranking extensions by marginal count prunes it before the beam sees
+    it, which is precisely the dependence a conjunctive stratum exists to find.
+    """
+
+    LATE_YEAR = 3
+
+    def metadata(self):
+        return ModelMetadata(
+            columns=(
+                ColumnMetadata(
+                    "title:production_year", ColumnKind.DATA, (1990, 2000, 2010, 2020),
+                    table="title",
+                ),
+                ColumnMetadata(
+                    "movie_keyword:keyword_id", ColumnKind.DATA, (0, 1, 2, 3, 4),
+                    table="movie_keyword",
+                ),
+                ColumnMetadata("I_movie_keyword", ColumnKind.INDICATOR, (0, 1),
+                               table="movie_keyword"),
+            ),
+            full_join_cardinality=1000.0,
+            join_root="title",
+            join_tables=("title", "movie_keyword"),
+            join_edges=(("title", "movie_keyword"),),
+        )
+
+    def rows(self):
+        rows = []
+        # keyword 0 dominates the early years: 600 rows, so it is by far the
+        # most common keyword marginally.
+        for index in range(600):
+            rows.append([index % 3, 0, 1])
+        # keywords 1..4 are each much rarer overall, spread over every year.
+        for index in range(380):
+            rows.append([index % 4, 1 + index % 4, 1])
+        # keyword 0 with the latest year is the joint tail: 20 rows only.
+        for _ in range(20):
+            rows.append([self.LATE_YEAR, 0, 1])
+        return np.asarray(rows, dtype=np.int64)
+
+    def provider(self):
+        return ExactRootStratumProvider.from_encoded_rows(self.metadata(), self.rows())
+
+    def late_year_seed(self):
+        meta = self.metadata()
+        return with_realization_probabilities(
+            RootDataStratum(
+                stratum_id="title:production_year:eq:2020",
+                column_index=0,
+                column_name="title:production_year",
+                region_type="equality",
+                value=meta.columns[0].domain[self.LATE_YEAR],
+                probability=0.02,
+                expected_target_rows=20.0,
+                expected_equality_count=20.0 * PROBABILITIES["equality"],
+            ),
+            PROBABILITIES,
+        )
+
+    def test_keyword_zero_is_the_most_common_marginally(self):
+        source = self.provider()
+        counts = np.asarray(source.extension_column_masses[1].counts)
+        self.assertEqual(int(np.argmax(counts)), 0)
+
+    def test_the_marginal_cap_prunes_it(self):
+        # One slot for the keyword column: marginal ranking keeps the rarest
+        # keyword overall, which is never keyword 0.
+        source = self.provider()
+        capped = source._candidates_for_masses(
+            {1: source.extension_column_masses[1]},
+            n_total=1000,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e9,
+            max_candidates_per_column=1,
+        )
+        self.assertEqual(len(capped), 1)
+        self.assertNotEqual(capped[0].value, 0)
+
+    def test_conditional_counting_surfaces_the_joint_tail(self):
+        source = self.provider()
+        counts = source.conditional_extension_counts(
+            (self.late_year_seed(),),
+            source.extension_column_masses,
+            minimum_joint_rows=1.0,
+            per_seed_width=1,
+            require_distinct_tables=True,
+        )
+        self.assertIn((1, 0), counts, counts)
+        self.assertEqual(counts[(1, 0)], 20.0)
+
+    def test_the_conditional_count_is_the_exact_joint_count(self):
+        source = self.provider()
+        seed = self.late_year_seed()
+        counts = source.conditional_extension_counts(
+            (seed,), source.extension_column_masses,
+            minimum_joint_rows=1.0, per_seed_width=5, require_distinct_tables=True,
+        )
+        meta = self.metadata()
+        for (column_index, encoded_id), joint in counts.items():
+            terms = seed.terms + (
+                StratumTerm(
+                    column_index=column_index,
+                    column_name=meta.columns[column_index].name,
+                    region_type="equality",
+                    value=meta.columns[column_index].domain[encoded_id],
+                ),
+            )
+            self.assertEqual(source.joint_count(terms), joint)
+
+    def test_a_column_the_seed_already_pins_is_not_counted(self):
+        source = self.provider()
+        counts = source.conditional_extension_counts(
+            (self.late_year_seed(),), source.extension_column_masses,
+            minimum_joint_rows=1.0, per_seed_width=5, require_distinct_tables=False,
+        )
+        self.assertFalse([key for key in counts if key[0] == 0], counts)
+
+    def test_the_joint_row_floor_excludes_absent_combinations(self):
+        source = self.provider()
+        counts = source.conditional_extension_counts(
+            (self.late_year_seed(),), source.extension_column_masses,
+            minimum_joint_rows=1000.0, per_seed_width=5, require_distinct_tables=True,
+        )
+        self.assertEqual(counts, {})
+
+    def test_discovery_reports_the_conditional_pool(self):
+        source = self.provider()
+        source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=16,
+            conjunctive={
+                "enabled": True,
+                "max_depth": 2,
+                "beam_width": 8,
+                "seed_width": 8,
+                "extension_width": 4,
+                "conditional_extension_width": 2,
+                "minimum_joint_rows": 1.0,
+                "max_joint_row_fraction": 1.0,
+                "require_distinct_tables": True,
+            },
+        )
+        self.assertGreater(
+            source.conjunctive_status["conditional_extension_candidates"], 0
+        )
+
+    def test_the_pool_fills_with_the_rarest_conditional_candidates_first(self):
+        # More conditional candidates than slots, so the ordering decides which
+        # ones survive.  Ranking by descending joint count would keep the
+        # common pairings and drop the tail.
+        source = self.provider()
+        seed = self.late_year_seed()
+        candidates = source._conditional_extension_candidates(
+            (seed,),
+            source.extension_column_masses,
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e12,
+            minimum_joint_rows=1.0,
+            per_seed_width=5,
+            require_distinct_tables=True,
+        )
+        self.assertGreater(len(candidates), 1)
+        counts = sorted(float(item.foj_count) for item in candidates)
+        rarest_value = min(candidates, key=lambda item: item.foj_count).value
+        self.assertEqual(rarest_value, 0)
+        self.assertEqual(counts[0], 20.0)
+
+    def test_a_value_rare_with_one_seed_keeps_that_seed_s_count(self):
+        # Across seeds the smallest joint count is the one that matters: a
+        # value common with one seed and rare with another is still a tail.
+        source = self.provider()
+        meta = self.metadata()
+        early_seed = with_realization_probabilities(
+            RootDataStratum(
+                stratum_id="title:production_year:eq:1990",
+                column_index=0,
+                column_name="title:production_year",
+                region_type="equality",
+                value=meta.columns[0].domain[0],
+                probability=0.2,
+                expected_target_rows=200.0,
+                expected_equality_count=200.0 * PROBABILITIES["equality"],
+            ),
+            PROBABILITIES,
+        )
+        late_only = source.conditional_extension_counts(
+            (self.late_year_seed(),), source.extension_column_masses,
+            minimum_joint_rows=1.0, per_seed_width=5, require_distinct_tables=True,
+        )
+        both = source.conditional_extension_counts(
+            (early_seed, self.late_year_seed()), source.extension_column_masses,
+            minimum_joint_rows=1.0, per_seed_width=5, require_distinct_tables=True,
+        )
+        early_only = source.conditional_extension_counts(
+            (early_seed,), source.extension_column_masses,
+            minimum_joint_rows=1.0, per_seed_width=5, require_distinct_tables=True,
+        )
+        self.assertGreater(early_only[(1, 0)], late_only[(1, 0)])
+        self.assertEqual(both[(1, 0)], late_only[(1, 0)])
+
+    def test_one_extension_slot_goes_to_the_rarest_conditional_pairing(self):
+        # Five conditional candidates compete for a single slot, so the pool's
+        # fill order decides the outcome: rarest-first keeps the joint tail,
+        # commonest-first keeps a pairing the model already sees.
+        source = self.provider()
+        meta = self.metadata()
+        selected = source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=32,
+            conjunctive={
+                "enabled": True,
+                "max_depth": 2,
+                "beam_width": 16,
+                "seed_width": 16,
+                "extension_width": 1,
+                "conditional_extension_width": 5,
+                "minimum_joint_rows": 1.0,
+                "max_joint_row_fraction": 1.0,
+                "require_distinct_tables": True,
+            },
+            discovery_limits={"max_candidates_per_column": 1},
+        )
+        keyword_terms = {
+            term.value
+            for item in selected
+            if item.is_conjunctive
+            for term in item.terms
+            if meta.columns[term.column_index].name == "movie_keyword:keyword_id"
+        }
+        self.assertEqual(
+            keyword_terms,
+            {0},
+            [item.stratum_id for item in selected if item.is_conjunctive],
+        )
+
+    def test_the_jointly_rare_value_reaches_a_selected_conjunction(self):
+        # End to end: with the marginal cap squeezed down to one slot per
+        # column, the conditional route is the only way keyword 0 can appear.
+        source = self.provider()
+        meta = self.metadata()
+        selected = source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=32,
+            conjunctive={
+                "enabled": True,
+                "max_depth": 2,
+                "beam_width": 16,
+                "seed_width": 16,
+                "extension_width": 4,
+                "conditional_extension_width": 2,
+                "minimum_joint_rows": 1.0,
+                "max_joint_row_fraction": 1.0,
+                "require_distinct_tables": True,
+            },
+            discovery_limits={"max_candidates_per_column": 1},
+        )
+        keyword_zero = [
+            item
+            for item in selected
+            if item.is_conjunctive
+            and any(
+                meta.columns[term.column_index].name == "movie_keyword:keyword_id"
+                and term.value == 0
+                for term in item.terms
+            )
+        ]
+        self.assertTrue(
+            keyword_zero,
+            [item.stratum_id for item in selected if item.is_conjunctive],
+        )
+
+
+class FactorCacheTest(unittest.TestCase):
+    """A cached factor vector must not outlive the probabilities it used."""
+
+    def provider(self):
+        meta = ModelMetadata(
+            columns=(ColumnMetadata("t:a", ColumnKind.DATA, (0, 1, 2), table="t"),),
+            full_join_cardinality=9.0,
+            join_root="t",
+            join_tables=("t",),
+            join_edges=(),
+        )
+        rows = np.array([[index % 3] for index in range(9)], dtype=np.int64)
+        return ExactRootStratumProvider.from_encoded_rows(meta, rows), meta
+
+    def probabilities(self, equality):
+        return {
+            "wildcard": 0.2,
+            "equality": equality,
+            "lower": 0.2,
+            "upper": 0.2,
+            "range": 0.2,
+        }
+
+    def term(self):
+        return StratumTerm(
+            column_index=0,
+            column_name="t:a",
+            region_type="equality",
+            value=1,
+            realization_family="equality",
+        )
+
+    def test_changing_the_probabilities_changes_the_answer(self):
+        source, _ = self.provider()
+        first = source.realized_support_mass((self.term(),), self.probabilities(0.2))
+        second = source.realized_support_mass((self.term(),), self.probabilities(0.6))
+        self.assertAlmostEqual(second / first, 3.0, places=9)
+
+    def test_a_reused_provider_agrees_with_a_fresh_one(self):
+        # The cache was keyed on the term alone, so a provider reused across two
+        # discovery calls answered the second with the first call's factors.
+        reused, _ = self.provider()
+        reused.realized_support_mass((self.term(),), self.probabilities(0.2))
+        warm = reused.realized_support_mass((self.term(),), self.probabilities(0.6))
+        fresh, _ = self.provider()
+        cold = fresh.realized_support_mass((self.term(),), self.probabilities(0.6))
+        self.assertAlmostEqual(warm, cold, places=12)
+
+    def test_the_cache_still_serves_a_repeated_call(self):
+        source, _ = self.provider()
+        probabilities = self.probabilities(0.2)
+        first = source.realized_support_mass((self.term(),), probabilities)
+        self.assertEqual(len(source._term_factor_cache), 1)
+        again = source.realized_support_mass((self.term(),), probabilities)
+        self.assertEqual(first, again)
+        self.assertEqual(len(source._term_factor_cache), 1)
+
+
+class RequiredColumnCoverageTest(unittest.TestCase):
+    """Being in the pool is not the same as being in the output."""
+
+    def discover(self, **conjunctive):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows()
+        )
+        options = {
+            "enabled": True,
+            "max_depth": 2,
+            "beam_width": 8,
+            "seed_width": 8,
+            "minimum_joint_rows": 1.0,
+            "max_joint_row_fraction": 1.0,
+            "require_distinct_tables": True,
+        }
+        options.update(conjunctive)
+        selected = source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=options.pop("max_selected", 8),
+            conjunctive=options,
+        )
+        return source, selected
+
+    def test_coverage_is_reported_for_the_selected_conjunctions(self):
+        source, _ = self.discover(required_extension_columns=["C.c"])
+        status = source.conjunctive_status
+        self.assertIn("required_columns_covered", status)
+        self.assertIn("required_columns_uncovered", status)
+
+    def test_a_required_column_absent_from_the_output_is_a_failure(self):
+        # P.b is in the pool, so the pool-level guard passes, but one selected
+        # stratum cannot carry both it and anything else.
+        with self.assertRaisesRegex(ValueError, "appear in no selected"):
+            self.discover(
+                required_extension_columns=["P.b", "C.c"],
+                require_conjunctions=True,
+                max_selected=1,
+                extension_width=1,
+            )
+
+    def test_the_failure_names_the_uncovered_column(self):
+        try:
+            self.discover(
+                required_extension_columns=["P.b", "C.c"],
+                require_conjunctions=True,
+                max_selected=1,
+                extension_width=1,
+            )
+        except ValueError as error:
+            self.assertRegex(str(error), r"P\.b|C\.c")
+        else:
+            self.fail("expected a coverage failure")
+
+    def test_without_the_flag_uncovered_columns_are_only_reported(self):
+        source, _ = self.discover(
+            required_extension_columns=["P.b", "C.c"], max_selected=1, extension_width=1
+        )
+        self.assertTrue(source.conjunctive_status["required_columns_uncovered"])
+
+    def test_a_depth_one_stratum_does_not_count_as_coverage(self):
+        # Coverage means a conjunction uses the column.  A depth-1 stratum on
+        # the same column says nothing about the joint region.
+        source, selected = self.discover(
+            required_extension_columns=["R.a"],
+            minimum_joint_rows=1e9,
+            max_joint_row_fraction=0.0,
+        )
+        self.assertEqual(source.conjunctive_status["conjunctive_selected"], 0)
+        self.assertTrue(
+            any(
+                chain_data_metadata().columns[item.column_index].name == "R.a"
+                for item in selected
+                if item.depth == 1
+            )
+        )
+        self.assertEqual(source.conjunctive_status["required_columns_uncovered"], ["R.a"])
+
+    def test_a_covered_column_passes(self):
+        source, _ = self.discover(
+            required_extension_columns=["C.c"], require_conjunctions=True
+        )
+        self.assertEqual(source.conjunctive_status["required_columns_uncovered"], [])
+        self.assertIn("C.c", source.conjunctive_status["required_columns_covered"])
 
 
 if __name__ == "__main__":  # pragma: no cover

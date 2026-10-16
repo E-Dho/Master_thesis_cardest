@@ -1329,10 +1329,49 @@ checked at discovery time and refuse the run rather than degrade it:
   It also covers the oldest fallback of all: a provider with no materialized
   rows raises immediately instead of quietly returning depth-1 strata.
 - `max_candidates_per_column` (under `discovery`, not `conjunctive`): bounds a
-  categorical column to its rarest regions. A categorical column yields one
-  equality region per *observed* value, so at 2M rows a 134k-domain id column
-  yields ~134k of them. Ordered columns are never trimmed, because their tail
-  regions are cumulative and dropping values would move the thresholds.
+  categorical column to its *marginally* rarest regions. A categorical column
+  yields one equality region per observed value, so at 2M rows a 134k-domain id
+  column yields ~134k of them. Ordered columns are never trimmed, because their
+  tail regions are cumulative and dropping values would move the thresholds.
+  This is a prior, not the selection mechanism -- see below.
+- `conditional_extension_width`: how many conditionally-rarest values each
+  seed contributes per extension column. `0` disables conditional ranking and
+  leaves the marginal pool as the only route, which is useful for isolating
+  that path and is not a sensible default.
+
+### Why extensions are ranked conditionally
+
+Marginal rarity is the wrong objective for an extension term. A value can be
+common across the corpus and almost absent alongside a particular seed -- a
+keyword that appears everywhere except in the latest production years -- and
+that dependence is the entire reason a conjunctive stratum exists. Ranking
+extensions by marginal count, or capping a column to its marginally rarest
+values, drops exactly those values before the beam search can see them.
+
+So the extension pool is filled from conditional candidates first, topped up
+from the marginal pool only if slots remain. For each seed and each extension
+column, one `bincount` of that column over the rows the seed matches gives the
+joint count for *every* value of that column at once; the rarest of those that
+still clear `minimum_joint_rows` become candidates. Conditioning therefore
+costs one pass per (seed, column) rather than one per candidate pair, and the
+count it returns is the exact joint count the beam would have computed anyway.
+Across seeds a value keeps its smallest joint count, since being rare with any
+one seed is what makes it a tail.
+
+Literals are never seeded from the benchmark workload. Pinning the literals a
+failing query happens to use would make discovery depend on the test set, which
+is the leakage this whole mechanism is built to avoid; `required_extension_columns`
+names columns, not values.
+
+`required_extension_columns` is checked twice: once against the candidate pool
+before the search, and once against the strata actually selected. Reaching the
+pool is not the same as surviving capping, ranking, the beam and the final
+deficit sort, and a run whose purpose is a `movie_keyword:keyword_id`
+conjunction should not pass by selecting conjunctions that use something else.
+Only conjunctive strata count as coverage; a depth-1 stratum on the same column
+says nothing about the joint region. `conjunctive_status` reports
+`required_columns_covered` and `required_columns_uncovered` either way, and
+`require_conjunctions` turns an uncovered column into a failure.
 
 Column names in `candidate_column_names` and `required_extension_columns` are
 model columns, spelled `table:column`. The dotted `table.column` form is the
@@ -1347,8 +1386,10 @@ object and testing it. `joint_count`, `realized_support_mass` and
 `membership_matrix` all work this way, the per-term lookups and realization
 factors are cached on the provider, and the table-survival factor is memoized
 because scoring calls it once per candidate per served head. Measured on a
-2M-row, 10-column fixture with a 134k-domain keyword column and
-`beam_width = extension_width = 64`, full discovery takes about 40 seconds.
+2M-row, 10-column fixture with a 134k-domain keyword column,
+`beam_width = extension_width = 64` and `conditional_extension_width = 8`, full
+discovery takes about 105 seconds, of which roughly a minute is the conditional
+passes.
 The per-row form it replaced needed roughly that long for 200 of the 4096 beam
 pairs. Tests assert the vectorized counts equal a direct row scan and that a
 batch of calls stays inside a time budget.
@@ -1356,9 +1397,10 @@ batch of calls stays inside a time budget.
 `candidate_column_names` now also applies on the materialized path, not only
 the root-JCT one. Restricting the pool by name is what lets a fixture raise
 `max_candidate_domain_size` high enough to include a 134k-domain keyword column
-while still keeping key columns such as `title.id` out of it. Counts come from
-the rows, so a wide domain costs one mass vector rather than one candidate per
-domain value.
+while still keeping key columns such as `title:id` out of it. A wide domain
+still costs one candidate per *observed* value, which at 2M rows is very nearly
+the whole domain; `max_candidates_per_column` and the per-seed conditional
+extensions below are what bound that.
 
 ### Diagnostics
 

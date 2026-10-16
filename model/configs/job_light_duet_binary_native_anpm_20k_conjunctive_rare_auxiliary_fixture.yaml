@@ -151,6 +151,14 @@ rare_support:
       beam_width: 64
       seed_width: 64
       extension_width: 64
+      # Extensions are ranked by how rare a value is GIVEN a seed, not by how
+      # rare it is overall.  A keyword common across the corpus but almost
+      # absent in the latest production years is exactly the dependence this
+      # experiment is about, and marginal ranking prunes it before the beam
+      # sees it.  One bincount per (seed, column) gives the joint count for
+      # every value of that column at once, so this costs a pass, not a pass
+      # per candidate.
+      conditional_extension_width: 8
       # 100 of >= 2e6 rows is 0.005% of the fixture, so a region can still be
       # rare and clear the floor.  Against the default 512-row fixture the same
       # 100 would have demanded that a "rare" conjunction cover a fifth of the
