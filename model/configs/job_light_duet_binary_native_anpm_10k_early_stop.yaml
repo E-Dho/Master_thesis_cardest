@@ -84,6 +84,10 @@ training:
   epochs: 1
   steps_per_epoch: 10000
   early_stopping_patience_steps: 1000
+  # No validation source is configured, so early stopping watches the
+  # per-step training loss.  Stated explicitly because that signal is
+  # batch noise, not a held-out metric.
+  early_stopping_monitor: train_loss
   early_stopping_min_delta: 0.0
   gradient_clip_norm: 5.0
   checkpoint_interval_steps: 500

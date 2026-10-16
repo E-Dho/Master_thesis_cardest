@@ -1,0 +1,166 @@
+# Conjunctive rare-support strata on JOB-light, in fixture mode.
+#
+# This is the only JOB-light configuration that can exercise conjunctive
+# discovery at all.  Live NeuroCard sampling imposes a stratum by filtering the
+# root join-count table one column at a time, so it cannot condition on a
+# conjunction spanning non-root tables and reports the capability as absent;
+# discovery then falls back to depth-1 and records the reason.  Fixture mode
+# samples from materialized rows, where a conjunction is an AND over row masks,
+# so the whole path -- exact joint counts, joint realization mass, conditional
+# sampling -- is available.
+#
+# It is therefore NOT a like-for-like rerun of the live 20k run.  Fixture mode
+# trains on a fixed materialized sample instead of fresh draws from the join,
+# so q-errors from this config answer "does the feature work end to end", not
+# "does the feature help".  Comparing against the live run would confound the
+# sampling mode with the feature.
+dataset:
+  type: neurocard_full_join
+  name: job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture
+  prepared_directory: data/neurocard_prepared/job_light
+  sampling_mode: fixture
+  sample_batch_size: 2048
+  num_workers: 0
+
+schema:
+  join_type: acyclic
+  column_order: data_indicators_fanouts
+
+model:
+  type: predicate_resmade
+  hidden_sizes: [512, 512, 512, 512]
+  residual_connections: true
+  direct_io_connections: true
+  direct_io_source_kinds: [data, indicator, fanout]
+  direct_io_destination_kinds: [data, indicator, fanout]
+  activation: relu
+  input_encoding: duet_binary
+  output_encoding: embed
+  output_embedding_size: 64
+  output_embeddings_tied: false
+  embedding_size: 32
+  residual_dropout: 0.0
+  fixed_ordering: true
+
+factorization:
+  enabled: true
+  strategy: bitwise_lossless
+  word_size_bits: 11
+  minimum_domain_size: 2048
+  factor_order: most_significant_first
+  blacklist_columns: []
+  blacklist_kinds: [indicator, fanout]
+
+anpm:
+  enabled: true
+  previous_factor_embedding_size: 64
+  hidden_size: 64
+  teacher_force_during_training: true
+  mask_invalid_combinations: true
+  decode_chunk_size: 4096
+  final_activation: relu
+  materialize_original_distribution_for_debug: false
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  compute_weights_in_log_space: true
+  weight_normalization: batch_sum
+  weight_clipping: null
+
+predicate_generation:
+  enabled: true
+  strategy: duet_batch_bounds
+  table_subset_sampling: neurocard_table_dropout_rooted
+  enable_native_range_tokens: true
+  normalize_predicate_probabilities: false
+  wildcard_probability: 0.2
+  equality_probability: 0.2
+  lower_bound_probability: 0.2
+  upper_bound_probability: 0.2
+  native_range_probability: 0.2
+  per_row_contexts: 1
+  seed: 0
+
+predicate_encoding:
+  mode: two_slot_binary_duet
+  multi_predicate_merge: sum
+  max_predicates_per_column: 2
+
+importance_sampling:
+  enabled: false
+
+rare_support:
+  enabled: true
+  discovery:
+    enabled: true
+    root_data_only: true
+    include_categorical_root_data: false
+    max_candidate_domain_size: 4096
+    minimum_expected_context_support: 100
+    max_selected_strata: 64
+    support_planning_steps: 20000
+    root_column_semantics:
+      title:
+        production_year: ordered
+        kind_id: categorical
+    conjunctive:
+      enabled: true
+      max_depth: 2
+      beam_width: 64
+      seed_width: 64
+      extension_width: 64
+      minimum_joint_rows: 100
+      require_distinct_tables: true
+      max_stratum_share: 0.1
+  allocation:
+    strategy: support_deficit
+  diagnostics:
+    enabled: true
+
+rare_auxiliary:
+  enabled: true
+  batch_size: 512
+  beta: 0.25
+
+training:
+  seed: 0
+  device: auto
+  batch_size: 2048
+  learning_rate: 0.0001
+  optimizer: adam
+  epochs: 1
+  steps_per_epoch: 20000
+  early_stopping_patience_steps: 3000
+  early_stopping_monitor: validation
+  early_stopping_min_delta: 0.0
+  gradient_clip_norm: 5.0
+  checkpoint_interval_steps: 500
+  validation_interval_steps: 250
+  head_loss_reduction: sum
+  mixed_precision: false
+
+inference:
+  progressive_sampling: false
+  factorized_decoder: anpm
+  use_log_space_product: true
+
+validation:
+  enabled: true
+  interval_steps: 250
+  fresh_sampler_batches: 10
+  batch_size: 2048
+  selection_metric: validation_weighted_nll
+  minimize: true
+  # Left null, this resamples the SAME fixture with a different seed, which is
+  # a lower-variance signal than a single training batch but is not held out:
+  # in fixture mode the row set is finite and shared with training.  Point this
+  # at a separately prepared JOB-light fixture to get held_out_fixture mode.
+  prepared_directory: null
+  # Note: validation_weighted_nll is a mean-likelihood metric and the uniform
+  # term dominates the loss, so it tracks median behaviour far better than the
+  # tail this feature targets.  Checkpoint selection by tail q-error needs a
+  # tail-aware selection metric, which does not exist yet.
+
+logging:
+  output_directory: model/runs/job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture

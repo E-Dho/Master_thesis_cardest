@@ -280,13 +280,35 @@ def validate_config(config: dict[str, Any]) -> None:
     )
     if early_stopping_patience_steps < 0:
         raise ValueError("training early stopping patience must be nonnegative")
+    validation = config.get("validation", {})
     if early_stopping_patience_steps > 0:
         metrics_interval = int(training.get("validation_interval_steps", 0) or 0)
         if metrics_interval <= 0:
             raise ValueError(
                 "training early stopping requires training.validation_interval_steps > 0"
             )
-    validation = config.get("validation", {})
+        # training.validation_interval_steps alone does not turn validation on.
+        # Without this check a config asking for early stopping every 250 steps
+        # silently monitors the per-step training loss instead of a held-out
+        # metric, and picks a checkpoint off batch noise.
+        declared = training.get("early_stopping_monitor")
+        monitor = resolve_early_stopping_monitor(config)
+        if monitor not in {"validation", "train_loss"}:
+            raise ValueError(
+                "training.early_stopping_monitor must be validation or train_loss"
+            )
+        if declared is None and monitor == "train_loss":
+            raise ValueError(
+                "training.early_stopping_patience_steps > 0 with validation.enabled "
+                "false would early-stop on the per-step training loss. Enable "
+                "validation, or set training.early_stopping_monitor=train_loss to "
+                "say that is intended"
+            )
+        if monitor == "validation" and not bool(validation.get("enabled", False)):
+            raise ValueError(
+                "training.early_stopping_monitor=validation requires "
+                "validation.enabled=true"
+            )
     if validation.get("enabled", False):
         interval_steps = int(
             validation.get(
@@ -421,6 +443,23 @@ def validate_config(config: dict[str, Any]) -> None:
                 "with a row drawn from the whole conjunction, which leaks the "
                 "omitted terms into the targets. Remove the key."
             )
+
+
+def resolve_early_stopping_monitor(config: Mapping[str, Any]) -> str:
+    """What early stopping watches: ``"validation"`` or ``"train_loss"``.
+
+    One function so the validator and the trainer cannot disagree.  An explicit
+    ``training.early_stopping_monitor`` always wins; only when it is absent is
+    the mode inferred from whether validation is enabled, and ``validate_config``
+    refuses that inference when it would land on the training loss.
+    """
+
+    training = config.get("training", {}) or {}
+    validation = config.get("validation", {}) or {}
+    declared = training.get("early_stopping_monitor")
+    if declared is not None:
+        return str(declared)
+    return "validation" if bool(validation.get("enabled", False)) else "train_loss"
 
 
 def resolve_device(config: dict[str, Any]) -> str:

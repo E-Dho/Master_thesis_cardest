@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from model.src.config import resolve_device
+from model.src.config import resolve_device, resolve_early_stopping_monitor
 from model.src.data.full_join_sampler import FullJoinBatch
 from model.src.data.schema import ColumnKind
 from model.src.data.strata import auxiliary_eligibility_mask, served_head_indices
@@ -738,8 +738,15 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     )
     early_stopping_min_delta = float(training.get("early_stopping_min_delta", 0.0) or 0.0)
     early_stopping_enabled = early_stopping_patience_steps > 0
+    # The monitor is declared, not inferred: inferring it meant a config with
+    # validation switched off quietly fell back to the training loss.
+    early_stopping_monitor_mode = resolve_early_stopping_monitor(config)
+    if early_stopping_enabled and early_stopping_monitor_mode == "validation" and not validation_enabled:
+        raise ValueError(
+            "early_stopping_monitor=validation requires validation.enabled=true"
+        )
     early_stopping_monitor = (
-        selection_metric if validation_enabled else "loss"
+        selection_metric if early_stopping_monitor_mode == "validation" else "loss"
     )
     early_stopping_best_metric: float | None = None
     early_stopping_best_step: int | None = None
@@ -981,7 +988,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     validation_history.append({"step": global_step, **validation_metrics})
                     metrics_payload.update(validation_metrics)
                     early_stopping_monitor_value = selected_value
-                elif not validation_enabled:
+                elif early_stopping_monitor_mode == "train_loss":
                     early_stopping_monitor_value = float(loss)
                 if early_stopping_enabled and early_stopping_monitor_value is not None:
                     if early_stopping_best_metric is None:

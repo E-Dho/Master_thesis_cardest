@@ -850,6 +850,31 @@ still allocates independent categorical embeddings for `EQUAL(v)`,
 value, factor-digit, and range-rank representations rather than allocating a
 separate learned vector for every operator/literal pair.
 
+## Early Stopping Monitor
+
+`training.validation_interval_steps` does not turn validation on; only
+`validation.enabled` does. Until this was guarded, a config could ask for early
+stopping every 250 steps, get no validation source, and silently monitor the
+per-step training loss instead -- selecting a checkpoint off batch noise with
+nothing in the summary to say so. One production run lost a checkpoint that
+way: its best training loss landed 2,750 steps before the end, while every tail
+q-error metric was still improving at the final step.
+
+`training.early_stopping_monitor` makes the choice explicit. It is `validation`
+(the default whenever `validation.enabled` is true) or `train_loss`. Early
+stopping with validation disabled and no declaration is now rejected rather
+than silently downgraded, and `early_stopping_monitor: validation` with
+validation disabled is rejected too. `resolve_early_stopping_monitor` in
+`model/src/config.py` is the single resolution rule the validator and the
+trainer both read, so they cannot drift.
+
+Two things this does not fix. Watching `train_loss` is still a weak signal, so
+a config that declares it is declaring a limitation, not a configuration. And
+the available selection metrics -- `validation_nll`, `validation_weighted_nll`,
+`validation_traj_weighted_mse` -- are mean-behaviour metrics; where the uniform
+term dominates the loss they track the median far better than the tail, so
+enabling validation does not by itself make checkpoint selection tail-aware.
+
 ## Validation and Best-Checkpoint Selection
 
 The trainer records interval metrics and checkpoints, but full validation NLL,
@@ -1254,6 +1279,15 @@ selected stratum is depth-1 is how a run can look like it exercised the feature
 when it did not. In practice this means the JOB-light configs
 that run `sampling_mode: live` keep the previous depth-1 behaviour; a run that
 needs conjunctions has to use a fixture or prepared-directory source.
+
+`model/configs/job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture.yaml`
+is that source for JOB-light, and the only JOB-light configuration that can
+exercise conjunctive discovery at all. Because fixture mode trains on a fixed
+materialized sample rather than fresh draws from the join, its q-errors answer
+"does the feature work end to end", not "does the feature help" -- comparing it
+against a live run confounds the sampling mode with the feature. A test asserts
+that at least one JOB-light config can reach conjunctions, so this cannot
+silently revert to a configuration that only looks like it exercises them.
 
 ### Diagnostics
 

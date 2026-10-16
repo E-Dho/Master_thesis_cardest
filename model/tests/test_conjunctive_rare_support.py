@@ -6,11 +6,16 @@ machine that can run the sampler.
 
 from __future__ import annotations
 
+import json
+import pathlib
+import shutil
+import tempfile
 import unittest
 
 import numpy as np
+import yaml
 
-from model.src.config import validate_config
+from model.src.config import resolve_early_stopping_monitor, validate_config
 from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
@@ -34,7 +39,11 @@ from model.src.data.strata import (
     with_realization_probabilities,
     with_conditional_score,
 )
-from model.src.data.full_join_sampler import LiveNeuroCardFullJoinSampleSource
+from model.src.data.complete_domain_preparation import COMPLETE_METADATA_SOURCE
+from model.src.data.full_join_sampler import (
+    LiveNeuroCardFullJoinSampleSource,
+    NeuroCardFullJoinSampleSource,
+)
 from model.src.data.schema import root_paths_closure
 from model.src.predicates.operators import PredicateOp
 from model.src.predicates.generation import (
@@ -1360,6 +1369,255 @@ class ExtensionEligibilityTest(unittest.TestCase):
 
     def test_no_seeds_means_nothing_is_eligible(self):
         self.assertFalse(self.can_extend(stratum(term(1, "K.keyword", 1)), ()))
+
+
+class EarlyStoppingMonitorConfigTest(unittest.TestCase):
+    """Early stopping must say what it watches instead of inferring it."""
+
+    def config(self, *, validation=None, monitor=None, patience=3000):
+        config = {
+            "dataset": {"type": "synthetic_full_join"},
+            "model": {"type": "predicate_resmade", "hidden_sizes": [8]},
+            "training": {
+                "batch_size": 2,
+                "learning_rate": 0.1,
+                "epochs": 1,
+                "steps_per_epoch": 1,
+                "early_stopping_patience_steps": patience,
+                "validation_interval_steps": 250,
+            },
+            "predicate_generation": {"enabled": True},
+        }
+        if monitor is not None:
+            config["training"]["early_stopping_monitor"] = monitor
+        if validation is not None:
+            config["validation"] = validation
+        return config
+
+    def enabled_validation(self):
+        return {"enabled": True, "interval_steps": 250, "fresh_sampler_batches": 2}
+
+    def test_early_stopping_without_validation_is_refused(self):
+        # The run that motivated this asked for early stopping every 250 steps,
+        # got no validation source, and silently selected a checkpoint off the
+        # per-step training loss.
+        with self.assertRaisesRegex(ValueError, "per-step training loss"):
+            validate_config(self.config())
+
+    def test_watching_the_training_loss_is_allowed_when_declared(self):
+        validate_config(self.config(monitor="train_loss"))
+
+    def test_asking_for_validation_without_enabling_it_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "requires validation.enabled"):
+            validate_config(self.config(monitor="validation"))
+
+    def test_enabled_validation_needs_no_declaration(self):
+        validate_config(self.config(validation=self.enabled_validation()))
+
+    def test_an_unknown_monitor_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "must be validation or train_loss"):
+            validate_config(self.config(monitor="loss"))
+
+    def test_the_interval_requirement_still_applies(self):
+        config = self.config(monitor="train_loss")
+        config["training"]["validation_interval_steps"] = 0
+        with self.assertRaisesRegex(ValueError, "validation_interval_steps"):
+            validate_config(config)
+
+    def test_no_early_stopping_needs_no_monitor(self):
+        validate_config(self.config(patience=0))
+
+    def test_the_resolver_is_what_both_the_validator_and_trainer_read(self):
+        # The trainer used to infer the mode independently, which is how the
+        # two came to disagree in the first place.
+        self.assertEqual(
+            resolve_early_stopping_monitor(self.config(validation=self.enabled_validation())),
+            "validation",
+        )
+        self.assertEqual(resolve_early_stopping_monitor(self.config()), "train_loss")
+
+    def test_a_declared_monitor_overrides_enabled_validation(self):
+        # Declared always wins: a run may deliberately watch the training loss
+        # while still recording validation history.
+        config = self.config(
+            validation=self.enabled_validation(), monitor="train_loss"
+        )
+        validate_config(config)
+        self.assertEqual(resolve_early_stopping_monitor(config), "train_loss")
+
+
+class ShippedConfigTest(unittest.TestCase):
+    """The checked-in configs must stay consistent with these rules."""
+
+    ROOT = pathlib.Path(__file__).resolve().parents[1] / "configs"
+
+    def configs(self):
+        for path in sorted(self.ROOT.glob("*.yaml")):
+            with path.open() as handle:
+                yield path, yaml.safe_load(handle)
+
+    def test_every_early_stopping_config_declares_its_monitor_or_validates(self):
+        for path, config in self.configs():
+            training = config.get("training", {}) or {}
+            patience = int(
+                training.get(
+                    "early_stopping_patience_steps",
+                    training.get("early_stopping_patience", 0) or 0,
+                )
+                or 0
+            )
+            if patience <= 0:
+                continue
+            with self.subTest(config=path.name):
+                validation_on = bool((config.get("validation", {}) or {}).get("enabled", False))
+                self.assertTrue(
+                    validation_on or training.get("early_stopping_monitor") is not None,
+                    f"{path.name} early-stops without declaring what it monitors",
+                )
+
+    def test_the_conjunctive_job_light_config_can_actually_use_conjunctions(self):
+        # Live sampling cannot impose a cross-table conjunction, so a config
+        # that enables conjunctive discovery on sampling_mode: live validates
+        # nothing.  At least one JOB-light config must be able to.
+        usable = []
+        for path, config in self.configs():
+            discovery = ((config.get("rare_support", {}) or {}).get("discovery", {}) or {})
+            if not bool((discovery.get("conjunctive", {}) or {}).get("enabled", False)):
+                continue
+            dataset = config.get("dataset", {}) or {}
+            if str(dataset.get("sampling_mode", "fixture")) != "live":
+                usable.append(path.name)
+        self.assertTrue(
+            any("job_light" in name for name in usable),
+            f"no JOB-light config can exercise conjunctive discovery; usable: {usable}",
+        )
+
+
+class FixtureEndToEndTest(unittest.TestCase):
+    """Discovery through conditional sampling on the real fixture source.
+
+    This is the path the JOB-light fixture config takes.  Everything above
+    tests a piece of it; this asserts the pieces connect, so a cluster run is
+    not the first thing to find out that they do not.
+    """
+
+    PROBABILITIES = PROBABILITIES
+    CONJUNCTIVE = {
+        "enabled": True,
+        "max_depth": 2,
+        "beam_width": 64,
+        "seed_width": 64,
+        "extension_width": 64,
+        "minimum_joint_rows": 10,
+        "require_distinct_tables": True,
+        "max_stratum_share": 0.1,
+    }
+
+    def metadata(self) -> ModelMetadata:
+        return ModelMetadata(
+            columns=(
+                ColumnMetadata(
+                    "title.production_year", ColumnKind.DATA, (1950, 1960, 1970, 1980),
+                    table="title",
+                ),
+                ColumnMetadata(
+                    "movie_keyword.keyword_id", ColumnKind.DATA, (1, 2, 3, OUTER_MISSING),
+                    table="movie_keyword",
+                ),
+                ColumnMetadata(
+                    "I_movie_keyword", ColumnKind.INDICATOR, (0, 1), table="movie_keyword"
+                ),
+                ColumnMetadata(
+                    "F_title_to_mk", ColumnKind.FANOUT, (1, 2), table="title",
+                    fanout_source="title->movie_keyword",
+                ),
+            ),
+            full_join_cardinality=200.0,
+            join_root="title",
+            join_tables=("title", "movie_keyword"),
+            join_edges=(("title", "movie_keyword"),),
+        )
+
+    def rows(self) -> np.ndarray:
+        return np.array([[index % 4, index % 4, 1, index % 2] for index in range(200)],
+                        dtype=np.int64)
+
+    def prepared_source(self, meta, rows):
+        directory = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        (directory / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "metadata": meta.to_json_dict(),
+                    "domains_complete": True,
+                    "metadata_source": COMPLETE_METADATA_SOURCE,
+                }
+            ),
+            encoding="utf-8",
+        )
+        np.save(directory / "sample_rows.npy", rows)
+        return NeuroCardFullJoinSampleSource(directory, sampling_mode="fixture")
+
+    def discovered(self, meta, rows, **overrides):
+        options = dict(self.CONJUNCTIVE)
+        options.update(overrides)
+        provider = ExactRootStratumProvider.from_encoded_rows(
+            meta, rows, max_domain_size=4096
+        )
+        selected = provider.discover(
+            n_total=10_000_000,
+            predicate_probabilities=self.PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=8,
+            conjunctive=options,
+        )
+        return provider, selected
+
+    def test_a_cross_table_conjunction_is_discovered_and_sampled(self):
+        meta, rows = self.metadata(), self.rows()
+        provider, selected = self.discovered(meta, rows)
+        self.assertTrue(provider.conjunctive_status["applied"])
+        self.assertIsNone(provider.conjunctive_status["reason"])
+        conjunctions = [item for item in selected if item.is_conjunctive]
+        self.assertTrue(conjunctions, [item.stratum_id for item in selected])
+        spanning = [item for item in conjunctions if len(item.tables(meta)) > 1]
+        self.assertTrue(spanning, [item.stratum_id for item in conjunctions])
+
+        source = self.prepared_source(meta, rows)
+        drawn = source.sample_root_strata_rows(
+            [spanning[0]] * 16, rng=np.random.default_rng(0)
+        )
+        encoded = np.asarray(getattr(drawn, "encoded_values", drawn))
+        self.assertEqual(encoded.shape, (16, len(meta.columns)))
+        for row in encoded:
+            self.assertTrue(
+                spanning[0].contains_row(row, meta),
+                f"{spanning[0].stratum_id} not satisfied by {row.tolist()}",
+            )
+
+    def test_the_sampled_rows_satisfy_every_term_not_just_the_last(self):
+        meta, rows = self.metadata(), self.rows()
+        _, selected = self.discovered(meta, rows)
+        spanning = next(
+            item for item in selected if item.is_conjunctive and len(item.tables(meta)) > 1
+        )
+        source = self.prepared_source(meta, rows)
+        encoded = np.asarray(
+            source.sample_root_strata_rows([spanning] * 32, rng=np.random.default_rng(1))
+            .encoded_values
+        )
+        for term in spanning.terms:
+            column = meta.columns[term.column_index]
+            values = [column.domain[int(value)] for value in encoded[:, term.column_index]]
+            self.assertTrue(
+                all(term.contains_value(value) for value in values),
+                f"term on {term.column_name} violated",
+            )
+
+    def test_the_fixture_provider_reports_the_capability(self):
+        meta, rows = self.metadata(), self.rows()
+        provider = ExactRootStratumProvider.from_encoded_rows(meta, rows)
+        self.assertTrue(provider.supports_conjunctive_strata)
 
 
 if __name__ == "__main__":  # pragma: no cover
