@@ -1358,6 +1358,13 @@ count it returns is the exact joint count the beam would have computed anyway.
 Across seeds a value keeps its smallest joint count, since being rare with any
 one seed is what makes it a tail.
 
+Join padding -- `OUTER_MISSING`, SQL null, `None` -- is excluded before the
+ranking rather than after it, in both the conditional and the marginal path. A
+full-outer-join child column is largely padding, and on many seeds the padding
+is the rarest encoded id, so ranking first and discarding afterwards spends
+candidate slots on values no builder will emit and can leave a column with no
+candidates at all while real values were available.
+
 Literals are never seeded from the benchmark workload. Pinning the literals a
 failing query happens to use would make discovery depend on the test set, which
 is the leakage this whole mechanism is built to avoid; `required_extension_columns`

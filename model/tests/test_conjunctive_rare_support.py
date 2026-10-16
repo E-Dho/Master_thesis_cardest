@@ -26,6 +26,8 @@ from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
     ExactRootStratumProvider,
+    SQL_NULL,
+    _is_structural_value,
     RootColumnMass,
     _can_extend_any_seed,
     _expected_lower_threshold_counts,
@@ -2580,6 +2582,120 @@ class RequiredColumnCoverageTest(unittest.TestCase):
         )
         self.assertEqual(source.conjunctive_status["required_columns_uncovered"], [])
         self.assertIn("C.c", source.conjunctive_status["required_columns_covered"])
+
+
+class StructuralPaddingTest(unittest.TestCase):
+    """Join padding must not consume a slot of the candidate budget.
+
+    A full-outer-join child column is full of OUTER_MISSING, and on many seeds
+    that padding is the rarest encoded id.  Candidate builders discard it, so
+    ranking and truncating before the discard spends budget on nothing.
+    """
+
+    def metadata(self):
+        return ModelMetadata(
+            columns=(
+                ColumnMetadata("title:production_year", ColumnKind.DATA, (1990, 2000),
+                               table="title"),
+                ColumnMetadata(
+                    "movie_keyword:keyword_id", ColumnKind.DATA,
+                    (7, 8, OUTER_MISSING, SQL_NULL), table="movie_keyword",
+                ),
+                ColumnMetadata("I_movie_keyword", ColumnKind.INDICATOR, (0, 1),
+                               table="movie_keyword"),
+            ),
+            full_join_cardinality=100.0,
+            join_root="title",
+            join_tables=("title", "movie_keyword"),
+            join_edges=(("title", "movie_keyword"),),
+        )
+
+    def rows(self):
+        # With the late year: keyword 7 x5, keyword 8 x9, OUTER_MISSING x1.
+        # The padding is the rarest id, so it wins any count-based ranking.
+        return np.asarray(
+            [[1, 0, 1]] * 5 + [[1, 1, 1]] * 9 + [[1, 2, 0]] * 1 + [[0, 0, 1]] * 40,
+            dtype=np.int64,
+        )
+
+    def provider(self):
+        return ExactRootStratumProvider.from_encoded_rows(self.metadata(), self.rows())
+
+    def seed(self):
+        return with_realization_probabilities(
+            RootDataStratum(
+                stratum_id="title:production_year:eq:2000",
+                column_index=0,
+                column_name="title:production_year",
+                region_type="equality",
+                value=2000,
+                probability=0.15,
+                expected_target_rows=15.0,
+                expected_equality_count=15.0 * PROBABILITIES["equality"],
+            ),
+            PROBABILITIES,
+        )
+
+    def test_the_padding_really_is_the_rarest_encoded_id(self):
+        source = self.provider()
+        seed_rows = self.rows()[self.rows()[:, 0] == 1]
+        counts = np.bincount(seed_rows[:, 1], minlength=4)
+        self.assertEqual(int(np.argmin(np.where(counts > 0, counts, 1 << 30))), 2)
+        self.assertTrue(_is_structural_value(self.metadata().columns[1].domain[2]))
+
+    def test_one_slot_goes_to_a_real_value_not_the_padding(self):
+        source = self.provider()
+        counts = source.conditional_extension_counts(
+            (self.seed(),),
+            source.extension_column_masses,
+            minimum_joint_rows=1.0,
+            per_seed_width=1,
+            require_distinct_tables=True,
+        )
+        self.assertEqual(counts, {(1, 0): 5.0})
+
+    def test_the_candidate_survives_instead_of_vanishing(self):
+        source = self.provider()
+        candidates = source._conditional_extension_candidates(
+            (self.seed(),),
+            source.extension_column_masses,
+            n_total=1000,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e9,
+            minimum_joint_rows=1.0,
+            per_seed_width=1,
+            require_distinct_tables=True,
+        )
+        self.assertEqual([item.value for item in candidates], [7])
+
+    def test_no_structural_value_ever_reaches_the_counts(self):
+        source = self.provider()
+        meta = self.metadata()
+        counts = source.conditional_extension_counts(
+            (self.seed(),),
+            source.extension_column_masses,
+            minimum_joint_rows=1.0,
+            per_seed_width=4,
+            require_distinct_tables=True,
+        )
+        for column_index, encoded_id in counts:
+            self.assertFalse(
+                _is_structural_value(meta.columns[column_index].domain[encoded_id])
+            )
+
+    def test_the_marginal_cap_also_skips_padding(self):
+        # Same ordering bug: the builder drops padding afterwards, so a capped
+        # column would come back one candidate short.
+        source = self.provider()
+        capped = source._candidates_for_masses(
+            {1: source.extension_column_masses[1]},
+            n_total=1000,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e9,
+            max_candidates_per_column=1,
+        )
+        self.assertEqual(len(capped), 1)
+        self.assertFalse(_is_structural_value(capped[0].value))
 
 
 if __name__ == "__main__":  # pragma: no cover

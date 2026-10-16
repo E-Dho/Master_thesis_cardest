@@ -218,6 +218,7 @@ class ExactRootStratumProvider:
         self.columns_skipped_by_domain_cap: dict[str, int] = {}
         # Columns left out because candidate_column_names did not list them.
         self.columns_excluded_by_name: tuple[str, ...] = ()
+        self._non_structural_cache: dict[int, np.ndarray] = {}
         self._term_mask_cache: dict[tuple[Any, ...], np.ndarray] = {}
         self._term_factor_cache: dict[tuple[Any, ...], np.ndarray] = {}
         self.encoded_rows = None if encoded_rows is None else np.asarray(encoded_rows, dtype=np.int64)
@@ -470,6 +471,33 @@ class ExactRootStratumProvider:
 
         return self.encoded_rows is not None
 
+    def _non_structural_mask(self, column_index: int) -> np.ndarray:
+        """Encoded ids that carry a real value, not join padding.
+
+        OUTER_MISSING, SQL NULL and None are padding: a full-outer-join child
+        column is full of them.  Candidate builders discard them, so if they are
+        ranked and truncated *before* that discard they silently consume slots
+        of the candidate budget and the run ends up with fewer -- sometimes
+        zero -- usable candidates while real values were available.
+        """
+
+        cached = self._non_structural_cache.get(column_index)
+        if cached is not None:
+            return cached
+        mass = self.column_masses.get(column_index) or self.extension_column_masses.get(
+            column_index
+        )
+        values = (
+            mass.values if mass is not None else self.metadata.columns[column_index].domain
+        )
+        mask = np.fromiter(
+            (not _is_structural_value(value) for value in values),
+            dtype=bool,
+            count=len(values),
+        )
+        self._non_structural_cache[column_index] = mask
+        return mask
+
     def _term_domain_mask(self, term: "StratumTerm") -> np.ndarray:
         """Membership as a boolean lookup over the column's encoded domain.
 
@@ -597,7 +625,11 @@ class ExactRootStratumProvider:
             builder = _numeric_root_candidates if ordered else _categorical_root_candidates
             counts = np.asarray(mass.counts, dtype=float)
             if limit is not None and limit > 0 and not ordered:
-                present = np.flatnonzero(counts > 0)
+                # Padding is excluded here too, for the same reason: the
+                # builder drops it afterwards and the slot is never refilled.
+                present = np.flatnonzero(
+                    (counts > 0) & self._non_structural_mask(column_index)
+                )
                 if present.size > limit:
                     order = np.argsort(counts[present], kind="stable")[:limit]
                     trimmed = np.zeros_like(counts)
@@ -680,7 +712,10 @@ class ExactRootStratumProvider:
                     weights=seed_weights,
                     minlength=len(column.domain),
                 ).astype(float)
-                eligible = np.flatnonzero(counts >= float(minimum_joint_rows))
+                eligible = np.flatnonzero(
+                    (counts >= float(minimum_joint_rows))
+                    & self._non_structural_mask(column_index)
+                )
                 if eligible.size == 0:
                     continue
                 rarest = eligible[np.argsort(counts[eligible], kind="stable")[:width]]
