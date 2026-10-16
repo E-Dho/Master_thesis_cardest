@@ -1326,6 +1326,32 @@ checked at discovery time and refuse the run rather than degrade it:
   4096 cap silently excludes.
 - `require_conjunctions`: makes selecting no conjunctive stratum a failure
   rather than a logged fallback, for a run whose purpose is to exercise them.
+  It also covers the oldest fallback of all: a provider with no materialized
+  rows raises immediately instead of quietly returning depth-1 strata.
+- `max_candidates_per_column` (under `discovery`, not `conjunctive`): bounds a
+  categorical column to its rarest regions. A categorical column yields one
+  equality region per *observed* value, so at 2M rows a 134k-domain id column
+  yields ~134k of them. Ordered columns are never trimmed, because their tail
+  regions are cumulative and dropping values would move the thresholds.
+
+Column names in `candidate_column_names` and `required_extension_columns` are
+model columns, spelled `table:column`. The dotted `table.column` form is the
+NeuroCard root join-count dataframe's spelling: it looks right, matches no
+model column, and would leave the pool empty. Config validation rejects it.
+
+### Discovery cost
+
+Term membership depends only on the encoded id, so it is decided once per
+domain value and then gathered, rather than decoding every row to a Python
+object and testing it. `joint_count`, `realized_support_mass` and
+`membership_matrix` all work this way, the per-term lookups and realization
+factors are cached on the provider, and the table-survival factor is memoized
+because scoring calls it once per candidate per served head. Measured on a
+2M-row, 10-column fixture with a 134k-domain keyword column and
+`beam_width = extension_width = 64`, full discovery takes about 40 seconds.
+The per-row form it replaced needed roughly that long for 200 of the 4096 beam
+pairs. Tests assert the vectorized counts equal a direct row scan and that a
+batch of calls stays inside a time budget.
 
 `candidate_column_names` now also applies on the materialized path, not only
 the root-JCT one. Restricting the pool by name is what lets a fixture raise

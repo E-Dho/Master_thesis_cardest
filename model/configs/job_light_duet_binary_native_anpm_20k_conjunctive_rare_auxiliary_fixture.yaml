@@ -27,11 +27,17 @@
 #     --config model/configs/job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture.yaml \
 #     --rebuild-domains --sample-rows 2000000
 #
-# At 19 int64 columns that is roughly 300 MB on disk.
+# At 19 int64 columns that is roughly 300 MB on disk.  csv_directory and
+# neurocard_path are present because --rebuild-domains reads them; it writes to
+# its own prepared_directory rather than the shared data/neurocard_prepared/
+# job_light, so rebuilding this fixture cannot disturb the live configs that
+# read the shared one.
 dataset:
   type: neurocard_full_join
   name: job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture
-  prepared_directory: data/neurocard_prepared/job_light
+  prepared_directory: data/neurocard_prepared/job_light_conjunctive_2m
+  csv_directory: datasets/job
+  neurocard_path: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard
   sampling_mode: fixture
   sample_batch_size: 2048
   num_workers: 0
@@ -110,22 +116,28 @@ rare_support:
     enabled: true
     root_data_only: true
     include_categorical_root_data: false
-    # The tail this feature targets lives on movie_keyword.keyword_id, whose
-    # domain is ~134k, and movie_companies.company_id at ~235k.  A 4096 cap
+    # Model columns are table:column.  The dotted table.column spelling is the
+    # NeuroCard root join-count dataframe's, and matches no model column.
+    # The tail this feature targets lives on movie_keyword:keyword_id, whose
+    # domain is ~134k, and movie_companies:company_id at ~235k.  A 4096 cap
     # excludes exactly the columns the search needs, so the pool is restricted
-    # by name instead: that keeps key columns such as title.id out without
-    # also excluding the high-cardinality columns that matter.  Counts come
-    # from the materialized rows, so a wide domain costs one mass vector, not
-    # one candidate per domain value.
+    # by name instead: that keeps key columns such as title:id out without
+    # also excluding the high-cardinality columns that matter.
+    #
+    # A categorical column yields one equality region per OBSERVED value, and
+    # at 2M rows essentially every one of the ~134k keyword ids is observed, so
+    # this really is ~134k candidates per such column.  max_candidates_per_column
+    # keeps the rarest ones, which are the only ones with a deficit to repair.
     max_candidate_domain_size: 262144
+    max_candidates_per_column: 4096
     candidate_column_names:
-      - title.production_year
-      - title.kind_id
-      - movie_keyword.keyword_id
-      - movie_companies.company_id
-      - movie_info.info_type_id
-      - movie_info_idx.info_type_id
-      - cast_info.role_id
+      - title:production_year
+      - title:kind_id
+      - movie_keyword:keyword_id
+      - movie_companies:company_id
+      - movie_info:info_type_id
+      - movie_info_idx:info_type_id
+      - cast_info:role_id
     minimum_expected_context_support: 100
     max_selected_strata: 64
     support_planning_steps: 20000
@@ -154,7 +166,7 @@ rare_support:
       # and the keyword column has to be in the pool for that to be possible.
       require_conjunctions: true
       required_extension_columns:
-        - movie_keyword.keyword_id
+        - movie_keyword:keyword_id
   allocation:
     strategy: support_deficit
   diagnostics:

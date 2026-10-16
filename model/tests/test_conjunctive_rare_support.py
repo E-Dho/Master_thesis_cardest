@@ -11,6 +11,7 @@ import json
 import pathlib
 import shutil
 import sys
+import time
 import tempfile
 import unittest
 
@@ -25,6 +26,7 @@ from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
     ExactRootStratumProvider,
+    RootColumnMass,
     _can_extend_any_seed,
     _expected_lower_threshold_counts,
     _expected_native_range_interval_counts,
@@ -526,6 +528,31 @@ class ConfigValidationTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "max_joint_row_fraction"):
                     validate_config(self.config(max_depth=2, max_joint_row_fraction=value))
 
+    def test_a_dotted_column_name_is_rejected(self):
+        # table.column is the NeuroCard root join-count dataframe spelling.  It
+        # looks right, matches no model column, and silently empties the pool.
+        for setting in ("required_extension_columns",):
+            with self.subTest(setting=setting):
+                with self.assertRaisesRegex(ValueError, "qualified model column name"):
+                    validate_config(
+                        self.config(max_depth=2, **{setting: ["movie_keyword.keyword_id"]})
+                    )
+
+    def test_a_dotted_candidate_column_name_is_rejected(self):
+        config = self.config(max_depth=2)
+        config["rare_support"]["discovery"]["candidate_column_names"] = [
+            "title.production_year"
+        ]
+        with self.assertRaisesRegex(ValueError, "qualified model column name"):
+            validate_config(config)
+
+    def test_colon_qualified_candidate_names_are_accepted(self):
+        config = self.config(max_depth=2)
+        config["rare_support"]["discovery"]["candidate_column_names"] = [
+            "title:production_year"
+        ]
+        validate_config(config)
+
     def test_required_extension_columns_must_be_a_list(self):
         with self.assertRaisesRegex(ValueError, "required_extension_columns"):
             validate_config(
@@ -539,7 +566,7 @@ class ConfigValidationTest(unittest.TestCase):
                 minimum_materialized_rows=2_000_000,
                 max_joint_row_fraction=0.01,
                 require_conjunctions=True,
-                required_extension_columns=["movie_keyword.keyword_id"],
+                required_extension_columns=["movie_keyword:keyword_id"],
             )
         )
 
@@ -1560,6 +1587,63 @@ class ShippedConfigTest(unittest.TestCase):
                     "declaring the row count it needs",
                 )
 
+    def test_every_configured_column_name_is_colon_qualified(self):
+        # The dotted spelling matches no model column, so a config using it
+        # silently ends up with an empty candidate pool.
+        for path, config in self.configs():
+            discovery = ((config.get("rare_support", {}) or {}).get("discovery", {}) or {})
+            conjunctive = discovery.get("conjunctive", {}) or {}
+            names = list(discovery.get("candidate_column_names", ()) or ())
+            names += list(conjunctive.get("required_extension_columns", ()) or ())
+            for name in names:
+                with self.subTest(config=path.name, column=name):
+                    self.assertIn(":", str(name))
+                    self.assertNotRegex(str(name), r"^[^:]*\.[^:]*$")
+
+    def test_a_fixture_config_can_build_the_fixture_it_requires(self):
+        # --rebuild-domains reads dataset.csv_directory unconditionally, so a
+        # config that documents a rebuild without it cannot create its fixture.
+        for path, config in self.configs():
+            conjunctive = (
+                ((config.get("rare_support", {}) or {}).get("discovery", {}) or {})
+                .get("conjunctive", {})
+                or {}
+            )
+            if int(conjunctive.get("minimum_materialized_rows", 0) or 0) <= 0:
+                continue
+            dataset = config.get("dataset", {}) or {}
+            with self.subTest(config=path.name):
+                self.assertIn(
+                    "csv_directory",
+                    dataset,
+                    f"{path.name} requires a rebuilt fixture but has no csv_directory "
+                    "for prepare_neurocard_data --rebuild-domains",
+                )
+
+    def test_a_rebuilt_fixture_does_not_overwrite_a_shared_one(self):
+        shared = {}
+        for path, config in self.configs():
+            dataset = config.get("dataset", {}) or {}
+            directory = dataset.get("prepared_directory")
+            if directory is None:
+                continue
+            shared.setdefault(str(directory), []).append(path.name)
+        for path, config in self.configs():
+            conjunctive = (
+                ((config.get("rare_support", {}) or {}).get("discovery", {}) or {})
+                .get("conjunctive", {})
+                or {}
+            )
+            if int(conjunctive.get("minimum_materialized_rows", 0) or 0) <= 0:
+                continue
+            directory = str((config.get("dataset", {}) or {}).get("prepared_directory"))
+            with self.subTest(config=path.name):
+                self.assertEqual(
+                    shared.get(directory, []),
+                    [path.name],
+                    f"{path.name} rebuilds {directory}, which other configs also read",
+                )
+
     def test_the_conjunctive_job_light_config_can_actually_use_conjunctions(self):
         # Live sampling cannot impose a cross-table conjunction, so a config
         # that enables conjunctive discovery on sampling_mode: live validates
@@ -1602,11 +1686,11 @@ class FixtureEndToEndTest(unittest.TestCase):
         return ModelMetadata(
             columns=(
                 ColumnMetadata(
-                    "title.production_year", ColumnKind.DATA, (1950, 1960, 1970, 1980),
+                    "title:production_year", ColumnKind.DATA, (1950, 1960, 1970, 1980),
                     table="title",
                 ),
                 ColumnMetadata(
-                    "movie_keyword.keyword_id", ColumnKind.DATA, (1, 2, 3, OUTER_MISSING),
+                    "movie_keyword:keyword_id", ColumnKind.DATA, (1, 2, 3, OUTER_MISSING),
                     table="movie_keyword",
                 ),
                 ColumnMetadata(
@@ -1846,6 +1930,215 @@ class RequiredExtensionColumnTest(unittest.TestCase):
             ["C.c", "R.a"],
         )
         self.assertEqual(source.columns_excluded_by_name, ("P.b",))
+
+
+class RowlessProviderFailClosedTest(unittest.TestCase):
+    """require_conjunctions must also cover the oldest fallback of all."""
+
+    def provider(self):
+        meta = ModelMetadata(
+            columns=(ColumnMetadata("t:a", ColumnKind.DATA, (0, 1, 2), table="t"),),
+            full_join_cardinality=9.0,
+            join_root="t",
+            join_tables=("t",),
+            join_edges=(),
+        )
+        masses = {
+            0: RootColumnMass(
+                column_index=0,
+                values=(0, 1, 2),
+                counts=np.array([3.0, 3.0, 3.0]),
+                total_count=9.0,
+                source="test",
+                semantic_type="categorical",
+            )
+        }
+        # No encoded rows: this is the shape a live NeuroCard root-JCT provider
+        # has, and the one every JOB-light live run actually builds.
+        return ExactRootStratumProvider(meta, masses)
+
+    def discover(self, source, **conjunctive):
+        options = {"enabled": True, "max_depth": 2}
+        options.update(conjunctive)
+        return source.discover(
+            n_total=1000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e9,
+            max_selected_strata=8,
+            conjunctive=options,
+        )
+
+    def test_a_rowless_provider_cannot_serve_conjunctions(self):
+        self.assertFalse(self.provider().supports_conjunctive_strata)
+
+    def test_require_conjunctions_raises_instead_of_falling_back(self):
+        # Setting conjunctive_requested=False for a rowless provider used to
+        # skip the later require_conjunctions check entirely, so the run
+        # returned depth-1 strata with no error at all.
+        with self.assertRaisesRegex(ValueError, "no materialized rows"):
+            self.discover(self.provider(), require_conjunctions=True)
+
+    def test_the_error_points_at_the_fixture_path(self):
+        with self.assertRaisesRegex(ValueError, "fixture or prepared-directory"):
+            self.discover(self.provider(), require_conjunctions=True)
+
+    def test_without_the_flag_it_still_falls_back_and_says_why(self):
+        source = self.provider()
+        selected = self.discover(source)
+        self.assertEqual({item.depth for item in selected}, {1})
+        self.assertFalse(source.conjunctive_status["applied"])
+        self.assertIn("materialized rows", str(source.conjunctive_status["reason"]))
+
+
+class ScaleTest(unittest.TestCase):
+    """Discovery has to survive a fixture large enough to mean something.
+
+    These sizes are small next to the 2M-row fixture the JOB-light config
+    requires, but large enough that the per-row Python decode this replaced
+    took orders of magnitude longer than the vectorized form.
+    """
+
+    ROWS = 200_000
+    DOMAIN = 20_000
+    BUDGET_SECONDS = 20.0
+
+    def setUp(self):
+        self.meta = ModelMetadata(
+            columns=(
+                ColumnMetadata(
+                    "title:production_year", ColumnKind.DATA,
+                    tuple(range(1900, 1900 + 200)), table="title",
+                ),
+                ColumnMetadata(
+                    "movie_keyword:keyword_id", ColumnKind.DATA,
+                    tuple(range(self.DOMAIN)), table="movie_keyword",
+                ),
+            ),
+            full_join_cardinality=float(self.ROWS),
+            join_root="title",
+            join_tables=("title", "movie_keyword"),
+            join_edges=(("title", "movie_keyword"),),
+        )
+        rng = np.random.default_rng(0)
+        self.rows = np.stack(
+            [rng.integers(0, 200, self.ROWS), rng.integers(0, self.DOMAIN, self.ROWS)],
+            axis=1,
+        ).astype(np.int64)
+        self.provider = ExactRootStratumProvider.from_encoded_rows(self.meta, self.rows)
+
+    def term(self, column_index, name, value):
+        return StratumTerm(
+            column_index=column_index,
+            column_name=name,
+            region_type="equality",
+            value=value,
+            realization_probability=PROBABILITIES["equality"],
+            realization_family="equality",
+        )
+
+    def pairs(self, count):
+        return [
+            (
+                self.term(0, "title:production_year", 1900 + index % 200),
+                self.term(1, "movie_keyword:keyword_id", index % self.DOMAIN),
+            )
+            for index in range(count)
+        ]
+
+    def test_joint_count_stays_within_budget_over_many_pairs(self):
+        started = time.perf_counter()
+        for terms in self.pairs(200):
+            self.provider.joint_count(terms)
+        elapsed = time.perf_counter() - started
+        self.assertLess(
+            elapsed,
+            self.BUDGET_SECONDS,
+            f"200 joint_count calls over {self.ROWS} rows took {elapsed:.1f}s; the "
+            "beam evaluates beam_width * extension_width of them",
+        )
+
+    def test_joint_count_agrees_with_a_direct_row_scan(self):
+        # The vectorized path must give the same answer as decoding each row.
+        terms = self.pairs(1)[0]
+        direct = sum(
+            1
+            for row in self.rows
+            if all(
+                term.contains_value(self.meta.columns[term.column_index].domain[int(row[term.column_index])])
+                for term in terms
+            )
+        )
+        self.assertEqual(self.provider.joint_count(terms), float(direct))
+
+    def test_realized_support_mass_stays_within_budget(self):
+        started = time.perf_counter()
+        for terms in self.pairs(100):
+            self.provider.realized_support_mass(terms, PROBABILITIES)
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, self.BUDGET_SECONDS, f"took {elapsed:.1f}s")
+
+    def test_the_candidate_cap_bounds_a_high_cardinality_column(self):
+        uncapped = self.provider._candidates_for_masses(
+            self.provider.extension_column_masses,
+            n_total=self.ROWS,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e12,
+        )
+        capped = self.provider._candidates_for_masses(
+            self.provider.extension_column_masses,
+            n_total=self.ROWS,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e12,
+            max_candidates_per_column=256,
+        )
+        # One candidate per observed value: the cap is what keeps that bounded.
+        self.assertGreater(len(uncapped), 10_000)
+        self.assertLessEqual(len(capped), 256 + 200)
+
+    def test_the_cap_keeps_the_rarest_regions(self):
+        capped = self.provider._candidates_for_masses(
+            {1: self.provider.extension_column_masses[1]},
+            n_total=self.ROWS,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e12,
+            max_candidates_per_column=64,
+        )
+        counts = np.asarray(self.provider.extension_column_masses[1].counts)
+        kept = sorted(float(item.foj_count) for item in capped)
+        rarest = sorted(float(value) for value in np.sort(counts[counts > 0])[:64])
+        self.assertEqual(kept, rarest)
+
+    def test_an_ordered_column_is_not_trimmed(self):
+        # Tail regions are cumulative, so dropping values would move thresholds.
+        masses = {0: self.provider.extension_column_masses[0]}
+        masses[0] = RootColumnMass(
+            column_index=0,
+            values=masses[0].values,
+            counts=masses[0].counts,
+            total_count=masses[0].total_count,
+            source=masses[0].source,
+            semantic_type="ordered",
+        )
+        kwargs = dict(
+            n_total=self.ROWS,
+            predicate_probabilities=PROBABILITIES,
+            threshold=1e12,
+        )
+        uncapped = self.provider._candidates_for_masses(masses, **kwargs)
+        capped = self.provider._candidates_for_masses(
+            masses, max_candidates_per_column=8, **kwargs
+        )
+        # The cap must be a no-op on an ordered column: trimming values would
+        # move every tail threshold, not just shorten the candidate list.
+        self.assertGreater(len(uncapped), 8)
+        self.assertEqual(
+            [item.stratum_id for item in capped],
+            [item.stratum_id for item in uncapped],
+        )
+        self.assertEqual(
+            [item.support_deficit for item in capped],
+            [item.support_deficit for item in uncapped],
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

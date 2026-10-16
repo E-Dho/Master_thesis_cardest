@@ -1023,6 +1023,9 @@ class RareSupportSampleSource:
             ),
             max_selected_strata=int(discovery.get("max_selected_strata", 64)),
             conjunctive=dict(discovery.get("conjunctive", {})),
+            discovery_limits={
+                "max_candidates_per_column": discovery.get("max_candidates_per_column")
+            },
         )
         self.conjunctive_status = dict(getattr(self.provider, "conjunctive_status", {}))
         if self.conjunctive_status.get("requested") and not self.conjunctive_status.get("applied"):

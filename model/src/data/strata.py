@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from math import isfinite
 from typing import Any, Iterable, Mapping
 
@@ -217,6 +218,8 @@ class ExactRootStratumProvider:
         self.columns_skipped_by_domain_cap: dict[str, int] = {}
         # Columns left out because candidate_column_names did not list them.
         self.columns_excluded_by_name: tuple[str, ...] = ()
+        self._term_mask_cache: dict[tuple[Any, ...], np.ndarray] = {}
+        self._term_factor_cache: dict[tuple[Any, ...], np.ndarray] = {}
         self.encoded_rows = None if encoded_rows is None else np.asarray(encoded_rows, dtype=np.int64)
         self.row_weights = None if row_weights is None else np.asarray(row_weights, dtype=float)
         self.source = source
@@ -467,17 +470,59 @@ class ExactRootStratumProvider:
 
         return self.encoded_rows is not None
 
+    def _term_domain_mask(self, term: "StratumTerm") -> np.ndarray:
+        """Membership as a boolean lookup over the column's encoded domain.
+
+        Membership depends only on the encoded id, so it is decided once per
+        domain value rather than once per row.  Decoding every row to a Python
+        object and calling ``contains_value`` on it -- which is what this
+        replaced -- costs O(rows) interpreted work on every beam-search pair,
+        and the beam evaluates beam_width * extension_width of them.
+        """
+
+        key = _term_cache_key(term)
+        cached = self._term_mask_cache.get(key)
+        if cached is not None:
+            return cached
+        column = self.metadata.columns[int(term.column_index)]
+        mask = np.fromiter(
+            (term.contains_value(value) for value in column.domain),
+            dtype=bool,
+            count=len(column.domain),
+        )
+        self._term_mask_cache[key] = mask
+        return mask
+
+    def _term_factor_vector(
+        self,
+        term: "StratumTerm",
+        predicate_probabilities: Mapping[str, float],
+    ) -> np.ndarray:
+        key = _term_cache_key(term)
+        cached = self._term_factor_cache.get(key)
+        if cached is not None:
+            return cached
+        mass = self.column_masses.get(int(term.column_index))
+        values = (
+            mass.values
+            if mass is not None
+            else self.metadata.columns[int(term.column_index)].domain
+        )
+        factors = per_value_realization_factors(
+            term, values=values, predicate_probabilities=predicate_probabilities
+        )
+        self._term_factor_cache[key] = factors
+        return factors
+
     def joint_count(self, terms: "tuple[StratumTerm, ...]") -> float:
         if self.encoded_rows is None:
             raise NotImplementedError("joint counts require materialized rows")
         mask = np.ones(self.encoded_rows.shape[0], dtype=bool)
         for term in terms:
-            column = self.metadata.columns[term.column_index]
-            values = [
-                column.domain[int(index)]
-                for index in self.encoded_rows[:, term.column_index]
-            ]
-            mask &= np.array([term.contains_value(value) for value in values], dtype=bool)
+            lookup = self._term_domain_mask(term)
+            mask &= lookup[self.encoded_rows[:, int(term.column_index)]]
+            if not mask.any():
+                return 0.0
         weights = self.row_weights
         if weights is None:
             return float(mask.sum())
@@ -513,15 +558,7 @@ class ExactRootStratumProvider:
             return 0.0
         accumulated = weights.astype(float).copy()
         for term in terms:
-            mass = self.column_masses.get(int(term.column_index))
-            values = (
-                mass.values
-                if mass is not None
-                else self.metadata.columns[int(term.column_index)].domain
-            )
-            factors = per_value_realization_factors(
-                term, values=values, predicate_probabilities=predicate_probabilities
-            )
+            factors = self._term_factor_vector(term, predicate_probabilities)
             accumulated = accumulated * factors[rows[:, int(term.column_index)]]
             if not np.any(accumulated):
                 return 0.0
@@ -534,23 +571,40 @@ class ExactRootStratumProvider:
         n_total: int,
         predicate_probabilities: Mapping[str, float],
         threshold: float,
+        max_candidates_per_column: int | None = None,
     ) -> list[RootDataStratum]:
-        """Depth-1 region candidates for a set of column masses."""
+        """Depth-1 region candidates for a set of column masses.
+
+        A categorical column yields one equality region per *observed* value,
+        so on a 2M-row fixture a 134k-domain id column really does yield ~134k
+        of them.  ``max_candidates_per_column`` keeps the rarest, which are the
+        only ones with a support deficit to repair; the rest are zeroed out of
+        the counts, which leaves the kept candidates' probabilities exact
+        because those are still taken over the full column total.  Ordered
+        columns are left alone: their tail regions are cumulative, so dropping
+        values would move the thresholds rather than just shorten the list.
+        """
 
         candidates: list[RootDataStratum] = []
+        limit = None if max_candidates_per_column is None else int(max_candidates_per_column)
         for column_index, mass in masses.items():
             column = self.metadata.columns[column_index]
-            builder = (
-                _numeric_root_candidates
-                if mass.semantic_type == "ordered"
-                else _categorical_root_candidates
-            )
+            ordered = mass.semantic_type == "ordered"
+            builder = _numeric_root_candidates if ordered else _categorical_root_candidates
+            counts = np.asarray(mass.counts, dtype=float)
+            if limit is not None and limit > 0 and not ordered:
+                present = np.flatnonzero(counts > 0)
+                if present.size > limit:
+                    order = np.argsort(counts[present], kind="stable")[:limit]
+                    trimmed = np.zeros_like(counts)
+                    trimmed[present[order]] = counts[present[order]]
+                    counts = trimmed
             candidates.extend(
                 builder(
                     column_index,
                     column.name,
                     mass.values,
-                    mass.counts,
+                    counts,
                     mass.total_count,
                     n_total=n_total,
                     predicate_probabilities=predicate_probabilities,
@@ -669,8 +723,10 @@ class ExactRootStratumProvider:
         minimum_expected_context_support: float,
         max_selected_strata: int,
         conjunctive: Mapping[str, Any] | None = None,
+        discovery_limits: Mapping[str, Any] | None = None,
     ) -> tuple[RootDataStratum, ...]:
         conjunctive = dict(conjunctive or {})
+        discovery_limits = dict(discovery_limits or {})
         conjunctive_requested = bool(conjunctive.get("enabled", False))
         self.conjunctive_status: dict[str, Any] = {
             "requested": conjunctive_requested,
@@ -743,12 +799,26 @@ class ExactRootStratumProvider:
                 "provider has no materialized rows, so exact joint counts are "
                 "unavailable; falling back to depth-1 strata"
             )
+            # require_conjunctions has to be honoured here too.  Checking it only
+            # after discovery meant the oldest fallback of all -- a live sampler
+            # with no materialized rows -- walked straight past the fail-closed
+            # contract and returned depth-1 strata without error.
+            if bool(conjunctive.get("require_conjunctions", False)):
+                raise ValueError(
+                    "require_conjunctions=true but this provider has no materialized "
+                    "rows, so no conjunction can be counted or sampled. Use a fixture "
+                    "or prepared-directory source; live NeuroCard sampling filters the "
+                    "root join-count table one column at a time and cannot impose a "
+                    "conjunction"
+                )
             conjunctive_requested = False
+        max_candidates_per_column = discovery_limits.get("max_candidates_per_column")
         candidates = self._candidates_for_masses(
             self.column_masses,
             n_total=n_total,
             predicate_probabilities=predicate_probabilities,
             threshold=minimum_expected_context_support,
+            max_candidates_per_column=max_candidates_per_column,
         )
         if conjunctive_requested:
             root = self.metadata.join_root
@@ -788,6 +858,7 @@ class ExactRootStratumProvider:
                     n_total=n_total,
                     predicate_probabilities=predicate_probabilities,
                     threshold=minimum_expected_context_support,
+                    max_candidates_per_column=max_candidates_per_column,
                 )
             )
             # Drop candidates that cannot extend any seed *before* applying the
@@ -977,10 +1048,14 @@ def membership_matrix(
     for stratum_index, stratum in enumerate(strata):
         for term in stratum.terms:
             column = metadata.columns[term.column_index]
-            values = [column.domain[int(value)] for value in rows[:, term.column_index]]
-            matrix[:, stratum_index] &= np.array(
-                [term.contains_value(value) for value in values], dtype=bool
+            # One decision per domain value, then a gather: the per-row decode
+            # this replaced was O(rows) interpreted work per term.
+            lookup = np.fromiter(
+                (term.contains_value(value) for value in column.domain),
+                dtype=bool,
+                count=len(column.domain),
             )
+            matrix[:, stratum_index] &= lookup[rows[:, term.column_index]]
     return matrix
 
 
@@ -1266,10 +1341,24 @@ def table_subset_inclusion_probability(
     # only the explicitly required tables overestimates survival on any join
     # deeper than one hop.
     required = {table for table in required_tables if table is not None}
-    if root_table is not None and required:
-        required = root_paths_closure(required, root_table, tuple(metadata.join_edges))
-    tables = {table for table in required if table != root_table}
     total = len({column.table for column in metadata.columns if column.table is not None})
+    # Scoring calls this once per candidate per served head, and the root-path
+    # closure walks the join graph, so memoize on what the answer depends on.
+    return _table_subset_inclusion_probability(
+        frozenset(required), root_table, total, tuple(metadata.join_edges)
+    )
+
+
+@lru_cache(maxsize=4096)
+def _table_subset_inclusion_probability(
+    required: frozenset[str],
+    root_table: str | None,
+    total: int,
+    edges: tuple[tuple[str, str], ...],
+) -> float:
+    if root_table is not None and required:
+        required = frozenset(root_paths_closure(set(required), root_table, edges))
+    tables = {table for table in required if table != root_table}
     if total <= 1 or not tables:
         return 1.0
     k = len(tables)
@@ -1285,6 +1374,19 @@ EXPECTED_SUPPORT_FIELD = {
     "upper": "expected_upper_count",
     "range": "expected_range_support",
 }
+
+
+def _term_cache_key(term: "StratumTerm") -> tuple[Any, ...]:
+    """Identity of a term for caching, independent of literal value types."""
+
+    return (
+        int(term.column_index),
+        str(term.region_type),
+        str(term.realization_family),
+        _literal_id(term.value),
+        _literal_id(term.lower),
+        _literal_id(term.upper),
+    )
 
 
 def per_value_realization_factors(

@@ -407,6 +407,15 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("rare_support.discovery.max_selected_strata must be positive")
         if "support_planning_steps" in discovery and int(discovery["support_planning_steps"]) <= 0:
             raise ValueError("rare_support.discovery.support_planning_steps must be positive")
+        _require_qualified_column_names(
+            discovery.get("candidate_column_names", ()),
+            "rare_support.discovery.candidate_column_names",
+        )
+        if "max_candidates_per_column" in discovery:
+            if int(discovery["max_candidates_per_column"]) <= 0:
+                raise ValueError(
+                    "rare_support.discovery.max_candidates_per_column must be positive"
+                )
         allocation = str(rare_support.get("allocation", {}).get("strategy", "support_deficit"))
         if allocation != "support_deficit":
             raise ValueError("rare_support.allocation.strategy must be support_deficit")
@@ -432,6 +441,10 @@ def validate_config(config: dict[str, Any]) -> None:
                     "rare_support.discovery.conjunctive.required_extension_columns "
                     "must be a list of column names"
                 )
+            _require_qualified_column_names(
+                required_columns,
+                "rare_support.discovery.conjunctive.required_extension_columns",
+            )
             rows_floor = int(conjunctive.get("minimum_materialized_rows", 0) or 0)
             if rows_floor < 0:
                 raise ValueError(
@@ -461,6 +474,27 @@ def validate_config(config: dict[str, Any]) -> None:
                 "with a row drawn from the whole conjunction, which leaks the "
                 "omitted terms into the targets. Remove the key."
             )
+
+
+def _require_qualified_column_names(names: Any, setting: str) -> None:
+    """Model column names are ``table:column``, never ``table.column``.
+
+    The dotted form is what the NeuroCard root join-count dataframe uses, so it
+    looks right and matches nothing: the column simply never appears in any
+    candidate pool.  Catching it here means a typo fails at config load rather
+    than after the fixture has been built and the job queued.
+    """
+
+    for name in names or ():
+        text = str(name)
+        if ":" in text:
+            continue
+        raise ValueError(
+            f"{setting} entry {text!r} is not a qualified model column name. "
+            "Model columns are 'table:column' (for example 'title:production_year'); "
+            "'table.column' is the root join-count dataframe spelling and matches "
+            "no model column"
+        )
 
 
 def resolve_early_stopping_monitor(config: Mapping[str, Any]) -> str:
