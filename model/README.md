@@ -868,6 +868,11 @@ validation disabled is rejected too. `resolve_early_stopping_monitor` in
 `model/src/config.py` is the single resolution rule the validator and the
 trainer both read, so they cannot drift.
 
+`validation.minimize` describes the validation selection metric, so it is not
+applied when the monitor is `train_loss`: the training loss is always
+minimized, and a config with `minimize: false` must not come to treat a rising
+loss as progress.
+
 Two things this does not fix. Watching `train_loss` is still a weak signal, so
 a config that declares it is declaring a limitation, not a configuration. And
 the available selection metrics -- `validation_nll`, `validation_weighted_nll`,
@@ -1288,6 +1293,46 @@ materialized sample rather than fresh draws from the join, its q-errors answer
 against a live run confounds the sampling mode with the feature. A test asserts
 that at least one JOB-light config can reach conjunctions, so this cannot
 silently revert to a configuration that only looks like it exercises them.
+
+It also does not run against the prepared fixture as shipped.
+`prepare_neurocard_data` writes `sample_rows.npy` at `dataset.sample_batch_size`
+rows, 512 by default, and returns early when a manifest already exists, so the
+prepared JOB-light directory holds 512 rows against a 2.1e12-row join. Rarity
+estimated from 512 rows is not rarity, and `minimum_joint_rows: 100` against it
+would have required a "rare" conjunction to cover a fifth of the sample. The
+preconditions below make that refuse to start rather than produce counts that
+look exact; the config states the fixture it needs and the command that builds
+it. Live cross-table conditional sampling remains the only way to get
+conjunctions without a large materialized reservoir, and is not implemented.
+
+### Discovery preconditions
+
+Conjunctive discovery estimates joint support from the materialized rows, so
+several things have to hold before the numbers mean anything. All of them are
+checked at discovery time and refuse the run rather than degrade it:
+
+- `minimum_materialized_rows`: the row count the fixture must hold. The error
+  names the row count found and the `prepare_neurocard_data --rebuild-domains
+  --sample-rows N` command that fixes it. Zero disables the check, which is
+  what a deliberately tiny smoke fixture declares.
+- `max_joint_row_fraction`: refuses a `minimum_joint_rows` that is a large
+  fraction of the available rows, because a region that common is not rare and
+  the search would only return regions the model already sees. Defaults to 5%.
+- `required_extension_columns`: column names that must be in the extension
+  pool. The error says which of `max_candidate_domain_size` and
+  `candidate_column_names` excluded them, so "the column carrying the tail is
+  not in the pool" is distinguishable from "no conjunction was found". On
+  JOB-light the tail lives on `movie_keyword.keyword_id`, whose ~134k domain a
+  4096 cap silently excludes.
+- `require_conjunctions`: makes selecting no conjunctive stratum a failure
+  rather than a logged fallback, for a run whose purpose is to exercise them.
+
+`candidate_column_names` now also applies on the materialized path, not only
+the root-JCT one. Restricting the pool by name is what lets a fixture raise
+`max_candidate_domain_size` high enough to include a 134k-domain keyword column
+while still keeping key columns such as `title.id` out of it. Counts come from
+the rows, so a wide domain costs one mass vector rather than one candidate per
+domain value.
 
 ### Diagnostics
 

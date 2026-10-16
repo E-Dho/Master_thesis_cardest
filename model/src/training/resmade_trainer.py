@@ -748,6 +748,12 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     early_stopping_monitor = (
         selection_metric if early_stopping_monitor_mode == "validation" else "loss"
     )
+    # validation.minimize describes the validation selection metric.  The
+    # training loss is always minimized, so a config with minimize=false and
+    # monitor=train_loss must not end up treating a rising loss as progress.
+    early_stopping_minimize = (
+        minimize_selection if early_stopping_monitor_mode == "validation" else True
+    )
     early_stopping_best_metric: float | None = None
     early_stopping_best_step: int | None = None
     early_stopped = False
@@ -993,7 +999,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 if early_stopping_enabled and early_stopping_monitor_value is not None:
                     if early_stopping_best_metric is None:
                         improved_for_stop = True
-                    elif minimize_selection:
+                    elif early_stopping_minimize:
                         improved_for_stop = (
                             early_stopping_monitor_value
                             < early_stopping_best_metric - early_stopping_min_delta

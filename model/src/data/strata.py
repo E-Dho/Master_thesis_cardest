@@ -213,6 +213,10 @@ class ExactRootStratumProvider:
         # would be a root column and require_distinct_tables would reject all
         # of them, leaving conjunctive discovery silently inert.
         self.extension_column_masses = dict(extension_column_masses or {})
+        # {column name: domain size} for columns a domain cap excluded.
+        self.columns_skipped_by_domain_cap: dict[str, int] = {}
+        # Columns left out because candidate_column_names did not list them.
+        self.columns_excluded_by_name: tuple[str, ...] = ()
         self.encoded_rows = None if encoded_rows is None else np.asarray(encoded_rows, dtype=np.int64)
         self.row_weights = None if row_weights is None else np.asarray(row_weights, dtype=float)
         self.source = source
@@ -229,19 +233,33 @@ class ExactRootStratumProvider:
         source: str = "materialized_full_join",
         root_column_semantics: Mapping[str, str] | None = None,
         max_domain_size: int | None = None,
+        column_names: Iterable[str] | None = None,
     ) -> "ExactRootStratumProvider":
         encoded_rows = np.asarray(encoded_rows, dtype=np.int64)
         root = metadata.join_root
         masses: dict[int, RootColumnMass] = {}
         extensions: dict[int, RootColumnMass] = {}
+        skipped: dict[str, int] = {}
+        excluded_by_name: list[str] = []
         limit = None if max_domain_size is None else int(max_domain_size)
+        # The root-JCT provider already honours candidate_column_names; the
+        # materialized path ignored it, so a fixture had no way to keep a key
+        # column such as title.id out of the pool except by capping the domain,
+        # which also excludes the high-cardinality columns the search needs.
+        allowed = None if column_names is None else set(column_names)
         for column_index, column in enumerate(metadata.columns):
             if column.kind != ColumnKind.DATA:
                 continue
+            if allowed is not None and column.name not in allowed:
+                excluded_by_name.append(column.name)
+                continue
             # The same cap the root-JCT provider honours, applied to both pools
             # so widening the extension pool cannot quietly allocate a mass
-            # vector per high-cardinality column.
+            # vector per high-cardinality column.  Which columns it excluded is
+            # recorded, because "the column I care about is not in the pool" is
+            # otherwise indistinguishable from "no conjunction was found".
             if limit is not None and column.domain_size > limit:
+                skipped[column.name] = int(column.domain_size)
                 continue
             counts = np.bincount(
                 encoded_rows[:, column_index],
@@ -260,13 +278,16 @@ class ExactRootStratumProvider:
             extensions[column_index] = mass
             if column.table == root:
                 masses[column_index] = mass
-        return cls(
+        provider = cls(
             metadata,
             masses,
             encoded_rows=encoded_rows,
             source=source,
             extension_column_masses=extensions,
         )
+        provider.columns_skipped_by_domain_cap = dict(skipped)
+        provider.columns_excluded_by_name = tuple(excluded_by_name)
+        return provider
 
     @classmethod
     def from_neurocard_root_jct(
@@ -657,6 +678,66 @@ class ExactRootStratumProvider:
             "reason": None,
             "conjunctive_selected": 0,
         }
+        if conjunctive_requested and self.supports_conjunctive_strata:
+            # A conjunction's rarity is estimated from the materialized rows, so
+            # the row count bounds what "rare" can even mean here.  The default
+            # prepared fixture is sized for validation batches, not for support
+            # estimation: 512 rows against a 2.1e12-row join cannot distinguish
+            # a rare joint region from an absent one, and minimum_joint_rows=100
+            # would then demand that a "rare" conjunction cover a fifth of the
+            # sample.  Refuse rather than produce numbers that look like exact
+            # joint counts.
+            available = int(self.encoded_rows.shape[0])
+            floor = int(conjunctive.get("minimum_materialized_rows", 0) or 0)
+            if floor > 0 and available < floor:
+                raise ValueError(
+                    f"conjunctive discovery needs at least {floor} materialized rows "
+                    f"and this provider has {available}. Rebuild the prepared fixture "
+                    "with python3 -m model.scripts.prepare_neurocard_data --config "
+                    "<config> --rebuild-domains --sample-rows <N>, or lower "
+                    "rare_support.discovery.conjunctive.minimum_materialized_rows "
+                    "to accept the smaller sample"
+                )
+            required_columns = tuple(conjunctive.get("required_extension_columns", ()) or ())
+            if required_columns:
+                present = {
+                    self.metadata.columns[index].name
+                    for index in self.extension_column_masses
+                }
+                missing = [name for name in required_columns if name not in present]
+                if missing:
+                    causes = []
+                    capped = {
+                        name: size
+                        for name, size in self.columns_skipped_by_domain_cap.items()
+                        if name in missing
+                    }
+                    if capped:
+                        causes.append(
+                            f"max_candidate_domain_size excluded {capped} by domain size"
+                        )
+                    by_name = [
+                        name for name in self.columns_excluded_by_name if name in missing
+                    ]
+                    if by_name:
+                        causes.append(f"candidate_column_names does not list {by_name}")
+                    if not causes:
+                        causes.append("they are not DATA columns of this schema")
+                    raise ValueError(
+                        f"required_extension_columns {missing!r} are not in the "
+                        "extension candidate pool, so no conjunction can use them: "
+                        + "; ".join(causes)
+                    )
+            joint_floor = float(conjunctive.get("minimum_joint_rows", 32.0))
+            max_fraction = float(conjunctive.get("max_joint_row_fraction", 0.05) or 0.0)
+            if max_fraction > 0.0 and available > 0 and joint_floor / available > max_fraction:
+                raise ValueError(
+                    f"minimum_joint_rows={joint_floor:g} is "
+                    f"{joint_floor / available:.1%} of the {available} materialized rows, "
+                    f"above max_joint_row_fraction={max_fraction:.1%}. A region that "
+                    "common is not rare, so the search would only ever return regions "
+                    "the model already sees"
+                )
         if conjunctive_requested and not self.supports_conjunctive_strata:
             self.conjunctive_status["reason"] = (
                 "provider has no materialized rows, so exact joint counts are "
@@ -776,6 +857,13 @@ class ExactRootStratumProvider:
         )[: max(0, int(max_selected_strata))]
         conjunctive_selected = sum(1 for item in selected if item.is_conjunctive)
         self.conjunctive_status["conjunctive_selected"] = conjunctive_selected
+        if conjunctive_requested:
+            self.conjunctive_status["materialized_rows"] = (
+                None if self.encoded_rows is None else int(self.encoded_rows.shape[0])
+            )
+            self.conjunctive_status["columns_skipped_by_domain_cap"] = dict(
+                self.columns_skipped_by_domain_cap
+            )
         # "applied" means conjunctions are actually in the selection.  Reporting
         # applied=true with a null reason while every selected stratum is
         # depth-1 is how a run can look like it exercised the feature when it
@@ -786,6 +874,18 @@ class ExactRootStratumProvider:
                 self.conjunctive_status["reason"] = (
                     "conjunctions were discovered but none ranked into the top "
                     "max_selected_strata by support deficit"
+                )
+            if bool(conjunctive.get("require_conjunctions", False)):
+                skipped = self.columns_skipped_by_domain_cap
+                raise ValueError(
+                    "require_conjunctions=true but no conjunctive stratum was "
+                    f"selected: {self.conjunctive_status['reason']}"
+                    + (
+                        "; note that max_candidate_domain_size excluded "
+                        f"{sorted(skipped)} from the candidate pool"
+                        if skipped
+                        else ""
+                    )
                 )
         if not selected:
             return ()

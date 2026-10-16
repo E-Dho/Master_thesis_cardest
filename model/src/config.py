@@ -426,6 +426,24 @@ def validate_config(config: dict[str, Any]) -> None:
                     raise ValueError(
                         f"rare_support.discovery.conjunctive.{key} must be >= {minimum}"
                     )
+            required_columns = conjunctive.get("required_extension_columns", ())
+            if required_columns is not None and not isinstance(required_columns, (list, tuple)):
+                raise ValueError(
+                    "rare_support.discovery.conjunctive.required_extension_columns "
+                    "must be a list of column names"
+                )
+            rows_floor = int(conjunctive.get("minimum_materialized_rows", 0) or 0)
+            if rows_floor < 0:
+                raise ValueError(
+                    "rare_support.discovery.conjunctive.minimum_materialized_rows "
+                    "must be nonnegative"
+                )
+            fraction = float(conjunctive.get("max_joint_row_fraction", 0.05) or 0.0)
+            if fraction < 0.0 or fraction > 1.0:
+                raise ValueError(
+                    "rare_support.discovery.conjunctive.max_joint_row_fraction must "
+                    "lie in [0, 1]"
+                )
             if float(conjunctive.get("minimum_joint_rows", 32.0)) <= 0.0:
                 raise ValueError(
                     "rare_support.discovery.conjunctive.minimum_joint_rows must be "

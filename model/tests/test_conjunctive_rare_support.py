@@ -6,16 +6,21 @@ machine that can run the sampler.
 
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import shutil
+import sys
 import tempfile
 import unittest
 
 import numpy as np
-import yaml
 
-from model.src.config import resolve_early_stopping_monitor, validate_config
+from model.src.config import (
+    load_simple_yaml,
+    resolve_early_stopping_monitor,
+    validate_config,
+)
 from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
@@ -510,6 +515,33 @@ class ConfigValidationTest(unittest.TestCase):
     def test_a_non_positive_joint_row_floor_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "minimum_joint_rows must be"):
             validate_config(self.config(minimum_joint_rows=0.0))
+
+    def test_a_negative_materialized_row_floor_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "minimum_materialized_rows"):
+            validate_config(self.config(max_depth=2, minimum_materialized_rows=-1))
+
+    def test_an_out_of_range_joint_row_fraction_is_rejected(self):
+        for value in (-0.1, 1.5):
+            with self.subTest(max_joint_row_fraction=value):
+                with self.assertRaisesRegex(ValueError, "max_joint_row_fraction"):
+                    validate_config(self.config(max_depth=2, max_joint_row_fraction=value))
+
+    def test_required_extension_columns_must_be_a_list(self):
+        with self.assertRaisesRegex(ValueError, "required_extension_columns"):
+            validate_config(
+                self.config(max_depth=2, required_extension_columns="title.kind_id")
+            )
+
+    def test_a_well_formed_precondition_block_is_accepted(self):
+        validate_config(
+            self.config(
+                max_depth=2,
+                minimum_materialized_rows=2_000_000,
+                max_joint_row_fraction=0.01,
+                require_conjunctions=True,
+                required_extension_columns=["movie_keyword.keyword_id"],
+            )
+        )
 
     def test_an_out_of_range_share_cap_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "max_stratum_share"):
@@ -1251,7 +1283,9 @@ class ProductionProviderDiscoveryTest(unittest.TestCase):
         self.assertEqual({item.depth for item in selected}, {1})
 
     def test_an_impossible_joint_row_floor_reports_the_search_not_the_pool(self):
-        source, _ = self.discover(minimum_joint_rows=1e9)
+        # max_joint_row_fraction off, or the floor would be refused outright
+        # before the search ever runs.
+        source, _ = self.discover(minimum_joint_rows=1e9, max_joint_row_fraction=0.0)
         self.assertEqual(source.conjunctive_status["conjunctive_candidates"], 0)
         self.assertFalse(source.conjunctive_status["applied"])
         self.assertIn("minimum_joint_rows", str(source.conjunctive_status["reason"]))
@@ -1452,9 +1486,10 @@ class ShippedConfigTest(unittest.TestCase):
     ROOT = pathlib.Path(__file__).resolve().parents[1] / "configs"
 
     def configs(self):
+        # load_simple_yaml, not PyYAML: PyYAML is not a declared dependency
+        # and this suite has to run wherever the project installs.
         for path in sorted(self.ROOT.glob("*.yaml")):
-            with path.open() as handle:
-                yield path, yaml.safe_load(handle)
+            yield path, load_simple_yaml(path)
 
     def test_every_early_stopping_config_declares_its_monitor_or_validates(self):
         for path, config in self.configs():
@@ -1473,6 +1508,56 @@ class ShippedConfigTest(unittest.TestCase):
                 self.assertTrue(
                     validation_on or training.get("early_stopping_monitor") is not None,
                     f"{path.name} early-stops without declaring what it monitors",
+                )
+
+    def test_the_package_does_not_import_undeclared_dependencies(self):
+        # This suite itself imported PyYAML, which is not in pyproject, so it
+        # failed on any machine that had not installed it incidentally.
+        # load_simple_yaml exists precisely so it does not have to.
+        # Scoped to the test suite: model/src reaches the vendored NeuroCard
+        # modules through sys.path at runtime, so those are legitimately not
+        # pip dependencies, but a test has nothing to load them from.
+        declared = {"numpy", "pandas", "psycopg", "torch", "pytest", "model"}
+        package = pathlib.Path(__file__).resolve().parent
+        offenders = []
+        for path in sorted(package.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""]
+                else:
+                    continue
+                for name in names:
+                    root = name.split(".")[0]
+                    if not root or root in declared:
+                        continue
+                    if root in sys.stdlib_module_names:
+                        continue
+                    offenders.append(f"{path.relative_to(package)}: {name}")
+        self.assertEqual(
+            offenders, [], f"tests import undeclared dependencies: {offenders}"
+        )
+
+    def test_a_conjunctive_config_declares_what_its_fixture_must_hold(self):
+        # A conjunctive run on a fixture estimates rarity from the row count,
+        # so a config that enables it has to state the scale it needs or state
+        # that it is deliberately a smoke run.
+        for path, config in self.configs():
+            discovery = ((config.get("rare_support", {}) or {}).get("discovery", {}) or {})
+            conjunctive = discovery.get("conjunctive", {}) or {}
+            if not bool(conjunctive.get("enabled", False)):
+                continue
+            dataset = config.get("dataset", {}) or {}
+            if str(dataset.get("sampling_mode", "fixture")) == "live":
+                continue
+            with self.subTest(config=path.name):
+                self.assertIn(
+                    "minimum_materialized_rows",
+                    conjunctive,
+                    f"{path.name} enables conjunctive discovery on a fixture without "
+                    "declaring the row count it needs",
                 )
 
     def test_the_conjunctive_job_light_config_can_actually_use_conjunctions(self):
@@ -1618,6 +1703,149 @@ class FixtureEndToEndTest(unittest.TestCase):
         meta, rows = self.metadata(), self.rows()
         provider = ExactRootStratumProvider.from_encoded_rows(meta, rows)
         self.assertTrue(provider.supports_conjunctive_strata)
+
+
+class DiscoveryPreconditionTest(unittest.TestCase):
+    """A run that cannot estimate rare support must refuse, not produce numbers."""
+
+    def provider(self, *, rows=None, cap=None, names=None):
+        return ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(),
+            chain_rows() if rows is None else rows,
+            max_domain_size=cap,
+            column_names=names,
+        )
+
+    def discover(self, source, **conjunctive):
+        options = dict(
+            enabled=True,
+            max_depth=2,
+            beam_width=8,
+            seed_width=8,
+            minimum_joint_rows=1.0,
+            require_distinct_tables=True,
+        )
+        options.update(conjunctive)
+        return source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=8,
+            conjunctive=options,
+        )
+
+    def test_a_fixture_below_the_row_floor_is_refused(self):
+        # The shipped JOB-light fixture held 512 rows against a 2.1e12-row join,
+        # which cannot tell a rare joint region from an absent one.
+        with self.assertRaisesRegex(ValueError, "materialized rows"):
+            self.discover(self.provider(), minimum_materialized_rows=100_000)
+
+    def test_the_refusal_names_the_rebuild_command(self):
+        with self.assertRaisesRegex(ValueError, "prepare_neurocard_data"):
+            self.discover(self.provider(), minimum_materialized_rows=100_000)
+
+    def test_a_fixture_at_the_floor_is_accepted(self):
+        self.discover(self.provider(), minimum_materialized_rows=40)
+
+    def test_no_floor_keeps_the_previous_behaviour(self):
+        self.discover(self.provider())
+
+    def test_a_joint_floor_that_defines_away_rarity_is_refused(self):
+        # minimum_joint_rows=100 on 512 rows demanded that a "rare" conjunction
+        # cover a fifth of the sample.
+        with self.assertRaisesRegex(ValueError, "not rare"):
+            self.discover(
+                self.provider(), minimum_joint_rows=100.0, max_joint_row_fraction=0.05
+            )
+
+    def test_the_fraction_guard_reports_both_sides(self):
+        with self.assertRaisesRegex(ValueError, r"250\.0% of the 40 materialized rows"):
+            self.discover(
+                self.provider(), minimum_joint_rows=100.0, max_joint_row_fraction=0.05
+            )
+
+    def test_a_small_joint_floor_passes_the_fraction_guard(self):
+        self.discover(self.provider(), minimum_joint_rows=1.0, max_joint_row_fraction=0.05)
+
+    def test_the_fraction_guard_can_be_switched_off_for_a_smoke_fixture(self):
+        self.discover(
+            self.provider(), minimum_joint_rows=20.0, max_joint_row_fraction=1.0
+        )
+
+    def test_require_conjunctions_turns_an_empty_result_into_a_failure(self):
+        with self.assertRaisesRegex(ValueError, "require_conjunctions"):
+            self.discover(
+                self.provider(),
+                minimum_joint_rows=1e9,
+                max_joint_row_fraction=0.0,
+                require_conjunctions=True,
+            )
+
+    def test_without_require_conjunctions_an_empty_result_only_reports(self):
+        source = self.provider()
+        self.discover(source, minimum_joint_rows=1e9, max_joint_row_fraction=0.0)
+        self.assertFalse(source.conjunctive_status["applied"])
+        self.assertIsNotNone(source.conjunctive_status["reason"])
+
+    def test_the_status_records_the_row_count_and_the_capped_columns(self):
+        source = self.provider(cap=2)
+        self.discover(source)
+        status = source.conjunctive_status
+        self.assertEqual(status["materialized_rows"], 40)
+        self.assertEqual(status["columns_skipped_by_domain_cap"], {"R.a": 3, "P.b": 3})
+
+
+class RequiredExtensionColumnTest(unittest.TestCase):
+    """The column carrying the tail has to be in the pool, or say why not."""
+
+    def discover(self, *, cap=None, names=None, required=()):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows(), max_domain_size=cap, column_names=names
+        )
+        return source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=8,
+            conjunctive={
+                "enabled": True,
+                "max_depth": 2,
+                "beam_width": 8,
+                "seed_width": 8,
+                "minimum_joint_rows": 1.0,
+                "require_distinct_tables": True,
+                "required_extension_columns": list(required),
+            },
+        )
+
+    def test_a_column_excluded_by_the_domain_cap_is_named_as_such(self):
+        # This is the JOB-light case: max_candidate_domain_size=4096 silently
+        # excluded keyword_id at ~134k, so the tail conjunction was
+        # undiscoverable and nothing said so.
+        with self.assertRaisesRegex(ValueError, "excluded .* by domain size"):
+            self.discover(cap=2, required=["P.b"])
+
+    def test_a_column_left_out_by_name_is_named_as_such(self):
+        with self.assertRaisesRegex(ValueError, "does not list"):
+            self.discover(names=["R.a", "C.c"], required=["P.b"])
+
+    def test_a_column_absent_from_the_schema_is_named_as_such(self):
+        with self.assertRaisesRegex(ValueError, "not DATA columns"):
+            self.discover(required=["nope.col"])
+
+    def test_a_satisfied_requirement_passes(self):
+        self.discover(names=["R.a", "C.c"], required=["C.c"])
+
+    def test_naming_columns_keeps_the_others_out_of_the_pool(self):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows(), column_names=["R.a", "C.c"]
+        )
+        meta = chain_data_metadata()
+        self.assertEqual(
+            sorted(meta.columns[index].name for index in source.extension_column_masses),
+            ["C.c", "R.a"],
+        )
+        self.assertEqual(source.columns_excluded_by_name, ("P.b",))
 
 
 if __name__ == "__main__":  # pragma: no cover

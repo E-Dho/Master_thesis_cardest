@@ -117,6 +117,11 @@ rare_support:
       minimum_joint_rows: 8
       require_distinct_tables: true
       max_stratum_share: 0.4
+      # A smoke fixture is far too small for the joint counts to mean anything
+      # about rarity.  Both guards are switched off deliberately: this config
+      # checks that the code path runs, not that the strata it finds are rare.
+      max_joint_row_fraction: 1.0
+      minimum_materialized_rows: 0
   allocation:
     strategy: support_deficit
   diagnostics:

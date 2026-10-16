@@ -14,6 +14,20 @@
 # so q-errors from this config answer "does the feature work end to end", not
 # "does the feature help".  Comparing against the live run would confound the
 # sampling mode with the feature.
+#
+# REQUIRES A REGENERATED FIXTURE.  prepare_neurocard_data writes sample_rows.npy
+# at dataset.sample_batch_size rows (512 by default) and returns early when a
+# manifest already exists, so the prepared JOB-light directory holds 512 rows
+# against a 2.1e12-row join.  That cannot estimate rare joint support at all:
+# a region covering a millionth of the join is expected in 0.0005 of those rows.
+# minimum_materialized_rows below makes the run refuse to start until the
+# fixture is rebuilt:
+#
+#   python3 -m model.scripts.prepare_neurocard_data \
+#     --config model/configs/job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture.yaml \
+#     --rebuild-domains --sample-rows 2000000
+#
+# At 19 int64 columns that is roughly 300 MB on disk.
 dataset:
   type: neurocard_full_join
   name: job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture
@@ -96,7 +110,22 @@ rare_support:
     enabled: true
     root_data_only: true
     include_categorical_root_data: false
-    max_candidate_domain_size: 4096
+    # The tail this feature targets lives on movie_keyword.keyword_id, whose
+    # domain is ~134k, and movie_companies.company_id at ~235k.  A 4096 cap
+    # excludes exactly the columns the search needs, so the pool is restricted
+    # by name instead: that keeps key columns such as title.id out without
+    # also excluding the high-cardinality columns that matter.  Counts come
+    # from the materialized rows, so a wide domain costs one mass vector, not
+    # one candidate per domain value.
+    max_candidate_domain_size: 262144
+    candidate_column_names:
+      - title.production_year
+      - title.kind_id
+      - movie_keyword.keyword_id
+      - movie_companies.company_id
+      - movie_info.info_type_id
+      - movie_info_idx.info_type_id
+      - cast_info.role_id
     minimum_expected_context_support: 100
     max_selected_strata: 64
     support_planning_steps: 20000
@@ -110,9 +139,22 @@ rare_support:
       beam_width: 64
       seed_width: 64
       extension_width: 64
+      # 100 of >= 2e6 rows is 0.005% of the fixture, so a region can still be
+      # rare and clear the floor.  Against the default 512-row fixture the same
+      # 100 would have demanded that a "rare" conjunction cover a fifth of the
+      # sample; max_joint_row_fraction refuses that arithmetic rather than
+      # letting it through.
       minimum_joint_rows: 100
+      max_joint_row_fraction: 0.01
+      minimum_materialized_rows: 2000000
       require_distinct_tables: true
       max_stratum_share: 0.1
+      # Fail the run rather than fall back silently: the point of this config is
+      # to exercise conjunctions, so discovering none is a failed experiment,
+      # and the keyword column has to be in the pool for that to be possible.
+      require_conjunctions: true
+      required_extension_columns:
+        - movie_keyword.keyword_id
   allocation:
     strategy: support_deficit
   diagnostics:

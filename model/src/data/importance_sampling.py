@@ -1222,6 +1222,7 @@ def _provider_for_source(
             source="synthetic_materialized_full_join",
             root_column_semantics=discovery_config.get("root_column_semantics"),
             max_domain_size=discovery_config.get("max_candidate_domain_size"),
+            column_names=discovery_config.get("candidate_column_names"),
         )
     dataset = getattr(source, "dataset", None)
     if dataset is not None and hasattr(dataset, "encoded_rows"):
@@ -1231,6 +1232,7 @@ def _provider_for_source(
             source="materialized_full_join",
             root_column_semantics=discovery_config.get("root_column_semantics"),
             max_domain_size=discovery_config.get("max_candidate_domain_size"),
+            column_names=discovery_config.get("candidate_column_names"),
         )
     base = getattr(source, "base_source", None)
     if base is not None:
@@ -1260,6 +1262,7 @@ def _provider_for_source(
                 source="prepared_sample_rows_fixture",
                 root_column_semantics=discovery_config.get("root_column_semantics"),
                 max_domain_size=discovery_config.get("max_candidate_domain_size"),
+                column_names=discovery_config.get("candidate_column_names"),
             )
     raise NotImplementedError(
         "importance sampling requires exact root-stratum support from a live "
