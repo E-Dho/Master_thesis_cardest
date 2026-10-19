@@ -219,6 +219,9 @@ class ExactRootStratumProvider:
         # Columns left out because candidate_column_names did not list them.
         self.columns_excluded_by_name: tuple[str, ...] = ()
         self._non_structural_cache: dict[int, np.ndarray] = {}
+        # Diagnostics filled by the beam search; see extend_with_conjunctions.
+        self.pruned_joint_counts: dict[int, float] = {}
+        self.discovered_columns: dict[int, int] = {}
         self._term_mask_cache: dict[tuple[Any, ...], np.ndarray] = {}
         self._term_factor_cache: dict[tuple[Any, ...], np.ndarray] = {}
         self.encoded_rows = None if encoded_rows is None else np.asarray(encoded_rows, dtype=np.int64)
@@ -651,6 +654,94 @@ class ExactRootStratumProvider:
             )
         return candidates
 
+    def _diagnose_uncovered_columns(
+        self,
+        uncovered: "list[str]",
+        candidates: "list[RootDataStratum]",
+        selected: "list[RootDataStratum]",
+        *,
+        minimum_joint_rows: float,
+    ) -> dict[str, dict[str, Any]]:
+        """Say which of the three stages lost each required column.
+
+        A column can be lost by never reaching the pool, by the joint-row floor
+        pruning every pairing, or by being out-ranked in the final deficit sort.
+        Those need opposite fixes -- naming the columns, lowering the floor,
+        widening selection -- so a failure that only says "not covered" costs a
+        whole cluster round to narrow down.
+        """
+
+        by_name = {column.name: index for index, column in enumerate(self.metadata.columns)}
+        cutoff = (
+            min(float(item.support_deficit) for item in selected) if selected else 0.0
+        )
+        report: dict[str, dict[str, Any]] = {}
+        for name in uncovered:
+            index = by_name.get(name)
+            discovered = [
+                item
+                for item in candidates
+                if item.is_conjunctive and index is not None and index in item.column_indices
+            ]
+            pruned_best = self.pruned_joint_counts.get(index) if index is not None else None
+            entry: dict[str, Any] = {
+                "in_extension_pool": index in self.extension_column_masses,
+                "conjunctions_discovered": len(discovered),
+                "best_pruned_joint_count": pruned_best,
+                "minimum_joint_rows": minimum_joint_rows,
+                "selection_deficit_cutoff": cutoff,
+            }
+            # A column missing from the pool entirely is a configuration error
+            # and the required_extension_columns guard above has already raised
+            # by this point, so there is no branch for it here.
+            if not discovered:
+                if pruned_best is not None:
+                    rows = (
+                        0 if self.encoded_rows is None else int(self.encoded_rows.shape[0])
+                    )
+                    mass = self.extension_column_masses.get(index)
+                    observed = (
+                        int((np.asarray(mass.counts) > 0).sum()) if mass is not None else None
+                    )
+                    entry["observed_values"] = observed
+                    # Measured scaling, no uniformity assumed: if the best
+                    # pairing reached k rows at N, reaching the floor needs
+                    # about N * floor / k rows.
+                    needed = (
+                        int(rows * minimum_joint_rows / pruned_best)
+                        if pruned_best > 0 and rows
+                        else None
+                    )
+                    entry["fixture_rows_for_this_floor"] = needed
+                    entry["explanation"] = (
+                        f"every pairing was pruned by minimum_joint_rows={minimum_joint_rows:g}; "
+                        f"the largest joint count any pairing reached was {pruned_best:g} over "
+                        f"{rows} materialized rows"
+                        + (f" across {observed} observed values" if observed else "")
+                        + ". No setting of extension_width or max_selected_strata can change "
+                        "that, because the pairings were never candidates. Either lower "
+                        f"minimum_joint_rows below {pruned_best:g} -- which means estimating "
+                        "rarity from a handful of sampled rows -- or use a lower-cardinality "
+                        "extension column, or grow the fixture to roughly "
+                        f"{needed} rows"
+                    )
+                else:
+                    entry["explanation"] = (
+                        "no pairing was even evaluated; the column never entered the "
+                        "extension pool within extension_width, so widen extension_width "
+                        "or conditional_extension_width"
+                    )
+            else:
+                best = max(float(item.support_deficit) for item in discovered)
+                entry["best_discovered_deficit"] = best
+                entry["explanation"] = (
+                    f"{len(discovered)} conjunctions were discovered but out-ranked: the "
+                    f"best had deficit {best:g} against a selection cutoff of {cutoff:g}, "
+                    "so raise max_selected_strata or max_stratum_share"
+                )
+            report[name] = entry
+        return report
+
     def _rows_matching(self, stratum: RootDataStratum) -> np.ndarray:
         mask = np.ones(self.encoded_rows.shape[0], dtype=bool)
         for term in stratum.terms:
@@ -712,11 +803,18 @@ class ExactRootStratumProvider:
                     weights=seed_weights,
                     minlength=len(column.domain),
                 ).astype(float)
-                eligible = np.flatnonzero(
-                    (counts >= float(minimum_joint_rows))
-                    & self._non_structural_mask(column_index)
-                )
+                real = self._non_structural_mask(column_index)
+                eligible = np.flatnonzero((counts >= float(minimum_joint_rows)) & real)
                 if eligible.size == 0:
+                    # The floor also filters here, before the beam ever sees a
+                    # pairing.  Record the best it rejected, or a column lost at
+                    # this stage looks like one that was merely out-ranked.
+                    below = counts[real & (counts > 0)]
+                    if below.size:
+                        largest_rejected = float(below.max())
+                        previous = self.pruned_joint_counts.get(int(column_index))
+                        if previous is None or largest_rejected > previous:
+                            self.pruned_joint_counts[int(column_index)] = largest_rejected
                     continue
                 rarest = eligible[np.argsort(counts[eligible], kind="stable")[:width]]
                 for encoded_id in rarest:
@@ -861,7 +959,19 @@ class ExactRootStratumProvider:
                     terms = tuple(sorted(stratum.terms + (term,), key=lambda item: item.column_index))
                     count = self.joint_count(terms)
                     if count < minimum_joint_rows:
+                        # Record how close the floor came to being clearable for
+                        # this column.  "No conjunction used column X" is
+                        # otherwise indistinguishable between "the floor pruned
+                        # every pairing" and "they were out-ranked", and those
+                        # need opposite fixes.
+                        index = int(term.column_index)
+                        best = self.pruned_joint_counts.get(index)
+                        if best is None or count > best:
+                            self.pruned_joint_counts[index] = float(count)
                         continue
+                    self.discovered_columns[int(term.column_index)] = (
+                        self.discovered_columns.get(int(term.column_index), 0) + 1
+                    )
                     candidate = RootDataStratum(
                         stratum_id="&".join(
                             f"{item.column_name}:{item.region_type}:{_literal_id(item.value if item.value is not None else item.lower if item.lower is not None else item.upper)}"
@@ -914,6 +1024,8 @@ class ExactRootStratumProvider:
         conjunctive = dict(conjunctive or {})
         discovery_limits = dict(discovery_limits or {})
         conjunctive_requested = bool(conjunctive.get("enabled", False))
+        self.pruned_joint_counts = {}
+        self.discovered_columns = {}
         self.conjunctive_status: dict[str, Any] = {
             "requested": conjunctive_requested,
             "applied": False,
@@ -999,6 +1111,22 @@ class ExactRootStratumProvider:
                 )
             conjunctive_requested = False
         max_candidates_per_column = discovery_limits.get("max_candidates_per_column")
+        unsupported_fixed_realization_ids: set[str] = set()
+
+        def fixed_realizable(
+            items: Iterable[RootDataStratum],
+        ) -> list[RootDataStratum]:
+            """Attach realization routes and remove contexts production cannot force."""
+
+            retained = []
+            for item in items:
+                realized = with_realization_probabilities(item, predicate_probabilities)
+                if fixed_forced_predicate_is_supported(realized, self.metadata):
+                    retained.append(realized)
+                else:
+                    unsupported_fixed_realization_ids.add(realized.stratum_id)
+            return retained
+
         candidates = self._candidates_for_masses(
             self.column_masses,
             n_total=n_total,
@@ -1006,12 +1134,13 @@ class ExactRootStratumProvider:
             threshold=minimum_expected_context_support,
             max_candidates_per_column=max_candidates_per_column,
         )
+        candidates = fixed_realizable(candidates)
         if conjunctive_requested:
             root = self.metadata.join_root
             require_distinct_tables = bool(conjunctive.get("require_distinct_tables", True))
 
             def rescore(items: Iterable[RootDataStratum]) -> list[RootDataStratum]:
-                return [
+                scored = [
                     with_conditional_score(
                         item,
                         metadata=self.metadata,
@@ -1023,6 +1152,7 @@ class ExactRootStratumProvider:
                     for item in items
                     if item.probability > 0.0
                 ]
+                return fixed_realizable(scored)
 
             def by_deficit(items: list[RootDataStratum], width: int) -> tuple[RootDataStratum, ...]:
                 return tuple(
@@ -1148,6 +1278,10 @@ class ExactRootStratumProvider:
                         "the beam search found no region above minimum_joint_rows; "
                         "lower it or widen beam_width/extension_width"
                     )
+        candidates = fixed_realizable(candidates)
+        self.conjunctive_status[
+            "unsupported_fixed_native_range_tail_candidates_excluded"
+        ] = len(unsupported_fixed_realization_ids)
         selected = sorted(
             (
                 candidate
@@ -1187,13 +1321,20 @@ class ExactRootStratumProvider:
             # global ranking, the beam and the final deficit sort.  A run can
             # otherwise select conjunctions that use none of the columns the
             # experiment is about and still report success.
+            diagnosis = self._diagnose_uncovered_columns(
+                uncovered,
+                candidates,
+                selected,
+                minimum_joint_rows=float(conjunctive.get("minimum_joint_rows", 32.0)),
+            )
+            self.conjunctive_status["required_column_diagnosis"] = diagnosis
             if uncovered and bool(conjunctive.get("require_conjunctions", False)):
                 raise ValueError(
                     f"required_extension_columns {uncovered!r} appear in no selected "
-                    f"conjunctive stratum ({conjunctive_selected} were selected). The "
-                    "columns reached the candidate pool but did not survive ranking "
-                    "and selection; widen extension_width or max_selected_strata, or "
-                    "lower minimum_joint_rows"
+                    f"conjunctive stratum ({conjunctive_selected} were selected).\n"
+                    + "\n".join(
+                        f"  {name}: {diagnosis[name]['explanation']}" for name in uncovered
+                    )
                 )
         if conjunctive_requested and not conjunctive_selected:
             if self.conjunctive_status.get("reason") is None:
@@ -1839,6 +1980,42 @@ def with_realization_probabilities(
         if factor is not None:
             payload["realized_support_mass"] = float(stratum.probability) * float(factor)
     return RootDataStratum(**payload)
+
+
+def fixed_forced_predicate_is_supported(
+    stratum: RootDataStratum,
+    metadata: ModelMetadata,
+) -> bool:
+    """Whether every term has a production-safe, row-independent realization.
+
+    Equality regions can always use a fixed singleton native range. Tail
+    regions can do so only when exactly one comparable domain value belongs to
+    the tail. A wider native-range tail would need a sampled-row-dependent
+    second boundary, which the production generator deliberately rejects.
+    """
+
+    for term in stratum.terms:
+        family = term.realization_family
+        if family is None:
+            if len(stratum.terms) == 1 and stratum.support_bottleneck == "native_range":
+                family = "range"
+            else:
+                family = TERM_OPERATOR_FAMILY.get(term.region_type)
+        if family != "range" or term.region_type not in {"lower_tail", "upper_tail"}:
+            continue
+        matching_values = 0
+        for value in metadata.columns[term.column_index].domain:
+            try:
+                matches = term.contains_value(value)
+            except (TypeError, ValueError):
+                matches = False
+            if matches:
+                matching_values += 1
+                if matching_values > 1:
+                    return False
+        if matching_values != 1:
+            return False
+    return True
 
 
 def _term_realization(

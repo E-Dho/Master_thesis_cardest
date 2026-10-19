@@ -1380,6 +1380,34 @@ says nothing about the joint region. `conjunctive_status` reports
 `required_columns_covered` and `required_columns_uncovered` either way, and
 `require_conjunctions` turns an uncovered column into a failure.
 
+That failure names which stage lost the column, because the stages need
+opposite fixes. `required_column_diagnosis` distinguishes a column whose every
+pairing was rejected by `minimum_joint_rows` -- reporting the largest joint
+count any pairing reached, and the fixture size that would be needed to clear
+the floor at that rate -- from one that was discovered and then out-ranked in
+the final deficit sort. Widening `extension_width` or `max_selected_strata`
+cannot help in the first case, because the pairings were never candidates.
+
+Note what the first case usually means. A fixture is a sample of the join, so a
+joint cell's count in it scales with the sample. On a 2M-row fixture of a
+2.1e12-row join, a pairing of a 150-value year column with a 134k-value keyword
+column has well under one expected row per cell, so no pairing clears a floor
+of 100 and the counts that do appear are sampling noise rather than evidence of
+rarity. Lowering the floor in that situation does not find rare regions; it
+finds regions the fixture failed to resolve. The resolvable range at a given
+fixture size is roughly `rows / (floor * d1 * d2)` >= 1, which at 2M rows and a
+floor of 100 means the two domains multiplied must stay under about 20,000.
+
+### Auditing discovery without training
+
+`model/scripts/inspect_rare_support.py --config <config>` runs discovery alone
+-- no GPU, no optimizer, no training loop -- and prints the pool sizes, the
+selected strata by depth, the required-column coverage and the diagnosis, then
+writes the whole report as JSON. `--allow-uncovered` turns off
+`require_conjunctions` for the audit so the diagnosis can be read without the
+run stopping. On a cluster this turns a configuration assumption from a queue
+cycle into a couple of minutes on a login node.
+
 Column names in `candidate_column_names` and `required_extension_columns` are
 model columns, spelled `table:column`. The dotted `table.column` form is the
 NeuroCard root join-count dataframe's spelling: it looks right, matches no

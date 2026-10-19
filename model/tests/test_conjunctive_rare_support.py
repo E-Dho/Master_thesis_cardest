@@ -41,6 +41,7 @@ from model.src.data.strata import (
     _capped_allocation,
     build_membership_lookup,
     conditional_head_support,
+    fixed_forced_predicate_is_supported,
     membership_matrix,
     TERM_OPERATOR_FAMILY,
     served_head_indices,
@@ -469,6 +470,55 @@ class DiscoveryTest(unittest.TestCase):
         )
         self.assertAlmostEqual(sum(item.alpha for item in selected), 1.0, places=9)
         self.assertLessEqual(max(item.alpha for item in selected), 0.25 + 1e-9)
+
+    def test_discovery_excludes_unforceable_native_range_tails(self):
+        meta = ModelMetadata(
+            columns=(
+                ColumnMetadata("T.x", ColumnKind.DATA, (1, 2, 3), table="T"),
+            ),
+            full_join_cardinality=10.0,
+            join_root="T",
+            join_tables=("T",),
+            join_edges=(),
+        )
+        rows = np.asarray([[0]] * 5 + [[1]] * 3 + [[2]] * 2, dtype=np.int64)
+        source = ExactRootStratumProvider.from_encoded_rows(
+            meta,
+            rows,
+            root_column_semantics={"T.x": "ordered"},
+        )
+        range_rare_probabilities = {**PROBABILITIES, "range": 1.0e-6}
+        selected = source.discover(
+            n_total=1000,
+            predicate_probabilities=range_rare_probabilities,
+            minimum_expected_context_support=1e9,
+            max_selected_strata=32,
+        )
+
+        self.assertTrue(selected)
+        self.assertGreater(
+            source.conjunctive_status[
+                "unsupported_fixed_native_range_tail_candidates_excluded"
+            ],
+            0,
+        )
+        self.assertTrue(
+            all(fixed_forced_predicate_is_supported(item, meta) for item in selected)
+        )
+        for item in selected:
+            matching_row = next(
+                row
+                for row in rows
+                if all(
+                    term.contains_value(meta.columns[term.column_index].domain[row[term.column_index]])
+                    for term in item.terms
+                )
+            )
+            forced_predicate_for_stratum(
+                item,
+                encoded_row=matching_row,
+                metadata=meta,
+            )
 
 
 class AllocationCapTest(unittest.TestCase):
@@ -937,6 +987,92 @@ class RealizationRouteTest(unittest.TestCase):
         )
         self.assertNotEqual(scored.support_bottleneck, "native_range")
         self.assertEqual(scored.terms[-1].realization_family, "range")
+
+    def test_fixed_native_range_safety_keeps_equality_and_singleton_tails(self):
+        meta = ModelMetadata(
+            columns=(
+                ColumnMetadata("T.year", ColumnKind.DATA, (1950, 1951, 1952), table="T"),
+            ),
+            full_join_cardinality=3.0,
+            join_root="T",
+            join_tables=("T",),
+            join_edges=(),
+        )
+
+        def routed(term):
+            return RootDataStratum(
+                stratum_id=f"safe:{term.region_type}",
+                column_index=term.column_index,
+                column_name=term.column_name,
+                region_type=term.region_type,
+                value=term.value,
+                lower=term.lower,
+                upper=term.upper,
+                terms=(term,),
+                probability=1.0 / 3.0,
+                expected_target_rows=1.0,
+            )
+
+        equality = routed(
+            StratumTerm(
+                0,
+                "T.year",
+                "equality",
+                value=1951,
+                realization_family="range",
+            )
+        )
+        singleton_lower = routed(
+            StratumTerm(
+                0,
+                "T.year",
+                "lower_tail",
+                lower=1952,
+                realization_family="range",
+            )
+        )
+        singleton_upper = routed(
+            StratumTerm(
+                0,
+                "T.year",
+                "upper_tail",
+                upper=1950,
+                realization_family="range",
+            )
+        )
+        self.assertTrue(fixed_forced_predicate_is_supported(equality, meta))
+        self.assertTrue(fixed_forced_predicate_is_supported(singleton_lower, meta))
+        self.assertTrue(fixed_forced_predicate_is_supported(singleton_upper, meta))
+
+    def test_fixed_native_range_safety_rejects_a_non_singleton_tail_term(self):
+        meta = ModelMetadata(
+            columns=(
+                ColumnMetadata("T.year", ColumnKind.DATA, (1950, 1951, 1952), table="T"),
+            ),
+            full_join_cardinality=3.0,
+            join_root="T",
+            join_tables=("T",),
+            join_edges=(),
+        )
+        tail = RootDataStratum(
+            stratum_id="unsafe:tail",
+            column_index=0,
+            column_name="T.year",
+            region_type="lower_tail",
+            lower=1951,
+            terms=(
+                StratumTerm(
+                    0,
+                    "T.year",
+                    "lower_tail",
+                    lower=1951,
+                    realization_family="range",
+                ),
+            ),
+            probability=2.0 / 3.0,
+            expected_target_rows=2.0,
+        )
+        self.assertFalse(fixed_forced_predicate_is_supported(tail, meta))
 
 
 class PerRowFactorTest(unittest.TestCase):
@@ -1634,13 +1770,16 @@ class ShippedConfigTest(unittest.TestCase):
                 )
 
     def test_a_rebuilt_fixture_does_not_overwrite_a_shared_one(self):
-        shared = {}
+        owners = {}
+        consumers = {}
         for path, config in self.configs():
             dataset = config.get("dataset", {}) or {}
             directory = dataset.get("prepared_directory")
             if directory is None:
                 continue
-            shared.setdefault(str(directory), []).append(path.name)
+            consumers.setdefault(str(directory), []).append(path.name)
+            if not bool(dataset.get("prepared_fixture_read_only", False)):
+                owners.setdefault(str(directory), []).append(path.name)
         for path, config in self.configs():
             conjunctive = (
                 ((config.get("rare_support", {}) or {}).get("discovery", {}) or {})
@@ -1649,13 +1788,23 @@ class ShippedConfigTest(unittest.TestCase):
             )
             if int(conjunctive.get("minimum_materialized_rows", 0) or 0) <= 0:
                 continue
-            directory = str((config.get("dataset", {}) or {}).get("prepared_directory"))
+            dataset = config.get("dataset", {}) or {}
+            directory = str(dataset.get("prepared_directory"))
             with self.subTest(config=path.name):
-                self.assertEqual(
-                    shared.get(directory, []),
-                    [path.name],
-                    f"{path.name} rebuilds {directory}, which other configs also read",
-                )
+                directory_owners = owners.get(directory, [])
+                if bool(dataset.get("prepared_fixture_read_only", False)):
+                    self.assertEqual(
+                        len(directory_owners),
+                        1,
+                        f"{path.name} reads {directory}, but that fixture must have "
+                        f"exactly one rebuild owner; consumers={consumers.get(directory, [])}",
+                    )
+                else:
+                    self.assertEqual(
+                        directory_owners,
+                        [path.name],
+                        f"{path.name} rebuilds {directory}, which another config also owns",
+                    )
 
     def test_the_conjunctive_job_light_config_can_actually_use_conjunctions(self):
         # Live sampling cannot impose a cross-table conjunction, so a config
@@ -2696,6 +2845,208 @@ class StructuralPaddingTest(unittest.TestCase):
         )
         self.assertEqual(len(capped), 1)
         self.assertFalse(_is_structural_value(capped[0].value))
+
+
+class UncoveredColumnDiagnosisTest(unittest.TestCase):
+    """A failed coverage check must say which stage lost the column.
+
+    A column can be lost by never reaching the pool, by the joint-row floor
+    rejecting every pairing, or by being out-ranked in the final sort. Those
+    need opposite fixes, so a message that only says "not covered" costs a
+    cluster round to narrow down -- and a message that names the wrong stage
+    costs one too.
+    """
+
+    def discover(self, **conjunctive):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows()
+        )
+        options = {
+            "enabled": True,
+            "max_depth": 2,
+            "beam_width": 8,
+            "seed_width": 8,
+            "minimum_joint_rows": 1.0,
+            "max_joint_row_fraction": 0.0,
+            "require_distinct_tables": True,
+        }
+        options.update(conjunctive)
+        max_selected = options.pop("max_selected", 8)
+        source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=max_selected,
+            conjunctive=options,
+        )
+        return source
+
+    def diagnosis(self, source, column):
+        return source.conjunctive_status["required_column_diagnosis"][column]
+
+    def test_a_floor_that_rejects_every_pairing_says_so(self):
+        # The JOB-light failure: no pairing of the required column could clear
+        # minimum_joint_rows, so widening the search cannot help.
+        source = self.discover(
+            required_extension_columns=["C.c"],
+            minimum_joint_rows=1000.0,
+        )
+        entry = self.diagnosis(source, "C.c")
+        self.assertEqual(entry["conjunctions_discovered"], 0)
+        self.assertIsNotNone(entry["best_pruned_joint_count"])
+        self.assertIn("minimum_joint_rows", entry["explanation"])
+        self.assertIn("extension_width", entry["explanation"])
+        self.assertIn("can change that", entry["explanation"])
+
+    def test_the_beam_stage_floor_is_recorded_too(self):
+        # With conditional counting off, the floor prunes inside the beam
+        # instead, and that path has its own recording.
+        source = self.discover(
+            required_extension_columns=["C.c"],
+            minimum_joint_rows=1000.0,
+            conditional_extension_width=0,
+        )
+        entry = self.diagnosis(source, "C.c")
+        self.assertIsNotNone(entry["best_pruned_joint_count"])
+        self.assertGreater(entry["best_pruned_joint_count"], 0.0)
+        self.assertIn("largest joint count any pairing reached", entry["explanation"])
+
+    def test_the_recorded_count_is_the_largest_rejected_not_the_smallest(self):
+        # Reporting the smallest would tell the user to lower the floor further
+        # than necessary and overstate the fixture size needed.  Both recording
+        # paths -- conditional counting and the beam -- must agree, and the
+        # value must be the largest rejected count, which on this fixture is
+        # strictly greater than the smallest.
+        recorded = {}
+        for width in (0, 8):
+            source = self.discover(
+                required_extension_columns=["C.c"],
+                minimum_joint_rows=1000.0,
+                conditional_extension_width=width,
+            )
+            recorded[width] = self.diagnosis(source, "C.c")["best_pruned_joint_count"]
+        self.assertEqual(recorded[0], recorded[8])
+        self.assertEqual(recorded[0], 7.0)
+
+    def test_the_conditional_stage_records_on_its_own(self):
+        # Read the conditional recording directly, with no beam run at all, so
+        # the beam cannot supply the value this stage is supposed to.
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows()
+        )
+        source.pruned_joint_counts = {}
+        source.conditional_extension_counts(
+            (stratum(term(0, "R.a", 1), probability=0.25),),
+            source.extension_column_masses,
+            minimum_joint_rows=1000.0,
+            per_seed_width=8,
+            require_distinct_tables=True,
+        )
+        self.assertTrue(source.pruned_joint_counts)
+        self.assertTrue(
+            all(value > 0.0 for value in source.pruned_joint_counts.values()),
+            source.pruned_joint_counts,
+        )
+
+    def test_running_discovery_twice_does_not_accumulate_counters(self):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows()
+        )
+        options = {
+            "enabled": True,
+            "max_depth": 2,
+            "beam_width": 8,
+            "seed_width": 8,
+            "minimum_joint_rows": 1.0,
+            "max_joint_row_fraction": 0.0,
+            "require_distinct_tables": True,
+        }
+        source.discover(
+            n_total=1_000_000, predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12, max_selected_strata=8,
+            conjunctive=dict(options, minimum_joint_rows=1000.0),
+        )
+        first = dict(source.pruned_joint_counts)
+        self.assertTrue(first)
+        source.discover(
+            n_total=1_000_000, predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12, max_selected_strata=8,
+            conjunctive=options,
+        )
+        # The second call clears everything the first recorded.
+        self.assertNotEqual(source.pruned_joint_counts, first)
+
+    def test_the_floor_diagnosis_reports_the_rows_that_would_be_needed(self):
+        source = self.discover(
+            required_extension_columns=["C.c"], minimum_joint_rows=1000.0
+        )
+        entry = self.diagnosis(source, "C.c")
+        rows = source.conjunctive_status["materialized_rows"]
+        best = entry["best_pruned_joint_count"]
+        self.assertEqual(
+            entry["fixture_rows_for_this_floor"], int(rows * 1000.0 / best)
+        )
+        self.assertGreater(entry["fixture_rows_for_this_floor"], rows)
+
+    def test_the_conditional_stage_floor_is_attributed_to_the_floor(self):
+        # The floor filters in conditional counting too, before the beam sees a
+        # pairing.  Attributing that to extension_width sends the fix the wrong
+        # way, which is what this asserts against.
+        source = self.discover(
+            required_extension_columns=["C.c"],
+            minimum_joint_rows=1000.0,
+            conditional_extension_width=8,
+        )
+        entry = self.diagnosis(source, "C.c")
+        self.assertIsNotNone(entry["best_pruned_joint_count"])
+        self.assertNotIn("widen extension_width", entry["explanation"])
+
+    def test_a_column_outside_the_pool_says_so(self):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows(), column_names=["R.a", "P.b"]
+        )
+        source.conjunctive_status = {}
+        with self.assertRaises(ValueError):
+            source.discover(
+                n_total=1_000_000,
+                predicate_probabilities=PROBABILITIES,
+                minimum_expected_context_support=1e12,
+                max_selected_strata=8,
+                conjunctive={
+                    "enabled": True,
+                    "max_depth": 2,
+                    "minimum_joint_rows": 1.0,
+                    "max_joint_row_fraction": 0.0,
+                    "require_distinct_tables": True,
+                    "required_extension_columns": ["C.c"],
+                },
+            )
+
+    def test_an_out_ranked_column_is_attributed_to_selection(self):
+        source = self.discover(
+            required_extension_columns=["P.b", "C.c"],
+            max_selected=1,
+            extension_width=1,
+            conditional_extension_width=0,
+        )
+        uncovered = source.conjunctive_status["required_columns_uncovered"]
+        self.assertTrue(uncovered)
+        for name in uncovered:
+            entry = self.diagnosis(source, name)
+            if entry["conjunctions_discovered"]:
+                self.assertIn("out-ranked", entry["explanation"])
+                self.assertIn("max_selected_strata", entry["explanation"])
+
+    def test_the_diagnosis_is_recorded_even_without_require_conjunctions(self):
+        source = self.discover(
+            required_extension_columns=["C.c"], minimum_joint_rows=1000.0
+        )
+        self.assertIn("required_column_diagnosis", source.conjunctive_status)
+
+    def test_a_covered_column_needs_no_diagnosis(self):
+        source = self.discover(required_extension_columns=["C.c"])
+        self.assertEqual(source.conjunctive_status["required_columns_uncovered"], [])
+        self.assertEqual(source.conjunctive_status["required_column_diagnosis"], {})
 
 
 if __name__ == "__main__":  # pragma: no cover
