@@ -32,6 +32,10 @@ query_runs/
 *.gz
 *.dgs
 
+# Large local training input, kept out of the repo.
+# (already matched by *.csv above; anchored here so the intent is explicit)
+/train.csv
+
 # Generated visual artifacts
 query_generation/visualizations/
 

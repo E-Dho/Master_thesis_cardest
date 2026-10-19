@@ -1437,12 +1437,59 @@ Note that `log_ratio` also compresses the spread between deficits, so the
 behaviour change in its own right and a reason to compare the two rather than
 switch blindly.
 
+### A row floor for strata of every depth
+
+`minimum_joint_rows` prunes conjunctions, so until recently the depth-1 path
+had no row floor at all. That was safe only while `candidate_column_names`
+happened to list dense columns: it was the allowlist, not any guard, that kept
+a stratum from covering a handful of rows.
+
+Admitting the sparse tail columns the attribution analysis implicates
+(`title:episode_nr`, `title:season_nr`, `title:series_years`) removed that
+accidental protection and exposed the hazard directly. One discovery run over
+the 2M-row fixture selected 64 depth-1 strata, 60 of them on
+`title:episode_nr`, with a median `foj_count` of 1 and a maximum of 17. Fifty
+three of the 64 covered exactly one row of the fixture, and together those took
+83.3% of the auxiliary batch -- roughly 160,000 draws of a single row each over
+a 20,000-step run. That is memorisation of individual rows, not training on a
+rare region, and it is worse under `log_ratio` than under `clipped_sum`,
+because an unbounded rarity objective ranks a one-row region top.
+
+`rare_support.discovery.minimum_stratum_rows` is a row floor that applies at
+any depth. A candidate whose `foj_count` is below it is dropped before ranking.
+Size it from the exposure the floor is meant to bound: with an auxiliary batch
+of 512 over 20,000 steps the auxiliary stream draws 10.24M rows, so 64 evenly
+weighted strata take about 160,000 draws each, while the main stream shows a
+typical row of a 2M-row fixture 2048 x 20,000 / 2e6 = 20.5 times. A floor of
+1000 rows therefore holds a stratum's per-row exposure to about 160, under 8x
+the main stream; the shipped JOB-light conjunctive configs use that value.
+
+Two properties matter for reading a report:
+
+- The floor applies only to a provider with materialized rows. On the live
+  NeuroCard root-JCT path the candidate counts are root-table rows rather than
+  full-outer-join rows, so the same number would mean something else, and
+  conditional sampling redraws the fanout partners every step. Because a floor
+  that silently does nothing is worse than no floor,
+  `conjunctive_status.row_floor_applied` says which of the two happened rather
+  than leaving a configured floor indistinguishable from an unconfigured one.
+- A floor higher than any region in the dataset empties the selection, and the
+  run then refuses to start rather than training on nothing. The error names
+  the floor and how many candidates it rejected, because "this dataset has no
+  rare regions" and "this floor is too high for this fixture" need opposite
+  fixes.
+
+`conjunctive_status` also carries `candidates_below_row_floor` and
+`selected_stratum_rows` (`min`, `median`, `max`, `at_or_below_one`). A run is
+only worth launching when `row_floor_applied` is true and `at_or_below_one` is
+zero.
+
 ### Auditing discovery without training
 
 `model/scripts/inspect_rare_support.py --config <config>` runs discovery alone
 -- no GPU, no optimizer, no training loop -- and prints the pool sizes, the
-selected strata by depth, the required-column coverage and the diagnosis, then
-writes the whole report as JSON. `--allow-uncovered` turns off
+selected strata by depth, the required-column coverage, the row-floor status
+and the diagnosis, then writes the whole report as JSON. `--allow-uncovered` turns off
 `require_conjunctions` for the audit so the diagnosis can be read without the
 run stopping. On a cluster this turns a configuration assumption from a queue
 cycle into a couple of minutes on a login node.

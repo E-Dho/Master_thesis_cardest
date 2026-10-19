@@ -84,6 +84,13 @@ def main() -> None:
     print(f"columns_skipped_by_domain_cap      = {status.get('columns_skipped_by_domain_cap')}")
     print(f"columns_excluded_by_name           = {status.get('columns_excluded_by_name')}")
     print(f"candidate_columns                  = {status.get('candidate_columns')}")
+    print(f"minimum_stratum_rows               = {status.get('minimum_stratum_rows')}")
+    # A floor only applies to materialized rows, so print whether it did.  A
+    # configured floor that silently did nothing otherwise reads exactly like
+    # a floor that found nothing to prune.
+    print(f"row_floor_applied                  = {status.get('row_floor_applied')}")
+    print(f"candidates_below_row_floor         = {status.get('candidates_below_row_floor')}")
+    print(f"selected_stratum_rows              = {status.get('selected_stratum_rows')}")
     print(f"reason                             = {status.get('reason')}")
     for name, entry in (status.get("required_column_diagnosis") or {}).items():
         print(f"\ndiagnosis for {name}:")

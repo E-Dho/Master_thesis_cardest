@@ -3338,5 +3338,227 @@ class PrunedDistributionTest(unittest.TestCase):
         self.assertEqual(entry["best_pruned_joint_count"], float(self.VALUES))
 
 
+class ReadOnlyFixtureGuardTest(unittest.TestCase):
+    """A fixture consumer must not be able to rebuild the fixture it reads.
+
+    The 2M-row JOB-light fixture takes a separate prepare job to build.  A
+    training config that merely consumes it shares the prepared directory with
+    the builder, so running the prepare script against the consumer would
+    silently overwrite a two-million-row fixture with this config's own much
+    smaller sample -- the failure that produced a 512-row "2M" fixture once
+    already.
+    """
+
+    def _run(self, config_path, rebuild):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "prepare_neurocard_data_under_test",
+            "model/scripts/prepare_neurocard_data.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        argv = ["prepare_neurocard_data.py", "--config", str(config_path)]
+        if rebuild:
+            argv.append("--rebuild-domains")
+        original = sys.argv
+        sys.argv = argv
+        try:
+            module.main()
+        finally:
+            sys.argv = original
+
+    def _config_path(self, read_only):
+        config = pathlib.Path(
+            "model/configs/"
+            "job_light_duet_binary_native_anpm_20k_conjunctive_rare_auxiliary_fixture.yaml"
+        ).read_text()
+        directory = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        lines = []
+        for line in config.splitlines():
+            if line.startswith("  prepared_directory:"):
+                line = f"  prepared_directory: {directory / 'prepared'}"
+            lines.append(line)
+            if line.startswith("dataset:") and read_only is not None:
+                flag = "true" if read_only else "false"
+                lines.append(f"  prepared_fixture_read_only: {flag}")
+        path = directory / "config.yaml"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def test_a_config_that_omits_the_key_can_still_rebuild(self):
+        # The guard must default to permissive: every prepare job written
+        # before the key existed omits it, and refusing those would make the
+        # guard a breaking change rather than a safety rail.
+        try:
+            self._run(self._config_path(read_only=None), rebuild=True)
+        except SystemExit as exc:  # pragma: no cover - depends on local data
+            self.assertNotIn("read-only", str(exc))
+        except Exception:
+            pass
+
+    def test_rebuilding_a_read_only_fixture_consumer_is_refused(self):
+        with self.assertRaises(SystemExit) as caught:
+            self._run(self._config_path(read_only=True), rebuild=True)
+        self.assertIn("read-only", str(caught.exception))
+
+    def test_the_guard_only_fires_on_rebuild(self):
+        # Without --rebuild-domains the same config must get past the guard.
+        # A guard that refuses the config outright would block the training
+        # run itself, so the test has to distinguish the two.
+        try:
+            self._run(self._config_path(read_only=True), rebuild=False)
+        except SystemExit as exc:  # pragma: no cover - depends on local data
+            self.assertNotIn("read-only", str(exc))
+        except Exception:
+            pass
+
+
+class StratumRowFloorTest(unittest.TestCase):
+    """A stratum must cover enough rows that oversampling is not memorisation.
+
+    ``minimum_joint_rows`` guards only conjunctions.  The depth-1 path had no
+    row floor, which was safe only while the candidate columns were dense.
+    Opening up a sparse high-cardinality column produced 53 of 64 strata
+    covering one fixture row apiece and taking 83% of the auxiliary batch.
+    """
+
+    VALUES = 60
+
+    def metadata(self):
+        return ModelMetadata(
+            columns=(
+                ColumnMetadata("t:sparse", ColumnKind.DATA, tuple(range(self.VALUES)),
+                               table="t"),
+                ColumnMetadata("t:dense", ColumnKind.DATA, (0, 1), table="t"),
+            ),
+            full_join_cardinality=400.0,
+            join_root="t",
+            join_tables=("t",),
+            join_edges=(),
+        )
+
+    def rows(self):
+        # Values 0..39 appear once each; 40..59 appear many times.
+        rows = [[value, value % 2] for value in range(40)]
+        for value in range(40, self.VALUES):
+            rows.extend([[value, value % 2]] * 18)
+        return np.asarray(rows, dtype=np.int64)
+
+    def discover(self, floor=None):
+        source = ExactRootStratumProvider.from_encoded_rows(self.metadata(), self.rows())
+        limits = {"deficit_objective": "log_ratio"}
+        if floor is not None:
+            limits["minimum_stratum_rows"] = floor
+        selected = source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e9,
+            max_selected_strata=32,
+            conjunctive={"enabled": True, "max_depth": 2, "minimum_joint_rows": 1.0,
+                         "max_joint_row_fraction": 1.0, "require_distinct_tables": False},
+            discovery_limits=limits,
+        )
+        return source, selected
+
+    def test_without_a_floor_single_row_strata_dominate(self):
+        # log_ratio ranks an unboundedly rare region top, and a one-row region
+        # is the rarest there is.
+        _, selected = self.discover()
+        singletons = [item for item in selected if item.foj_count <= 1]
+        self.assertGreater(len(singletons), len(selected) // 2)
+
+    def test_the_floor_removes_them(self):
+        source, selected = self.discover(floor=10.0)
+        self.assertTrue(selected)
+        self.assertTrue(all(item.foj_count >= 10.0 for item in selected))
+        self.assertGreater(source.conjunctive_status["candidates_below_row_floor"], 0)
+
+    def test_the_status_reports_the_row_distribution_either_way(self):
+        for floor in (None, 10.0):
+            with self.subTest(floor=floor):
+                source, _ = self.discover(floor=floor)
+                rows = source.conjunctive_status["selected_stratum_rows"]
+                self.assertIn("min", rows)
+                self.assertIn("at_or_below_one", rows)
+
+    def test_the_report_names_how_many_single_row_strata_were_selected(self):
+        source, _ = self.discover()
+        self.assertGreater(
+            source.conjunctive_status["selected_stratum_rows"]["at_or_below_one"], 0
+        )
+        source, _ = self.discover(floor=10.0)
+        self.assertEqual(
+            source.conjunctive_status["selected_stratum_rows"]["at_or_below_one"], 0
+        )
+
+    def test_a_zero_floor_changes_nothing(self):
+        _, without = self.discover()
+        _, zero = self.discover(floor=0.0)
+        self.assertEqual(
+            [item.stratum_id for item in without], [item.stratum_id for item in zero]
+        )
+
+    def test_a_candidate_exactly_at_the_floor_survives(self):
+        # "minimum_stratum_rows" names a minimum, so a region holding exactly
+        # that many rows clears it.  An off-by-one here silently raises the
+        # floor by one row for every run that sets it.
+        source, selected = self.discover(floor=18.0)
+        self.assertTrue(selected)
+        self.assertEqual(min(item.foj_count for item in selected), 18.0)
+
+    def test_the_floor_does_not_apply_without_materialized_rows(self):
+        # The live NeuroCard provider carries root-table counts, not
+        # full-outer-join row counts, so the floor must not prune there -- and
+        # must say so, because a floor that quietly does nothing would
+        # otherwise look exactly like a floor that found nothing to prune.
+        meta = self.metadata()
+        rows = self.rows()
+        counts = np.bincount(rows[:, 0], minlength=self.VALUES).astype(float)
+        masses = {
+            0: RootColumnMass(
+                column_index=0,
+                values=meta.columns[0].domain,
+                counts=counts,
+                total_count=float(counts.sum()),
+                source="test",
+                semantic_type="categorical",
+            )
+        }
+        source = ExactRootStratumProvider(meta, masses)
+        selected = source.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e9,
+            max_selected_strata=32,
+            discovery_limits={"deficit_objective": "log_ratio",
+                              "minimum_stratum_rows": 10.0},
+        )
+        self.assertTrue(selected)
+        self.assertFalse(source.conjunctive_status["row_floor_applied"])
+        self.assertEqual(source.conjunctive_status["candidates_below_row_floor"], 0)
+        self.assertTrue(any(item.foj_count < 10.0 for item in selected))
+
+    def test_the_status_says_the_floor_was_applied_when_it_was(self):
+        source, _ = self.discover(floor=10.0)
+        self.assertTrue(source.conjunctive_status["row_floor_applied"])
+        source, _ = self.discover()
+        self.assertFalse(source.conjunctive_status["row_floor_applied"])
+
+    def test_the_floor_is_rejected_when_negative(self):
+        config = {
+            "dataset": {"type": "synthetic_full_join"},
+            "model": {"type": "predicate_resmade", "hidden_sizes": [8]},
+            "training": {"batch_size": 2, "learning_rate": 0.1, "epochs": 1,
+                         "steps_per_epoch": 1},
+            "predicate_generation": {"enabled": True},
+            "rare_support": {"enabled": True, "discovery": {"minimum_stratum_rows": -1}},
+            "rare_auxiliary": {"enabled": True, "batch_size": 2, "beta": 0.25},
+        }
+        with self.assertRaisesRegex(ValueError, "minimum_stratum_rows"):
+            validate_config(config)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

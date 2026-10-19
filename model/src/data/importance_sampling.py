@@ -1026,6 +1026,7 @@ class RareSupportSampleSource:
             discovery_limits={
                 "max_candidates_per_column": discovery.get("max_candidates_per_column"),
                 "deficit_objective": discovery.get("deficit_objective"),
+                "minimum_stratum_rows": discovery.get("minimum_stratum_rows"),
             },
         )
         self.conjunctive_status = dict(getattr(self.provider, "conjunctive_status", {}))
@@ -1047,9 +1048,22 @@ class RareSupportSampleSource:
                 flush=True,
             )
         if not self.selected_strata:
+            # Name the row floor when it is what emptied the pool.  Otherwise a
+            # floor set too high for the fixture is indistinguishable from a
+            # dataset with no rare regions at all, and the two need opposite
+            # fixes.
+            floor_note = ""
+            if self.conjunctive_status.get("candidates_below_row_floor"):
+                floor_note = (
+                    "; minimum_stratum_rows="
+                    f"{self.conjunctive_status.get('minimum_stratum_rows')} "
+                    f"rejected {self.conjunctive_status['candidates_below_row_floor']} "
+                    "candidates that otherwise qualified -- lower the floor or "
+                    "widen candidate_column_names"
+                )
             raise ValueError(
                 "rare support discovery selected no strata with both positive "
-                "mass and positive support deficit"
+                "mass and positive support deficit" + floor_note
             )
         prepare_root_strata = getattr(base_source, "prepare_root_strata", None)
         if prepare_root_strata is not None:

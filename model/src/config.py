@@ -411,6 +411,11 @@ def validate_config(config: dict[str, Any]) -> None:
             discovery.get("candidate_column_names", ()),
             "rare_support.discovery.candidate_column_names",
         )
+        if "minimum_stratum_rows" in discovery:
+            if float(discovery["minimum_stratum_rows"]) < 0.0:
+                raise ValueError(
+                    "rare_support.discovery.minimum_stratum_rows must be nonnegative"
+                )
         if "deficit_objective" in discovery:
             objective = str(discovery["deficit_objective"])
             if objective not in {"clipped_sum", "log_ratio"}:

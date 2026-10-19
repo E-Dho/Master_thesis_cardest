@@ -1327,14 +1327,63 @@ class ExactRootStratumProvider:
         self.conjunctive_status[
             "unsupported_fixed_native_range_tail_candidates_excluded"
         ] = len(unsupported_fixed_realization_ids)
+        # A row floor for strata of ANY depth.  minimum_joint_rows guards only
+        # conjunctions, so the depth-1 path had no floor at all: it was safe
+        # only as long as candidate_column_names kept it to dense columns.
+        # Opening up a sparse high-cardinality column produced 53 of 64 strata
+        # covering a single fixture row apiece, taking 83% of the auxiliary
+        # batch -- about 160,000 draws of one row each over a 20k-step run,
+        # which is memorisation, not rare-support training.  log_ratio makes
+        # this worse rather than better, because an unbounded rarity objective
+        # ranks a one-row region top.
+        row_floor = float(discovery_limits.get("minimum_stratum_rows") or 0.0)
+        eligible_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.probability > 0.0 and candidate.support_deficit > 0.0
+        ]
+        starved = []
+        # Only meaningful against materialized rows.  On the live NeuroCard
+        # path the candidate counts are root-table rows rather than
+        # full-outer-join rows, so the same number would silently mean a
+        # different thing, and conditional sampling redraws the fanout
+        # partners every step, so a stratum's support is not a fixed handful
+        # that can be memorized.  A floor that quietly does nothing is worse
+        # than no floor at all, so the status reports which of the two
+        # happened instead of leaving a configured floor indistinguishable
+        # from an unconfigured one.
+        row_floor_applied = bool(row_floor > 0.0 and self.encoded_rows is not None)
+        if row_floor_applied:
+            kept = []
+            for candidate in eligible_candidates:
+                if float(candidate.foj_count) < row_floor:
+                    starved.append(candidate)
+                else:
+                    kept.append(candidate)
+            eligible_candidates = kept
         selected = sorted(
-            (
-                candidate
-                for candidate in candidates
-                if candidate.probability > 0.0 and candidate.support_deficit > 0.0
-            ),
+            eligible_candidates,
             key=lambda item: (-item.support_deficit, item.expected_target_rows, item.stratum_id),
         )[: max(0, int(max_selected_strata))]
+        self.row_floor_status = {
+            "minimum_stratum_rows": row_floor,
+            "row_floor_applied": row_floor_applied,
+            "candidates_below_row_floor": len(starved),
+            "selected_stratum_rows": (
+                {
+                    "min": float(min(item.foj_count for item in selected)),
+                    "median": float(
+                        sorted(item.foj_count for item in selected)[len(selected) // 2]
+                    ),
+                    "max": float(max(item.foj_count for item in selected)),
+                    "at_or_below_one": sum(
+                        1 for item in selected if float(item.foj_count) <= 1.0
+                    ),
+                }
+                if selected
+                else None
+            ),
+        }
         conjunctive_selected = sum(1 for item in selected if item.is_conjunctive)
         self.conjunctive_status["conjunctive_selected"] = conjunctive_selected
         if conjunctive_requested:
@@ -1359,6 +1408,7 @@ class ExactRootStratumProvider:
         # depth-1 is how a run can look like it exercised the feature when it
         # did not.
         self.conjunctive_status["applied"] = bool(conjunctive_selected)
+        self.conjunctive_status.update(self.row_floor_status)
         if conjunctive_requested:
             required_columns = tuple(conjunctive.get("required_extension_columns", ()) or ())
             covered = {

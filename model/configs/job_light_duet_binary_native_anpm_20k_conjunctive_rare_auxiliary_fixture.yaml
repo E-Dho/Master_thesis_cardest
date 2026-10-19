@@ -153,6 +153,18 @@ rare_support:
       - cast_info:nr_order
     minimum_expected_context_support: 100
     deficit_objective: log_ratio
+    # A rare region still has to hold enough distinct rows that oversampling it
+    # teaches the shape of the region rather than the identity of its rows.
+    # minimum_joint_rows guards only conjunctions; this guards every depth.
+    # Sizing: the auxiliary stream draws 512 x 20,000 = 10.24M rows, so 64
+    # evenly weighted strata take ~160,000 draws each, while the main stream
+    # shows a typical fixture row 2048 x 20,000 / 2e6 = 20.5 times.  A floor of
+    # 1000 rows holds a stratum's per-row exposure to ~160, under 8x the main
+    # stream.  Without it, log_ratio ranks a one-row region top and 53 of 64
+    # selected strata covered a single row apiece -- 160,000 draws of one row.
+    # Raising it further is safe (the run refuses rather than degrades); the
+    # audit must report row_floor_applied: true and at_or_below_one: 0.
+    minimum_stratum_rows: 1000
     max_selected_strata: 64
     support_planning_steps: 20000
     root_column_semantics:

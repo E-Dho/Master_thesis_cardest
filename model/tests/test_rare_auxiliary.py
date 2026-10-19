@@ -100,6 +100,48 @@ class RareAuxiliaryTest(unittest.TestCase):
         self.assertIsNone(rare.importance_weights)
         self.assertIn("selected_strata", rare.importance_metadata)
 
+    def test_an_impossible_row_floor_names_itself_in_the_failure(self) -> None:
+        # A floor set higher than any region in the dataset empties the pool.
+        # The run must refuse, and the message must say the floor did it:
+        # "no rare regions at all" and "the floor is too high" need opposite
+        # fixes, and only one of them is a data problem.
+        config = self._config()
+        config["rare_support"]["discovery"]["minimum_stratum_rows"] = 10**9
+        with self.assertRaises(ValueError) as caught:
+            sample_source_from_config(config)
+        self.assertIn("minimum_stratum_rows", str(caught.exception))
+
+    def test_rare_support_summary_carries_the_row_floor_status(self) -> None:
+        # These four keys are what the audit script prints and what decides
+        # whether a run is worth launching, so they have to survive the trip
+        # from the provider through the summary, not just exist on the
+        # provider.
+        config = self._config()
+        config["rare_support"]["discovery"]["minimum_stratum_rows"] = 2
+        source = sample_source_from_config(config)
+        conjunctive = source.rare_support_summary(actual_optimizer_steps=1)["conjunctive"]
+
+        self.assertEqual(conjunctive["minimum_stratum_rows"], 2.0)
+        self.assertTrue(conjunctive["row_floor_applied"])
+        self.assertGreater(conjunctive["candidates_below_row_floor"], 0)
+        rows = conjunctive["selected_stratum_rows"]
+        self.assertGreaterEqual(rows["min"], 2.0)
+        self.assertEqual(rows["at_or_below_one"], 0)
+
+    def test_rare_support_summary_includes_conjunctive_discovery_status(self) -> None:
+        source = sample_source_from_config(self._config())
+        summary = source.rare_support_summary(actual_optimizer_steps=1)
+
+        self.assertIn("conjunctive", summary)
+        self.assertIn(
+            "unsupported_fixed_native_range_tail_candidates_excluded",
+            summary["conjunctive"],
+        )
+        self.assertEqual(
+            summary["conjunctive"]["selected_strata"],
+            summary["number_selected_strata"],
+        )
+
     def test_suffix_eligibility_uses_original_column_indices_and_includes_later_data(self) -> None:
         source = sample_source_from_config(self._config())
         metadata = source.metadata
