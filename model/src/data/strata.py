@@ -224,6 +224,7 @@ class ExactRootStratumProvider:
         self._non_structural_cache: dict[int, np.ndarray] = {}
         # Diagnostics filled by the beam search; see extend_with_conjunctions.
         self.pruned_joint_counts: dict[int, float] = {}
+        self.pruned_joint_counts_sample: dict[int, list[float]] = {}
         self.discovered_columns: dict[int, int] = {}
         self._term_mask_cache: dict[tuple[Any, ...], np.ndarray] = {}
         self._term_factor_cache: dict[tuple[Any, ...], np.ndarray] = {}
@@ -477,6 +478,27 @@ class ExactRootStratumProvider:
 
         return self.encoded_rows is not None
 
+    PRUNED_SAMPLE_SIZE = 64
+
+    def _record_pruned(self, column_index: int, counts: np.ndarray) -> None:
+        """Keep the largest joint counts the floor rejected for a column.
+
+        The maximum alone says whether *one* pairing could be admitted by a
+        bigger fixture.  It does not say how much bigger a fixture would have to
+        be for a usable *number* of them, which is the question a fixture-growth
+        decision actually turns on, so keep the top of the rejected distribution
+        rather than only its peak.
+        """
+
+        kept = self.pruned_joint_counts_sample.get(column_index, [])
+        kept = sorted(
+            kept + [float(value) for value in np.asarray(counts, dtype=float) if value > 0],
+            reverse=True,
+        )[: self.PRUNED_SAMPLE_SIZE]
+        self.pruned_joint_counts_sample[column_index] = kept
+        if kept:
+            self.pruned_joint_counts[column_index] = kept[0]
+
     def _non_structural_mask(self, column_index: int) -> np.ndarray:
         """Encoded ids that carry a real value, not join padding.
 
@@ -716,6 +738,22 @@ class ExactRootStratumProvider:
                         else None
                     )
                     entry["fixture_rows_for_this_floor"] = needed
+                    # How much fixture a *usable number* of conjunctions needs,
+                    # not just the single best pairing.  Growing a fixture to
+                    # the point where one region squeaks past the floor buys one
+                    # stratum, which is rarely the experiment anyone wants.
+                    sample = self.pruned_joint_counts_sample.get(index, [])
+                    entry["fixture_rows_for_n_conjunctions"] = {
+                        str(rank): (
+                            int(rows * minimum_joint_rows / sample[rank - 1])
+                            if rows and len(sample) >= rank and sample[rank - 1] > 0
+                            else None
+                        )
+                        for rank in (1, 5, 10, 25, 50)
+                    }
+                    entry["pruned_joint_counts_top"] = [
+                        float(value) for value in sample[:10]
+                    ]
                     entry["explanation"] = (
                         f"every pairing was pruned by minimum_joint_rows={minimum_joint_rows:g}; "
                         f"the largest joint count any pairing reached was {pruned_best:g} over "
@@ -814,10 +852,7 @@ class ExactRootStratumProvider:
                     # this stage looks like one that was merely out-ranked.
                     below = counts[real & (counts > 0)]
                     if below.size:
-                        largest_rejected = float(below.max())
-                        previous = self.pruned_joint_counts.get(int(column_index))
-                        if previous is None or largest_rejected > previous:
-                            self.pruned_joint_counts[int(column_index)] = largest_rejected
+                        self._record_pruned(int(column_index), below)
                     continue
                 rarest = eligible[np.argsort(counts[eligible], kind="stable")[:width]]
                 for encoded_id in rarest:
@@ -968,10 +1003,7 @@ class ExactRootStratumProvider:
                         # otherwise indistinguishable between "the floor pruned
                         # every pairing" and "they were out-ranked", and those
                         # need opposite fixes.
-                        index = int(term.column_index)
-                        best = self.pruned_joint_counts.get(index)
-                        if best is None or count > best:
-                            self.pruned_joint_counts[index] = float(count)
+                        self._record_pruned(int(term.column_index), np.array([count]))
                         continue
                     self.discovered_columns[int(term.column_index)] = (
                         self.discovered_columns.get(int(term.column_index), 0) + 1
@@ -1033,6 +1065,7 @@ class ExactRootStratumProvider:
             discovery_limits.get("deficit_objective") or DEFAULT_DEFICIT_OBJECTIVE
         )
         self.pruned_joint_counts = {}
+        self.pruned_joint_counts_sample = {}
         self.discovered_columns = {}
         self.conjunctive_status: dict[str, Any] = {
             "requested": conjunctive_requested,

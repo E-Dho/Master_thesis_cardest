@@ -86,7 +86,10 @@ def main() -> None:
     for name, entry in (status.get("required_column_diagnosis") or {}).items():
         print(f"\ndiagnosis for {name}:")
         for key, value in sorted(entry.items()):
-            print(f"  {key:30s} {value}")
+            if key == "explanation":
+                continue
+            print(f"  {key:34s} {value}")
+        print(f"  {'explanation':34s} {entry.get('explanation')}")
 
     columns_by_depth: dict[int, list[str]] = {}
     for stratum in report["selected_strata"]:

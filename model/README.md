@@ -1383,9 +1383,15 @@ says nothing about the joint region. `conjunctive_status` reports
 That failure names which stage lost the column, because the stages need
 opposite fixes. `required_column_diagnosis` distinguishes a column whose every
 pairing was rejected by `minimum_joint_rows` -- reporting the largest joint
-count any pairing reached, and the fixture size that would be needed to clear
-the floor at that rate -- from one that was discovered and then out-ranked in
-the final deficit sort. Widening `extension_width` or `max_selected_strata`
+counts any pairing reached and the fixture size that would be needed to clear
+the floor at each of them -- from one that was discovered and then out-ranked
+in the final deficit sort.
+
+`fixture_rows_for_n_conjunctions` matters more than the single figure next to
+it. Growing a fixture until the best pairing squeaks past the floor buys one
+stratum; a usable experiment needs a number of them, and the rejected counts
+are usually flat near the top, so the fixture needed for ten or fifty can be
+far larger than the fixture needed for one. Widening `extension_width` or `max_selected_strata`
 cannot help in the first case, because the pairings were never candidates.
 
 Note what the first case usually means. A fixture is a sample of the join, so a

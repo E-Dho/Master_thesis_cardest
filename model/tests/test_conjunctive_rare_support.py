@@ -3003,6 +3003,45 @@ class UncoveredColumnDiagnosisTest(unittest.TestCase):
         )
         self.assertGreater(entry["fixture_rows_for_this_floor"], rows)
 
+    def test_the_floor_diagnosis_sizes_a_fixture_for_several_conjunctions(self):
+        # The maximum alone says whether ONE pairing could be admitted by a
+        # bigger fixture.  A fixture-growth decision turns on how much bigger it
+        # must be for a usable number of them, so the top of the rejected
+        # distribution is kept, not only its peak.
+        source = self.discover(
+            required_extension_columns=["C.c"], minimum_joint_rows=1000.0
+        )
+        entry = self.diagnosis(source, "C.c")
+        top = entry["pruned_joint_counts_top"]
+        self.assertTrue(top)
+        self.assertEqual(top, sorted(top, reverse=True))
+        needed = entry["fixture_rows_for_n_conjunctions"]
+        self.assertEqual(needed["1"], entry["fixture_rows_for_this_floor"])
+        ranks = [needed[key] for key in ("1", "5", "10") if needed[key] is not None]
+        # Rarer pairings need a bigger fixture, so the series is non-decreasing.
+        self.assertEqual(ranks, sorted(ranks))
+
+    def test_a_rank_beyond_the_rejected_sample_reports_nothing(self):
+        source = self.discover(
+            required_extension_columns=["C.c"], minimum_joint_rows=1000.0
+        )
+        entry = self.diagnosis(source, "C.c")
+        sample = source.pruned_joint_counts_sample
+        column_index = next(
+            index
+            for index, column in enumerate(chain_data_metadata().columns)
+            if column.name == "C.c"
+        )
+        if len(sample[column_index]) < 50:
+            self.assertIsNone(entry["fixture_rows_for_n_conjunctions"]["50"])
+
+    def test_the_recorded_sample_is_bounded(self):
+        source = self.discover(
+            required_extension_columns=["C.c"], minimum_joint_rows=1000.0
+        )
+        for counts in source.pruned_joint_counts_sample.values():
+            self.assertLessEqual(len(counts), ExactRootStratumProvider.PRUNED_SAMPLE_SIZE)
+
     def test_the_conditional_stage_floor_is_attributed_to_the_floor(self):
         # The floor filters in conditional counting too, before the beam sees a
         # pairing.  Attributing that to extension_width sends the fix the wrong
@@ -3165,6 +3204,118 @@ class DeficitObjectiveTest(unittest.TestCase):
                 self.assertEqual(
                     source.conjunctive_status["deficit_objective"], objective
                 )
+
+
+class PrunedDistributionTest(unittest.TestCase):
+    """Sizing a fixture needs the spread of rejected counts, not just the peak.
+
+    The fixture here gives the child column 120 distinct values with joint
+    counts that differ, so rank 1 and rank 10 genuinely disagree and the
+    recorded sample has to be ordered, bounded and free of zeros.
+    """
+
+    VALUES = 120
+    FLOOR = 10_000.0
+
+    def metadata(self):
+        return ModelMetadata(
+            columns=(
+                ColumnMetadata("t:seed", ColumnKind.DATA, (0, 1), table="t"),
+                ColumnMetadata("c:value", ColumnKind.DATA, tuple(range(self.VALUES)),
+                               table="c"),
+                ColumnMetadata("I_c", ColumnKind.INDICATOR, (0, 1), table="c"),
+            ),
+            full_join_cardinality=10_000.0,
+            join_root="t",
+            join_tables=("t", "c"),
+            join_edges=(("t", "c"),),
+        )
+
+    def rows(self):
+        # Value v appears v+1 times, so every rejected count is distinct.
+        rows = []
+        for value in range(self.VALUES):
+            rows.extend([[0, value, 1]] * (value + 1))
+        return np.asarray(rows, dtype=np.int64)
+
+    def source(self):
+        provider = ExactRootStratumProvider.from_encoded_rows(
+            self.metadata(), self.rows()
+        )
+        provider.discover(
+            n_total=1_000_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e12,
+            max_selected_strata=8,
+            conjunctive={
+                "enabled": True,
+                "max_depth": 2,
+                "beam_width": 8,
+                "seed_width": 8,
+                "conditional_extension_width": 8,
+                "minimum_joint_rows": self.FLOOR,
+                "max_joint_row_fraction": 0.0,
+                "require_distinct_tables": True,
+                "required_extension_columns": ["c:value"],
+            },
+        )
+        return provider
+
+    def entry(self, provider):
+        return provider.conjunctive_status["required_column_diagnosis"]["c:value"]
+
+    def test_the_sample_is_capped_at_the_declared_size(self):
+        provider = self.source()
+        column_index = 1
+        recorded = provider.pruned_joint_counts_sample[column_index]
+        # More distinct rejected counts exist than the cap allows.
+        self.assertGreater(self.VALUES, ExactRootStratumProvider.PRUNED_SAMPLE_SIZE)
+        self.assertEqual(len(recorded), ExactRootStratumProvider.PRUNED_SAMPLE_SIZE)
+
+    def test_the_ranks_disagree_and_rise_with_rarity(self):
+        entry = self.entry(self.source())
+        needed = entry["fixture_rows_for_n_conjunctions"]
+        self.assertIsNotNone(needed["1"])
+        self.assertIsNotNone(needed["10"])
+        # A rarer pairing needs a strictly larger fixture, so the ranks must not
+        # collapse onto the single best count.
+        self.assertGreater(needed["10"], needed["1"])
+        self.assertGreater(needed["50"], needed["10"])
+
+    def test_zero_counts_never_enter_the_sample(self):
+        provider = self.source()
+        for counts in provider.pruned_joint_counts_sample.values():
+            self.assertTrue(all(value > 0 for value in counts), counts)
+
+    def test_a_zero_count_is_not_recorded_as_a_rejected_pairing(self):
+        # joint_count returns 0 for a combination that does not occur, and the
+        # beam records what it rejected, so zeros can arrive here.  A zero is an
+        # absent region, not a rejected one: recording it would divide by zero
+        # when sizing a fixture, or suggest one of infinite size.
+        provider = ExactRootStratumProvider.from_encoded_rows(
+            self.metadata(), self.rows()
+        )
+        provider.pruned_joint_counts_sample = {}
+        provider.pruned_joint_counts = {}
+        provider._record_pruned(1, np.array([0.0, 0.0, 3.0, 0.0]))
+        self.assertEqual(provider.pruned_joint_counts_sample[1], [3.0])
+        self.assertEqual(provider.pruned_joint_counts[1], 3.0)
+
+    def test_only_zero_counts_record_nothing_at_all(self):
+        provider = ExactRootStratumProvider.from_encoded_rows(
+            self.metadata(), self.rows()
+        )
+        provider.pruned_joint_counts_sample = {}
+        provider.pruned_joint_counts = {}
+        provider._record_pruned(1, np.array([0.0, 0.0]))
+        self.assertEqual(provider.pruned_joint_counts_sample[1], [])
+        self.assertNotIn(1, provider.pruned_joint_counts)
+
+    def test_the_peak_matches_the_largest_observed_pairing(self):
+        provider = self.source()
+        entry = self.entry(provider)
+        # Value 119 appears 120 times and the seed covers every row.
+        self.assertEqual(entry["best_pruned_joint_count"], float(self.VALUES))
 
 
 if __name__ == "__main__":  # pragma: no cover
