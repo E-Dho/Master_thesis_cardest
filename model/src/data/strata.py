@@ -4,7 +4,7 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
-from math import isfinite
+from math import isfinite, log
 from typing import Any, Iterable, Mapping
 
 import numpy as np
@@ -15,6 +15,9 @@ from model.src.predicates.operators import PredicateOp
 
 
 SQL_NULL = "__SQL_NULL__"
+
+DEFICIT_OBJECTIVES = ("clipped_sum", "log_ratio")
+DEFAULT_DEFICIT_OBJECTIVE = "clipped_sum"
 
 
 @dataclass(frozen=True)
@@ -911,6 +914,7 @@ class ExactRootStratumProvider:
         minimum_joint_rows: float,
         require_distinct_tables: bool,
         extensions: "tuple[RootDataStratum, ...] | None" = None,
+        objective: str = DEFAULT_DEFICIT_OBJECTIVE,
     ) -> "tuple[RootDataStratum, ...]":
         """Beam search for conjunctions, scored by repairable per-head deficit.
 
@@ -1001,6 +1005,7 @@ class ExactRootStratumProvider:
                             predicate_probabilities=predicate_probabilities,
                             threshold=threshold,
                             root_table=root,
+                            objective=objective,
                         )
                     )
             if not scored:
@@ -1024,6 +1029,9 @@ class ExactRootStratumProvider:
         conjunctive = dict(conjunctive or {})
         discovery_limits = dict(discovery_limits or {})
         conjunctive_requested = bool(conjunctive.get("enabled", False))
+        objective = str(
+            discovery_limits.get("deficit_objective") or DEFAULT_DEFICIT_OBJECTIVE
+        )
         self.pruned_joint_counts = {}
         self.discovered_columns = {}
         self.conjunctive_status: dict[str, Any] = {
@@ -1148,6 +1156,7 @@ class ExactRootStratumProvider:
                         predicate_probabilities=predicate_probabilities,
                         threshold=minimum_expected_context_support,
                         root_table=root,
+                        objective=objective,
                     )
                     for item in items
                     if item.probability > 0.0
@@ -1217,6 +1226,7 @@ class ExactRootStratumProvider:
                     predicate_probabilities=predicate_probabilities,
                     threshold=minimum_expected_context_support,
                     root_table=root,
+                    objective=objective,
                 )
                 for item in conditional
             ]
@@ -1245,6 +1255,7 @@ class ExactRootStratumProvider:
                 for candidate in extension_pool
                 if self.metadata.columns[candidate.column_index].table != root
             )
+            self.conjunctive_status["deficit_objective"] = objective
             self.conjunctive_status["scored_extension_candidates"] = len(scored_extensions)
             self.conjunctive_status["eligible_extension_candidates"] = len(eligible)
             self.conjunctive_status["extension_candidates"] = len(extension_pool)
@@ -1259,6 +1270,7 @@ class ExactRootStratumProvider:
                 minimum_joint_rows=float(conjunctive.get("minimum_joint_rows", 32.0)),
                 require_distinct_tables=require_distinct_tables,
                 extensions=extension_pool,
+                objective=objective,
             )
             candidates = list(rescored) + list(conjunctions)
             self.conjunctive_status["conjunctive_candidates"] = len(conjunctions)
@@ -2120,6 +2132,41 @@ def served_head_indices(stratum: RootDataStratum, metadata: ModelMetadata) -> tu
     )
 
 
+def deficit_from_supports(
+    supports: "Iterable[float]",
+    *,
+    threshold: float,
+    objective: str = DEFAULT_DEFICIT_OBJECTIVE,
+    epsilon: float = 1.0e-9,
+) -> float:
+    """Total repairable deficit over a stratum's served heads.
+
+    ``clipped_sum`` is the original objective and saturates: a head whose
+    support is already far below the threshold contributes almost exactly
+    ``threshold`` no matter how much further below it is.  ``log_ratio``
+    contributes ``log(threshold / support)``, which is still monotone in rarity
+    across many orders of magnitude, so the ranking keeps measuring the thing
+    it is supposed to measure once every candidate is rare.
+    """
+
+    if objective not in DEFICIT_OBJECTIVES:
+        raise ValueError(
+            f"unsupported deficit objective {objective!r}; expected one of "
+            f"{list(DEFICIT_OBJECTIVES)}"
+        )
+    floor = max(float(epsilon), 0.0)
+    total = 0.0
+    for value in supports:
+        support = float(value)
+        if support >= threshold:
+            continue
+        if objective == "clipped_sum":
+            total += threshold - support
+        else:
+            total += log(float(threshold) / max(support, floor))
+    return float(total)
+
+
 def with_conditional_score(
     stratum: RootDataStratum,
     *,
@@ -2128,13 +2175,24 @@ def with_conditional_score(
     predicate_probabilities: Mapping[str, float],
     threshold: float,
     root_table: str | None,
+    objective: str = DEFAULT_DEFICIT_OBJECTIVE,
+    epsilon: float = 1.0e-9,
 ) -> RootDataStratum:
     """Score by total repairable deficit across the heads the stratum serves.
 
-    Summing the deficit over served heads is what makes allocation prefer a
-    stratum that repairs five suffix heads over one that repairs a single head,
-    and what makes a conjunction over late columns -- which serves almost no
-    heads -- rank low without a special case.
+    Summing over served heads is what makes allocation prefer a stratum that
+    repairs five suffix heads over one that repairs a single head.
+
+    The two objectives differ in what happens once a head's support falls far
+    below the threshold.  ``clipped_sum`` contributes ``threshold - support``,
+    which is capped at ``threshold``, so the sum saturates at
+    ``heads * threshold`` and stops distinguishing a stratum from one a
+    thousand times rarer.  In that regime -- which is every stratum this
+    feature targets -- ranking collapses onto the served-head count, meaning
+    onto the column's position in the schema, and a conjunction on a late
+    column can never outrank one on an early column however rare it is.
+    ``log_ratio`` contributes ``log(threshold / support)`` instead, which keeps
+    growing as support shrinks, so rarity can outweigh a head or two.
     """
 
     # Fill the per-term realization probabilities here rather than relying on
@@ -2155,7 +2213,9 @@ def with_conditional_score(
     ]
     deficient = [value for value in supports if value < threshold]
     bottleneck = min(supports) if supports else 0.0
-    deficit = float(sum(max(0.0, threshold - value) for value in deficient))
+    deficit = deficit_from_supports(
+        supports, threshold=threshold, objective=objective, epsilon=epsilon
+    )
     return RootDataStratum(
         **{
             **stratum.to_json_dict(),

@@ -1398,6 +1398,39 @@ finds regions the fixture failed to resolve. The resolvable range at a given
 fixture size is roughly `rows / (floor * d1 * d2)` >= 1, which at 2M rows and a
 floor of 100 means the two domains multiplied must stay under about 20,000.
 
+### The deficit objective
+
+`support_deficit` sums, over the heads a stratum serves, how far each head's
+support falls short of `minimum_expected_context_support`. With the default
+`clipped_sum` a head contributes `threshold - support`, which is capped at
+`threshold`, so once support is far below the threshold the sum sits at
+`heads * threshold` and stops distinguishing a stratum from one a thousand
+times rarer. That regime is every stratum this feature targets, so ranking
+collapses onto the served-head count -- which, since heads are the columns
+after the stratum's last term, is the column's position in the schema. A
+conjunction on a later column then cannot outrank one on an earlier column
+however much rarer it is.
+
+This is observable, not hypothetical. On JOB-light with equal rarity the
+deficits run `cast_info:role_id` (7 heads) > `movie_info:info_type_id` (6) >
+`movie_keyword:keyword_id` (5) > `movie_companies:company_id` (4), and a run
+selected 42 `info_type_id` and 11 `role_id` conjunctions and none from the
+other two.
+
+`rare_support.discovery.deficit_objective: log_ratio` contributes
+`log(threshold / support)` per deficient head instead. It keeps growing as
+support shrinks, so a stratum several orders of magnitude rarer can outweigh a
+head or two: at supports of 0.03 against 0.00003, `clipped_sum` scores the
+six-head stratum 599.8 against 500.0 and `log_ratio` scores them 48.2 against
+74.6, reversing the order. Zero support is bounded by `epsilon` rather than
+diverging. The default stays `clipped_sum` so no existing run changes
+behaviour; `conjunctive_status.deficit_objective` records which one ran.
+
+Note that `log_ratio` also compresses the spread between deficits, so the
+`alpha` allocation derived from them is more uniform across strata. That is a
+behaviour change in its own right and a reason to compare the two rather than
+switch blindly.
+
 ### Auditing discovery without training
 
 `model/scripts/inspect_rare_support.py --config <config>` runs discovery alone

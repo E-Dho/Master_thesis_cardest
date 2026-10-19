@@ -25,7 +25,9 @@ from model.src.config import (
 from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
+    DEFAULT_DEFICIT_OBJECTIVE,
     ExactRootStratumProvider,
+    deficit_from_supports,
     SQL_NULL,
     _is_structural_value,
     RootColumnMass,
@@ -573,6 +575,19 @@ class ConfigValidationTest(unittest.TestCase):
     def test_a_negative_materialized_row_floor_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "minimum_materialized_rows"):
             validate_config(self.config(max_depth=2, minimum_materialized_rows=-1))
+
+    def test_an_unknown_deficit_objective_is_rejected(self):
+        config = self.config(max_depth=2)
+        config["rare_support"]["discovery"]["deficit_objective"] = "mean"
+        with self.assertRaisesRegex(ValueError, "deficit_objective"):
+            validate_config(config)
+
+    def test_both_deficit_objectives_are_accepted(self):
+        for objective in ("clipped_sum", "log_ratio"):
+            with self.subTest(deficit_objective=objective):
+                config = self.config(max_depth=2)
+                config["rare_support"]["discovery"]["deficit_objective"] = objective
+                validate_config(config)
 
     def test_an_out_of_range_joint_row_fraction_is_rejected(self):
         for value in (-0.1, 1.5):
@@ -3047,6 +3062,109 @@ class UncoveredColumnDiagnosisTest(unittest.TestCase):
         source = self.discover(required_extension_columns=["C.c"])
         self.assertEqual(source.conjunctive_status["required_columns_uncovered"], [])
         self.assertEqual(source.conjunctive_status["required_column_diagnosis"], {})
+
+
+class DeficitObjectiveTest(unittest.TestCase):
+    """The deficit must keep measuring rarity once every candidate is rare.
+
+    ``clipped_sum`` contributes at most ``threshold`` per head, so once support
+    is far below the threshold the sum is ``heads * threshold`` whatever the
+    support is.  Ranking then collapses onto the served-head count, which is the
+    column's position in the schema, and a conjunction on a later column cannot
+    win however much rarer it is.  That is what put 42 info_type_id and 11
+    role_id conjunctions in a JOB-light selection and no keyword_id ones.
+    """
+
+    THRESHOLD = 100.0
+
+    def test_the_clipped_sum_saturates(self):
+        far = deficit_from_supports([0.1] * 6, threshold=self.THRESHOLD)
+        further = deficit_from_supports([0.0001] * 6, threshold=self.THRESHOLD)
+        self.assertAlmostEqual(far, further, delta=1.0)
+        self.assertLess(further, 6 * self.THRESHOLD)
+        self.assertGreater(further, 6 * self.THRESHOLD - 1.0)
+
+    def test_the_log_ratio_keeps_growing(self):
+        far = deficit_from_supports(
+            [0.1] * 6, threshold=self.THRESHOLD, objective="log_ratio"
+        )
+        further = deficit_from_supports(
+            [0.0001] * 6, threshold=self.THRESHOLD, objective="log_ratio"
+        )
+        self.assertGreater(further, far * 1.5)
+
+    def test_head_count_outranks_rarity_under_the_clipped_sum(self):
+        # Six heads at support 0.03 against five heads a thousand times rarer.
+        many = deficit_from_supports([0.03] * 6, threshold=self.THRESHOLD)
+        rare = deficit_from_supports([0.00003] * 5, threshold=self.THRESHOLD)
+        self.assertGreater(many, rare)
+
+    def test_rarity_outranks_head_count_under_the_log_ratio(self):
+        many = deficit_from_supports(
+            [0.03] * 6, threshold=self.THRESHOLD, objective="log_ratio"
+        )
+        rare = deficit_from_supports(
+            [0.00003] * 5, threshold=self.THRESHOLD, objective="log_ratio"
+        )
+        self.assertGreater(rare, many)
+
+    def test_a_head_at_or_above_the_threshold_contributes_nothing(self):
+        for objective in ("clipped_sum", "log_ratio"):
+            with self.subTest(objective=objective):
+                self.assertEqual(
+                    deficit_from_supports(
+                        [self.THRESHOLD, self.THRESHOLD * 2],
+                        threshold=self.THRESHOLD,
+                        objective=objective,
+                    ),
+                    0.0,
+                )
+
+    def test_zero_support_is_bounded_by_epsilon_not_infinite(self):
+        value = deficit_from_supports(
+            [0.0], threshold=self.THRESHOLD, objective="log_ratio", epsilon=1e-9
+        )
+        self.assertTrue(np.isfinite(value))
+        self.assertAlmostEqual(value, float(np.log(self.THRESHOLD / 1e-9)), places=9)
+
+    def test_an_unknown_objective_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "unsupported deficit objective"):
+            deficit_from_supports([1.0], threshold=self.THRESHOLD, objective="mean")
+
+    def test_the_default_is_unchanged(self):
+        self.assertEqual(DEFAULT_DEFICIT_OBJECTIVE, "clipped_sum")
+        self.assertEqual(
+            deficit_from_supports([1.0], threshold=self.THRESHOLD),
+            deficit_from_supports(
+                [1.0], threshold=self.THRESHOLD, objective="clipped_sum"
+            ),
+        )
+
+    def test_discovery_records_which_objective_ran(self):
+        for objective in ("clipped_sum", "log_ratio"):
+            with self.subTest(objective=objective):
+                source = ExactRootStratumProvider.from_encoded_rows(
+                    chain_data_metadata(), chain_rows()
+                )
+                source.discover(
+                    n_total=1_000_000,
+                    predicate_probabilities=PROBABILITIES,
+                    minimum_expected_context_support=1e12,
+                    max_selected_strata=8,
+                    conjunctive={
+                        "enabled": True,
+                        "max_depth": 2,
+                        "beam_width": 8,
+                        "seed_width": 8,
+                        "minimum_joint_rows": 1.0,
+                        "max_joint_row_fraction": 1.0,
+                        "require_distinct_tables": True,
+                    },
+                    discovery_limits={"deficit_objective": objective},
+                )
+                self.assertEqual(
+                    source.conjunctive_status["deficit_objective"], objective
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover

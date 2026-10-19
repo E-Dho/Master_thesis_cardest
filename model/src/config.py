@@ -411,6 +411,13 @@ def validate_config(config: dict[str, Any]) -> None:
             discovery.get("candidate_column_names", ()),
             "rare_support.discovery.candidate_column_names",
         )
+        if "deficit_objective" in discovery:
+            objective = str(discovery["deficit_objective"])
+            if objective not in {"clipped_sum", "log_ratio"}:
+                raise ValueError(
+                    "rare_support.discovery.deficit_objective must be clipped_sum or "
+                    "log_ratio"
+                )
         if "max_candidates_per_column" in discovery:
             if int(discovery["max_candidates_per_column"]) <= 0:
                 raise ValueError(

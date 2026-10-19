@@ -1024,7 +1024,8 @@ class RareSupportSampleSource:
             max_selected_strata=int(discovery.get("max_selected_strata", 64)),
             conjunctive=dict(discovery.get("conjunctive", {})),
             discovery_limits={
-                "max_candidates_per_column": discovery.get("max_candidates_per_column")
+                "max_candidates_per_column": discovery.get("max_candidates_per_column"),
+                "deficit_objective": discovery.get("deficit_objective"),
             },
         )
         self.conjunctive_status = dict(getattr(self.provider, "conjunctive_status", {}))
@@ -1198,6 +1199,7 @@ class RareSupportSampleSource:
                 for stratum in self.selected_strata
             ],
             "proposal_composition": _proposal_composition(self.selected_strata),
+            "conjunctive": self.conjunctive_summary(),
             "selected_stratum_sample_count": dict(self.selected_stratum_sample_count),
             "rare_rows_drawn": int(self.rare_rows_drawn),
             "discovery_seconds": self.discovery_seconds,
