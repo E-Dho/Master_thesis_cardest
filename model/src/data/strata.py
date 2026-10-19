@@ -1344,6 +1344,16 @@ class ExactRootStratumProvider:
             self.conjunctive_status["columns_skipped_by_domain_cap"] = dict(
                 self.columns_skipped_by_domain_cap
             )
+            # An allowlist is as capable of hiding the column that carries the
+            # tail as a domain cap is, and it leaves no other trace, so report
+            # both rather than only the one that looks like a limit.
+            self.conjunctive_status["columns_excluded_by_name"] = list(
+                self.columns_excluded_by_name
+            )
+            self.conjunctive_status["candidate_columns"] = sorted(
+                self.metadata.columns[index].name
+                for index in self.extension_column_masses
+            )
         # "applied" means conjunctions are actually in the selection.  Reporting
         # applied=true with a null reason while every selected stratum is
         # depth-1 is how a run can look like it exercised the feature when it

@@ -2048,6 +2048,26 @@ class DiscoveryPreconditionTest(unittest.TestCase):
         self.assertFalse(source.conjunctive_status["applied"])
         self.assertIsNotNone(source.conjunctive_status["reason"])
 
+    def test_the_status_records_what_the_allowlist_excluded(self):
+        # candidate_column_names hides a column as effectively as the domain cap
+        # does and leaves no other trace.  Omitting the columns that carried the
+        # JOB-light tail from that list is what made three rounds of work aim at
+        # the wrong column, with nothing in the output saying so.
+        source = ExactRootStratumProvider.from_encoded_rows(
+            chain_data_metadata(), chain_rows(), column_names=["R.a", "C.c"]
+        )
+        self.discover(source=source)
+        status = source.conjunctive_status
+        self.assertEqual(status["columns_excluded_by_name"], ["P.b"])
+        self.assertEqual(status["candidate_columns"], ["C.c", "R.a"])
+
+    def test_an_unrestricted_pool_reports_no_exclusions(self):
+        source = self.provider()
+        self.discover(source=source)
+        status = source.conjunctive_status
+        self.assertEqual(status["columns_excluded_by_name"], [])
+        self.assertEqual(status["candidate_columns"], ["C.c", "P.b", "R.a"])
+
     def test_the_status_records_the_row_count_and_the_capped_columns(self):
         source = self.provider(cap=2)
         self.discover(source)

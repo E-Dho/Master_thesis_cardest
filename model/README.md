@@ -1468,6 +1468,21 @@ The per-row form it replaced needed roughly that long for 200 of the 4096 beam
 pairs. Tests assert the vectorized counts equal a direct row scan and that a
 batch of calls stays inside a time budget.
 
+Two filters decide which columns can carry a stratum at all, and both are easy
+to set wrongly in a way nothing else reveals. `include_categorical_root_data`
+skips every root column whose semantic type is `categorical`, and
+`_semantic_for_column` defaults to `categorical` for any column
+`root_column_semantics` does not name -- so a config naming only
+`production_year` leaves that as the *only* seed column in existence, whatever
+else the schema holds. `candidate_column_names` is an allowlist and hides a
+column just as completely. `conjunctive_status` therefore reports
+`candidate_columns`, `columns_excluded_by_name` and
+`columns_skipped_by_domain_cap`, so "the column that carries the tail is not in
+the pool" is visible rather than inferred. That combination is what made a
+JOB-light run select only `production_year` pairings while the three columns
+enriched 7-9x in its own tail -- `title:season_nr`, `title:episode_nr`,
+`title:series_years` -- were filtered out before discovery ran.
+
 `candidate_column_names` now also applies on the materialized path, not only
 the root-JCT one. Restricting the pool by name is what lets a fixture raise
 `max_candidate_domain_size` high enough to include a 134k-domain keyword column

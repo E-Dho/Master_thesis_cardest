@@ -82,6 +82,8 @@ def main() -> None:
     print(f"required_columns_covered           = {status.get('required_columns_covered')}")
     print(f"required_columns_uncovered         = {status.get('required_columns_uncovered')}")
     print(f"columns_skipped_by_domain_cap      = {status.get('columns_skipped_by_domain_cap')}")
+    print(f"columns_excluded_by_name           = {status.get('columns_excluded_by_name')}")
+    print(f"candidate_columns                  = {status.get('candidate_columns')}")
     print(f"reason                             = {status.get('reason')}")
     for name, entry in (status.get("required_column_diagnosis") or {}).items():
         print(f"\ndiagnosis for {name}:")

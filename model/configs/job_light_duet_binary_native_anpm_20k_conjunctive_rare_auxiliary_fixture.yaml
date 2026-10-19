@@ -115,7 +115,10 @@ rare_support:
   discovery:
     enabled: true
     root_data_only: true
-    include_categorical_root_data: false
+    # Root columns default to "categorical" when root_column_semantics does not
+    # name them, and false here skipped every one of those, so on the live path
+    # title:production_year was the only seed column that ever existed.
+    include_categorical_root_data: true
     # Model columns are table:column.  The dotted table.column spelling is the
     # NeuroCard root join-count dataframe's, and matches no model column.
     # The tail this feature targets lives on movie_keyword:keyword_id, whose
@@ -133,18 +136,39 @@ rare_support:
     candidate_column_names:
       - title:production_year
       - title:kind_id
+      # Enriched 9.5x, 7.4x and 8.3x respectively in the worst 20 queries.
+      # Omitting them is why every selected stratum paired production_year with
+      # something: on the live path include_categorical_root_data=false left
+      # production_year as the only seed column in existence, and here this
+      # allowlist left out the columns that actually carry the tail.
+      - title:season_nr
+      - title:episode_nr
+      - title:series_years
+      - title:phonetic_code
       - movie_keyword:keyword_id
       - movie_companies:company_id
       - movie_info:info_type_id
       - movie_info_idx:info_type_id
       - cast_info:role_id
+      - cast_info:nr_order
     minimum_expected_context_support: 100
+    deficit_objective: log_ratio
     max_selected_strata: 64
     support_planning_steps: 20000
     root_column_semantics:
       title:
         production_year: ordered
         kind_id: categorical
+        # The tail-attribution analysis puts these three 7-9x above their base
+        # rate in the worst 20 queries of the 1000-query ranges workload, with
+        # group medians four to six orders of magnitude worse than anything
+        # else.  They are numeric with nulls, and _ordered_numeric_values skips
+        # structural values, so "ordered" holds and gives tail regions as well
+        # as equality -- which is what a range workload needs.
+        season_nr: ordered
+        episode_nr: ordered
+        series_years: ordered
+        phonetic_code: categorical
     conjunctive:
       enabled: true
       max_depth: 2
@@ -172,9 +196,13 @@ rare_support:
       # Fail the run rather than fall back silently: the point of this config is
       # to exercise conjunctions, so discovering none is a failed experiment,
       # and the keyword column has to be in the pool for that to be possible.
+      # movie_keyword:keyword_id is no longer required.  Tail attribution puts
+      # it at 0.70x its base rate in the worst 20 queries -- it is DEPLETED in
+      # the tail, not enriched -- so demanding a conjunction on it was aiming
+      # at the wrong column.  require_conjunctions stays on so a run that forms
+      # no conjunction at all still fails loudly instead of going depth-1 in
+      # silence.
       require_conjunctions: true
-      required_extension_columns:
-        - movie_keyword:keyword_id
   allocation:
     strategy: support_deficit
   diagnostics:
