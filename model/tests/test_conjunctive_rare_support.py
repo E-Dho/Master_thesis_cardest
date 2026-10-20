@@ -3338,6 +3338,47 @@ class PrunedDistributionTest(unittest.TestCase):
         self.assertEqual(entry["best_pruned_joint_count"], float(self.VALUES))
 
 
+class AuditScriptInvocationTest(unittest.TestCase):
+    """The audit script must run both ways it is plausibly invoked.
+
+    model/scripts has no __init__.py and nothing puts the repo root on
+    sys.path, so running the file by path raises ModuleNotFoundError on
+    "import model" before it reads a single argument.  The repo convention is
+    "python3 -m model.scripts.<name>" from the root, but the path form is what
+    anyone copies off a README line or out of shell history, and on a cluster
+    that import error costs a round trip to diagnose.
+    """
+
+    SCRIPT = "model/scripts/inspect_rare_support.py"
+
+    def _run(self, argv):
+        import subprocess
+
+        return subprocess.run(
+            [sys.executable, *argv, "--config", "model/configs/resmade_smoke.yaml"],
+            capture_output=True,
+            text=True,
+            cwd=pathlib.Path.cwd(),
+        )
+
+    def test_running_the_file_by_path_gets_past_the_imports(self):
+        result = self._run([self.SCRIPT])
+        self.assertNotIn("No module named 'model'", result.stderr)
+
+    def test_running_it_as_a_module_gets_past_the_imports(self):
+        result = self._run(["-m", "model.scripts.inspect_rare_support"])
+        self.assertNotIn("No module named 'model'", result.stderr)
+
+    def test_both_forms_reach_the_same_decision(self):
+        # Not merely "no import error": both must get far enough to judge the
+        # config, so a bootstrap that imports a different copy of the package
+        # would show up here rather than passing quietly.
+        by_path = self._run([self.SCRIPT])
+        as_module = self._run(["-m", "model.scripts.inspect_rare_support"])
+        self.assertEqual(by_path.returncode, as_module.returncode)
+        self.assertEqual(by_path.stdout, as_module.stdout)
+
+
 class ReadOnlyFixtureGuardTest(unittest.TestCase):
     """A fixture consumer must not be able to rebuild the fixture it reads.
 

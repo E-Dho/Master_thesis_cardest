@@ -1486,12 +1486,15 @@ zero.
 
 ### Auditing discovery without training
 
-`model/scripts/inspect_rare_support.py --config <config>` runs discovery alone
--- no GPU, no optimizer, no training loop -- and prints the pool sizes, the
-selected strata by depth, the required-column coverage, the row-floor status
-and the diagnosis, then writes the whole report as JSON. `--allow-uncovered` turns off
-`require_conjunctions` for the audit so the diagnosis can be read without the
-run stopping. On a cluster this turns a configuration assumption from a queue
+`python3 -m model.scripts.inspect_rare_support --config <config>`, run from the
+repo root, performs discovery alone -- no GPU, no optimizer, no training loop --
+and prints the pool sizes, the selected strata by depth, the
+required-column coverage, the row-floor status and the diagnosis, then writes
+the whole report as JSON. Either invocation works -- running the file by path
+bootstraps the repo root onto `sys.path` -- but the relative paths in a config
+are resolved against the working directory either way. `--allow-uncovered`
+turns off `require_conjunctions` for the audit so the diagnosis can be read
+without the run stopping. On a cluster this turns a configuration assumption from a queue
 cycle into a couple of minutes on a login node.
 
 Column names in `candidate_column_names` and `required_extension_columns` are

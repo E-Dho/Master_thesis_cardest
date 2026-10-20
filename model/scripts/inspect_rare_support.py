@@ -12,6 +12,17 @@ import json
 from pathlib import Path
 from typing import Any
 
+if __package__ in (None, ""):
+    # Running this file by path puts model/scripts on sys.path, not the repo
+    # root, so "import model" fails.  The repo convention is
+    # "python3 -m model.scripts.<name>" from the root, but the path form is
+    # what anyone reads off a README line or shell history, and a
+    # ModuleNotFoundError at a cluster prompt costs a round trip to diagnose.
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
 from model.src.config import load_simple_yaml, validate_config
 from model.src.data.importance_sampling import RareSupportSampleSource
 from model.src.data.sample_sources import sample_source_from_config
