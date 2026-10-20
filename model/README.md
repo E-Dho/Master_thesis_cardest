@@ -1480,9 +1480,19 @@ Two properties matter for reading a report:
   fixes.
 
 `conjunctive_status` also carries `candidates_below_row_floor` and
-`selected_stratum_rows` (`min`, `median`, `max`, `at_or_below_one`). A run is
-only worth launching when `row_floor_applied` is true and `at_or_below_one` is
-zero.
+`selected_stratum_rows` (`min`, `median`, `max`, `at_or_below_one`).
+
+Do not read `at_or_below_one: 0` as a clearance. What decides whether
+oversampling teaches a region or memorises its rows is size against
+allocation, not size alone: a stratum drawn `alpha` of the auxiliary batch
+shows each of its rows `alpha * batch * steps / foj_count` times, against
+`batch * steps / rows` for a typical row of the main stream. On the ranges
+fixture a floor of 100 clears `at_or_below_one` while leaving 31 of 64 strata
+under a thousand rows, carrying 58% of the batch, the smallest of them 116
+rows -- about 67x the main stream at an even allocation. The audit therefore
+reports `per_row_exposure`, with the main-stream baseline, the worst stratum
+and its multiple of that baseline, so the comparison needs no arithmetic from
+the reader. A floor of 1000 puts the worst multiple near 8x.
 
 ### Auditing discovery without training
 

@@ -3408,6 +3408,59 @@ rare_auxiliary:
   beta: 0.25
 """
 
+    def test_per_row_exposure_measures_size_against_allocation(self):
+        # The numbers are the JOB-light ranges geometry: 512 auxiliary rows and
+        # 2048 main rows over 20,000 steps against a 2M-row fixture, so the
+        # main stream shows a typical row 20.48 times.  A stratum holding 1032
+        # rows at an even 1/64 allocation is drawn 160,000 times, which is
+        # 155.0 draws per row, or 7.6x the main stream.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "inspect_rare_support_under_test", self.SCRIPT
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        config = {
+            "training": {"batch_size": 2048, "steps_per_epoch": 20000, "epochs": 1},
+            "rare_auxiliary": {"batch_size": 512},
+        }
+        status = {"materialized_rows": 2_000_000}
+        strata = [
+            {"stratum_id": "wide", "foj_count": 5114.0, "alpha": 1 / 64},
+            {"stratum_id": "narrow", "foj_count": 1032.0, "alpha": 1 / 64},
+        ]
+        exposure = module.per_row_exposure(config, status, strata)
+
+        self.assertAlmostEqual(exposure["main_stream_draws_per_row"], 20.48)
+        self.assertEqual(exposure["worst_stratum"], "narrow")
+        self.assertAlmostEqual(exposure["worst_multiple_of_main_stream"], 7.57, places=2)
+
+    def test_per_row_exposure_is_absent_rather_than_wrong_without_rows(self):
+        # The live path reports no materialized_rows, and the baseline is
+        # meaningless without them.  Reporting a number anyway would be worse
+        # than reporting none.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "inspect_rare_support_under_test", self.SCRIPT
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        config = {
+            "training": {"batch_size": 2048, "steps_per_epoch": 20000, "epochs": 1},
+            "rare_auxiliary": {"batch_size": 512},
+        }
+        strata = [{"stratum_id": "a", "foj_count": 10.0, "alpha": 1.0}]
+        self.assertIsNone(
+            module.per_row_exposure(config, {"materialized_rows": None}, strata)
+        )
+        self.assertIsNone(
+            module.per_row_exposure(config, {"materialized_rows": 2_000_000}, [])
+        )
+
     def test_a_refusal_still_writes_the_report(self):
         # The report is needed most when discovery refuses, and that was the
         # one case producing none: the error came out of the constructor, so

@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 if __package__ in (None, ""):
     # Running this file by path puts model/scripts on sys.path, not the repo
@@ -27,6 +27,54 @@ from model.src.config import load_simple_yaml, validate_config
 from model.src.data.importance_sampling import RareSupportSampleSource
 from model.src.data.strata import RareSupportDiscoveryError
 from model.src.data.sample_sources import sample_source_from_config
+
+
+def per_row_exposure(
+    config: Mapping[str, Any],
+    status: Mapping[str, Any],
+    strata: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """How hard the auxiliary stream leans on the rows inside each stratum.
+
+    The row floor bounds a stratum's size, but what decides whether
+    oversampling teaches a region or memorises its rows is size against
+    allocation: a stratum drawn alpha of the auxiliary batch shows each of its
+    rows alpha * batch * steps / foj_count times, against batch * steps / rows
+    for a typical row of the main stream.  Reporting only the row counts hides
+    this.  On the JOB-light ranges fixture a floor of 100 leaves every
+    selected stratum above one row and looks safe by that test, while its
+    smallest region holds 116 rows and, at an even allocation, is shown about
+    67x more often than the main stream -- the arithmetic nobody does while
+    reading an audit, so the audit does it.
+    """
+
+    training = config.get("training", {})
+    steps = int(training.get("steps_per_epoch", 0)) * int(training.get("epochs", 1))
+    auxiliary = int(config.get("rare_auxiliary", {}).get("batch_size", 0))
+    main = int(training.get("batch_size", 0))
+    rows = status.get("materialized_rows")
+    if not (steps and auxiliary and main and rows and strata):
+        return None
+
+    baseline = main * steps / float(rows)
+    multiples = []
+    for stratum in strata:
+        count = float(stratum["foj_count"])
+        if count <= 0.0:
+            continue
+        drawn = float(stratum["alpha"]) * auxiliary * steps
+        multiples.append((drawn / count / baseline, stratum["stratum_id"], count))
+    if not multiples:
+        return None
+    multiples.sort(reverse=True)
+    worst = multiples[0]
+    return {
+        "main_stream_draws_per_row": baseline,
+        "worst_multiple_of_main_stream": worst[0],
+        "worst_stratum": worst[1],
+        "worst_stratum_rows": worst[2],
+        "median_multiple_of_main_stream": multiples[len(multiples) // 2][0],
+    }
 
 
 def main() -> None:
@@ -96,6 +144,7 @@ def main() -> None:
     }
     if failure is not None:
         report["error"] = failure
+    report["per_row_exposure"] = per_row_exposure(config, status, strata)
 
     if failure is not None:
         print(f"DISCOVERY REFUSED: {failure}\n")
@@ -138,6 +187,23 @@ def main() -> None:
         for name in columns_by_depth[depth]:
             counts[name] = counts.get(name, 0) + 1
         print(f"  depth {depth}: {dict(sorted(counts.items(), key=lambda kv: -kv[1]))}")
+
+    exposure = report["per_row_exposure"]
+    if exposure is not None:
+        print("\nper-row exposure (auxiliary stream against the main stream):")
+        print(f"  {'main stream draws per row':34s} {exposure['main_stream_draws_per_row']:.1f}")
+        print(
+            f"  {'worst stratum':34s} {exposure['worst_stratum']} "
+            f"({exposure['worst_stratum_rows']:.0f} rows)"
+        )
+        print(
+            f"  {'worst multiple of main stream':34s} "
+            f"{exposure['worst_multiple_of_main_stream']:.1f}x"
+        )
+        print(
+            f"  {'median multiple of main stream':34s} "
+            f"{exposure['median_multiple_of_main_stream']:.1f}x"
+        )
 
     output_path = Path(
         args.output
