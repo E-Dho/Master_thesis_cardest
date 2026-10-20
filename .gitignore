@@ -36,6 +36,9 @@ query_runs/
 # (already matched by *.csv above; anchored here so the intent is explicit)
 /train.csv
 
+# Scratch deliverables written by assistant sessions; not part of the project.
+/Claude outputs/
+
 # Generated visual artifacts
 query_generation/visualizations/
 
