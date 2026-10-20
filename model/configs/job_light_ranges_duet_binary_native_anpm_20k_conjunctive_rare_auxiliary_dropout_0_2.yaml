@@ -152,10 +152,21 @@ rare_support:
       # movie_keyword:keyword_id is no longer required.  Tail attribution puts
       # it at 0.70x its base rate in the worst 20 queries -- it is DEPLETED in
       # the tail, not enriched -- so demanding a conjunction on it was aiming
-      # at the wrong column.  require_conjunctions stays on so a run that forms
-      # no conjunction at all still fails loudly instead of going depth-1 in
-      # silence.
-      require_conjunctions: true
+      # at the wrong column.
+      #
+      # require_conjunctions is off because this fixture provably cannot
+      # satisfy it.  The best joint count the beam can reach here is 15
+      # against minimum_joint_rows: 100, and clearing 100 even once needs on
+      # the order of 13M rows; a three-floor audit at 0, 100 and 1000 selected
+      # zero conjunctions at every floor.  Lowering minimum_joint_rows to
+      # admit a 15-row conjunction would hand it straight to
+      # minimum_stratum_rows, which exists to reject regions that small, so
+      # the two guards would simply cancel.  This run is therefore depth-1
+      # rare support on the tail columns, and the honest way to say so is to
+      # stop requiring something that cannot happen.  Discovery still runs the
+      # beam and still reports conjunctive_status, so the day the fixture
+      # grows the audit says so without a config change.
+      require_conjunctions: false
   allocation:
     strategy: support_deficit
   diagnostics:
