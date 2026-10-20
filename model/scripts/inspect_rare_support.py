@@ -25,6 +25,7 @@ if __package__ in (None, ""):
 
 from model.src.config import load_simple_yaml, validate_config
 from model.src.data.importance_sampling import RareSupportSampleSource
+from model.src.data.strata import RareSupportDiscoveryError
 from model.src.data.sample_sources import sample_source_from_config
 
 
@@ -54,17 +55,26 @@ def main() -> None:
         )
         conjunctive["require_conjunctions"] = False
 
-    source = sample_source_from_config(config)
-    if not isinstance(source, RareSupportSampleSource):
-        raise SystemExit(
-            "config did not construct an enabled RareSupportSampleSource; "
-            "check rare_support.enabled and rare_auxiliary.enabled"
-        )
-
-    report: dict[str, Any] = {
-        "config": str(args.config),
-        "conjunctive": source.conjunctive_summary(),
-        "selected_strata": [
+    # A refusal is when this report is needed most, and it used to be the one
+    # case that produced none: discovery raised out of the constructor, so the
+    # source object never existed and the script died with a traceback and no
+    # file.  The refusals carry the status that explains them, so write the
+    # report either way and exit non-zero afterwards.
+    failure: str | None = None
+    try:
+        source = sample_source_from_config(config)
+    except RareSupportDiscoveryError as exc:
+        failure = str(exc)
+        status: dict[str, Any] = dict(exc.conjunctive_status)
+        strata: list[dict[str, Any]] = []
+    else:
+        if not isinstance(source, RareSupportSampleSource):
+            raise SystemExit(
+                "config did not construct an enabled RareSupportSampleSource; "
+                "check rare_support.enabled and rare_auxiliary.enabled"
+            )
+        status = dict(source.conjunctive_summary())
+        strata = [
             {
                 "stratum_id": stratum.stratum_id,
                 "depth": stratum.depth,
@@ -77,10 +87,18 @@ def main() -> None:
                 "alpha": float(stratum.alpha),
             }
             for stratum in source.selected_strata
-        ],
-    }
+        ]
 
-    status = report["conjunctive"]
+    report: dict[str, Any] = {
+        "config": str(args.config),
+        "conjunctive": status,
+        "selected_strata": strata,
+    }
+    if failure is not None:
+        report["error"] = failure
+
+    if failure is not None:
+        print(f"DISCOVERY REFUSED: {failure}\n")
     print(f"materialized_rows                  = {status.get('materialized_rows')}")
     print(f"selected_strata                    = {status.get('selected_strata')}")
     print(f"selected_conjunctive_strata        = {status.get('selected_conjunctive_strata')}")
@@ -129,6 +147,9 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(f"\nreport={output_path}")
+    if failure is not None:
+        # Non-zero, so a batch script still stops, but with the report written.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

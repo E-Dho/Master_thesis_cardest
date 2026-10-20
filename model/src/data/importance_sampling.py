@@ -11,6 +11,7 @@ import numpy as np
 from model.src.data.full_join_sampler import FullJoinBatch, SyntheticFullJoinSampleSource
 from model.src.data.strata import (
     ExactRootStratumProvider,
+    RareSupportDiscoveryError,
     RootDataStratum,
     RootStratumMembershipLookup,
     build_membership_lookup,
@@ -1061,9 +1062,10 @@ class RareSupportSampleSource:
                     "candidates that otherwise qualified -- lower the floor or "
                     "widen candidate_column_names"
                 )
-            raise ValueError(
+            raise RareSupportDiscoveryError(
                 "rare support discovery selected no strata with both positive "
-                "mass and positive support deficit" + floor_note
+                "mass and positive support deficit" + floor_note,
+                self.conjunctive_status,
             )
         prepare_root_strata = getattr(base_source, "prepare_root_strata", None)
         if prepare_root_strata is not None:

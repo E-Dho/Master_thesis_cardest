@@ -16,6 +16,24 @@ from model.src.predicates.operators import PredicateOp
 
 SQL_NULL = "__SQL_NULL__"
 
+class RareSupportDiscoveryError(ValueError):
+    """A refusal that carries the status that explains it.
+
+    Discovery refuses in the cases a run must not survive, and those are
+    exactly the cases where the diagnosis matters most.  Raising a bare
+    ValueError strands it: the provider holds a fully populated
+    conjunctive_status by the time any of these checks run, but the caller
+    never gets the object, so the audit script -- whose whole job is to
+    explain a failed configuration -- writes no report for the failure it
+    exists to explain.  Subclassing ValueError keeps every existing caller and
+    test working.
+    """
+
+    def __init__(self, message: str, conjunctive_status: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.conjunctive_status = dict(conjunctive_status or {})
+
+
 DEFICIT_OBJECTIVES = ("clipped_sum", "log_ratio")
 DEFAULT_DEFICIT_OBJECTIVE = "clipped_sum"
 
@@ -1434,12 +1452,13 @@ class ExactRootStratumProvider:
             )
             self.conjunctive_status["required_column_diagnosis"] = diagnosis
             if uncovered and bool(conjunctive.get("require_conjunctions", False)):
-                raise ValueError(
+                raise RareSupportDiscoveryError(
                     f"required_extension_columns {uncovered!r} appear in no selected "
                     f"conjunctive stratum ({conjunctive_selected} were selected).\n"
                     + "\n".join(
                         f"  {name}: {diagnosis[name]['explanation']}" for name in uncovered
-                    )
+                    ),
+                    self.conjunctive_status,
                 )
         if conjunctive_requested and not conjunctive_selected:
             if self.conjunctive_status.get("reason") is None:
@@ -1449,7 +1468,7 @@ class ExactRootStratumProvider:
                 )
             if bool(conjunctive.get("require_conjunctions", False)):
                 skipped = self.columns_skipped_by_domain_cap
-                raise ValueError(
+                raise RareSupportDiscoveryError(
                     "require_conjunctions=true but no conjunctive stratum was "
                     f"selected: {self.conjunctive_status['reason']}"
                     + (
@@ -1457,7 +1476,8 @@ class ExactRootStratumProvider:
                         f"{sorted(skipped)} from the candidate pool"
                         if skipped
                         else ""
-                    )
+                    ),
+                    self.conjunctive_status,
                 )
         if not selected:
             return ()

@@ -25,6 +25,7 @@ from model.src.config import (
 from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 from model.src.data.strata import (
+    RareSupportDiscoveryError,
     DEFAULT_DEFICIT_OBJECTIVE,
     ExactRootStratumProvider,
     deficit_from_supports,
@@ -2042,6 +2043,25 @@ class DiscoveryPreconditionTest(unittest.TestCase):
                 require_conjunctions=True,
             )
 
+    def test_the_refusal_carries_the_status_that_explains_it(self):
+        # This is the refusal a correctly configured conjunctive run actually
+        # hits, and it fires before anything can read the provider's status,
+        # so the status has to travel on the exception.  Without it the audit
+        # script can only report a traceback for the one failure it exists to
+        # diagnose.
+        with self.assertRaises(RareSupportDiscoveryError) as caught:
+            self.discover(
+                self.provider(),
+                minimum_joint_rows=1e9,
+                max_joint_row_fraction=0.0,
+                require_conjunctions=True,
+            )
+        status = caught.exception.conjunctive_status
+        self.assertTrue(status["requested"])
+        self.assertFalse(status["applied"])
+        self.assertIsNotNone(status["reason"])
+        self.assertIn("row_floor_applied", status)
+
     def test_without_require_conjunctions_an_empty_result_only_reports(self):
         source = self.provider()
         self.discover(source, minimum_joint_rows=1e9, max_joint_row_fraction=0.0)
@@ -3368,6 +3388,57 @@ class AuditScriptInvocationTest(unittest.TestCase):
     def test_running_it_as_a_module_gets_past_the_imports(self):
         result = self._run(["-m", "model.scripts.inspect_rare_support"])
         self.assertNotIn("No module named 'model'", result.stderr)
+
+    RARE_BLOCKS = """
+rare_support:
+  enabled: true
+  discovery:
+    enabled: true
+    root_data_only: true
+    minimum_expected_context_support: 20
+    max_selected_strata: 4
+    support_planning_steps: 20
+    minimum_stratum_rows: 1000000000
+  allocation:
+    strategy: support_deficit
+
+rare_auxiliary:
+  enabled: true
+  batch_size: 4
+  beta: 0.25
+"""
+
+    def test_a_refusal_still_writes_the_report(self):
+        # The report is needed most when discovery refuses, and that was the
+        # one case producing none: the error came out of the constructor, so
+        # the source never existed and the script died with a traceback and no
+        # file.  An impossible row floor is the cheapest way to force a
+        # refusal with a fully populated status behind it.
+        import subprocess
+
+        directory = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        config = directory / "config.yaml"
+        config.write_text(
+            pathlib.Path("model/configs/resmade_smoke.yaml").read_text() + self.RARE_BLOCKS
+        )
+        output = directory / "report.json"
+        result = subprocess.run(
+            [sys.executable, self.SCRIPT, "--config", str(config), "--output", str(output)],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("DISCOVERY REFUSED", result.stdout)
+        self.assertTrue(output.exists(), result.stderr)
+        report = json.loads(output.read_text())
+        self.assertIn("no strata", report["error"])
+        self.assertEqual(report["selected_strata"], [])
+        # The status that explains the refusal has to survive the raise, which
+        # is the whole point: a traceback alone says a run failed, not why.
+        self.assertEqual(report["conjunctive"]["minimum_stratum_rows"], 1e9)
+        self.assertTrue(report["conjunctive"]["row_floor_applied"])
 
     def test_both_forms_reach_the_same_decision(self):
         # Not merely "no import error": both must get far enough to judge the

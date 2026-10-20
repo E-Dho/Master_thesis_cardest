@@ -1494,7 +1494,15 @@ the whole report as JSON. Either invocation works -- running the file by path
 bootstraps the repo root onto `sys.path` -- but the relative paths in a config
 are resolved against the working directory either way. `--allow-uncovered`
 turns off `require_conjunctions` for the audit so the diagnosis can be read
-without the run stopping. On a cluster this turns a configuration assumption from a queue
+without the run stopping.
+
+A refusal still writes the report. Discovery raises out of the sample source's
+constructor, so the source object never exists and the script used to die with
+a traceback and no file -- for the one failure it exists to explain. The
+refusals now raise `RareSupportDiscoveryError`, which carries the
+`conjunctive_status` as it stood when the check fired, and the script writes
+that status, an empty `selected_strata` and an `error` field, prints
+`DISCOVERY REFUSED`, then exits 1 so a batch script still stops. On a cluster this turns a configuration assumption from a queue
 cycle into a couple of minutes on a login node.
 
 Column names in `candidate_column_names` and `required_extension_columns` are
