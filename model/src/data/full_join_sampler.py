@@ -391,8 +391,25 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         neurocard_path: str | Path | None = None,
         sampler_batch_size: int = 16384,
         seed: int = 0,
+        use_cols: str | None = None,
         startup_callback: Any | None = None,
     ) -> None:
+        # Validated before anything touches the filesystem, so a typo fails
+        # at construction rather than after the manifest and CSV checks.
+        #
+        # prepare_neurocard_data reads dataset.use_cols; this path used to pin
+        # NeuroCard's JOB_LIGHT_BASE default regardless, so the same config key
+        # meant different things either side of sampling_mode.  A fixture built
+        # with "content" carries title:season_nr, episode_nr and series_years
+        # while the live sampler's root dataframe did not, so discovery here
+        # could only ever see title:kind_id and title:production_year -- and it
+        # reported that as "not_in_root_dataframe" rather than as a mismatch
+        # with the manifest the metadata came from.
+        if use_cols is not None and use_cols not in {"simple", "content", "multi", "full"}:
+            raise ValueError(
+                "dataset.use_cols must be one of simple, content, multi, full, or null"
+            )
+        self.use_cols = use_cols
         super().__init__(prepared_directory, sampling_mode="live")
         self.csv_directory = Path(csv_directory).resolve()
         if not self.csv_directory.exists():
@@ -457,6 +474,18 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
         self._buffer = None
         self._buffer_cursor = 0
 
+    def table_use_cols(self, cfg: Any) -> Any:
+        """The column set the root tables are loaded with.
+
+        NeuroCard's own default unless the config names one.  The fixture path
+        has honoured dataset.use_cols since prepare_neurocard_data learned it;
+        pinning the default here made the same key mean different things on
+        either side of sampling_mode, and the symptom was a live run whose
+        root dataframe silently lacked the columns its manifest declared.
+        """
+
+        return cfg["use_cols"] if self.use_cols is None else self.use_cols
+
     def _load_neurocard_sampler(self) -> None:
         neurocard_path = str(self.neurocard_path)
         if neurocard_path not in sys.path:
@@ -490,7 +519,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 datasets.LoadImdb(
                     table,
                     data_dir=str(self.csv_directory) + "/",
-                    use_cols=cfg["use_cols"],
+                    use_cols=self.table_use_cols(cfg),
                     try_load_parsed=True,
                 )
                 for table in spec.join_tables
@@ -500,6 +529,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 {
                     "table_count": len(tables),
                     "tables": list(getattr(spec, "join_tables", ())),
+                    "use_cols": self.table_use_cols(cfg),
                 },
             )
             self._startup_event(

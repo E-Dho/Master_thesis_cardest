@@ -1404,23 +1404,33 @@ class ExactRootStratumProvider:
         }
         conjunctive_selected = sum(1 for item in selected if item.is_conjunctive)
         self.conjunctive_status["conjunctive_selected"] = conjunctive_selected
-        if conjunctive_requested:
-            self.conjunctive_status["materialized_rows"] = (
-                None if self.encoded_rows is None else int(self.encoded_rows.shape[0])
-            )
-            self.conjunctive_status["columns_skipped_by_domain_cap"] = dict(
-                self.columns_skipped_by_domain_cap
-            )
-            # An allowlist is as capable of hiding the column that carries the
-            # tail as a domain cap is, and it leaves no other trace, so report
-            # both rather than only the one that looks like a limit.
-            self.conjunctive_status["columns_excluded_by_name"] = list(
-                self.columns_excluded_by_name
-            )
-            self.conjunctive_status["candidate_columns"] = sorted(
-                self.metadata.columns[index].name
-                for index in self.extension_column_masses
-            )
+        # Which columns reached the pool, and which were kept out, are facts
+        # about discovery rather than about conjunctions.  Reporting them only
+        # when conjunctive discovery was requested meant a depth-1 or live run
+        # could not say why a column was missing -- and an allowlist hides a
+        # column as completely as a domain cap while leaving no other trace.
+        self.conjunctive_status["materialized_rows"] = (
+            None if self.encoded_rows is None else int(self.encoded_rows.shape[0])
+        )
+        self.conjunctive_status["columns_skipped_by_domain_cap"] = dict(
+            self.columns_skipped_by_domain_cap
+        )
+        self.conjunctive_status["columns_excluded_by_name"] = list(
+            self.columns_excluded_by_name
+        )
+        # Two pools, reported separately because they fail differently.
+        # seed_candidate_columns is the root-only depth-1 pool, and is the only
+        # one a live run has; candidate_columns is the all-DATA extension pool
+        # a conjunction draws its later terms from, and is empty without
+        # materialized rows.  Collapsing them into one key is how a live run
+        # ends up reporting None for the pool that actually decided it.
+        self.conjunctive_status["seed_candidate_columns"] = sorted(
+            self.metadata.columns[index].name for index in self.column_masses
+        )
+        self.conjunctive_status["candidate_columns"] = sorted(
+            self.metadata.columns[index].name
+            for index in self.extension_column_masses
+        )
         # "applied" means conjunctions are actually in the selection.  Reporting
         # applied=true with a null reason while every selected stratum is
         # depth-1 is how a run can look like it exercised the feature when it

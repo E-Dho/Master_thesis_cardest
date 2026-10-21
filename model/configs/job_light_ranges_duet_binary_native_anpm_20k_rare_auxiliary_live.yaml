@@ -18,7 +18,19 @@ dataset:
   type: neurocard_full_join
   name: job_light_ranges_duet_binary_native_anpm_20k_rare_auxiliary_live_seed_0
   csv_directory: datasets/job
-  prepared_directory: data/neurocard_prepared/job_light
+  # Its own prepared directory, not the shared data/neurocard_prepared/job_light
+  # that 37 configs read.  That one was built with NeuroCard's default column
+  # set, so its domains carry neither title:season_nr, title:episode_nr nor
+  # title:series_years -- the live preflight found exactly title:kind_id and
+  # title:production_year in the root dataframe.  Comparing a model that has
+  # those columns against one that does not is not an ablation.
+  #
+  # Build it once with:
+  #   python3 -m model.scripts.prepare_neurocard_data \
+  #     --config <this config> --rebuild-domains --sample-rows 2000
+  # Live mode never reads sample_rows.npy, so the sample size only needs to be
+  # positive; the domains are built from the complete base tables either way.
+  prepared_directory: data/neurocard_prepared/job_light_ranges_live_content
   use_cols: content
   sampling_mode: live
   sampler_batch_size: 16384

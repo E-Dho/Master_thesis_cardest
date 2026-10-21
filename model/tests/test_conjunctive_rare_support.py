@@ -14,6 +14,7 @@ import sys
 import time
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -24,6 +25,7 @@ from model.src.config import (
 )
 from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
+import model.src.data.sample_sources as sample_sources_module
 from model.src.data.strata import (
     RareSupportDiscoveryError,
     DEFAULT_DEFICIT_OBJECTIVE,
@@ -3356,6 +3358,132 @@ class PrunedDistributionTest(unittest.TestCase):
         entry = self.entry(provider)
         # Value 119 appears 120 times and the seed covers every row.
         self.assertEqual(entry["best_pruned_joint_count"], float(self.VALUES))
+
+
+class LiveSamplerUseColsTest(unittest.TestCase):
+    """dataset.use_cols must mean the same thing on both sides of sampling_mode.
+
+    prepare_neurocard_data honours it; the live sampler pinned NeuroCard's
+    JOB_LIGHT_BASE default regardless. A fixture built with "content" carries
+    title:season_nr, episode_nr and series_years, so a live run against the
+    same schema saw a root dataframe missing exactly the columns the whole
+    experiment was about, and reported it only as "not_in_root_dataframe".
+    """
+
+    def source(self, use_cols):
+        instance = object.__new__(LiveNeuroCardFullJoinSampleSource)
+        instance.use_cols = use_cols
+        return instance
+
+    def test_the_configured_value_replaces_neurocards_default(self):
+        cfg = {"use_cols": "simple"}
+        self.assertEqual(self.source("content").table_use_cols(cfg), "content")
+
+    def test_neurocards_default_is_kept_when_unset(self):
+        cfg = {"use_cols": "simple"}
+        self.assertEqual(self.source(None).table_use_cols(cfg), "simple")
+
+    def test_an_unknown_value_is_refused_at_construction(self):
+        # Before the manifest and CSV checks, so a typo fails immediately
+        # rather than after minutes of loading.
+        with self.assertRaisesRegex(ValueError, "use_cols"):
+            LiveNeuroCardFullJoinSampleSource(
+                "/nonexistent/prepared",
+                csv_directory="/nonexistent/csv",
+                use_cols="contents",
+            )
+
+    def test_the_config_value_reaches_the_live_source(self):
+        captured = {}
+
+        class Recorder:
+            def __init__(self, prepared_directory, **kwargs):
+                captured["use_cols"] = kwargs.get("use_cols")
+                raise RuntimeError("stop after construction")
+
+        config = {
+            "dataset": {
+                "type": "neurocard_full_join",
+                "sampling_mode": "live",
+                "prepared_directory": "/nonexistent/prepared",
+                "csv_directory": "/nonexistent/csv",
+                "use_cols": "content",
+            }
+        }
+        with mock.patch.object(
+            sample_sources_module, "LiveNeuroCardFullJoinSampleSource", Recorder
+        ):
+            with self.assertRaises(RuntimeError):
+                sample_sources_module.sample_source_from_config(config)
+        self.assertEqual(captured["use_cols"], "content")
+
+
+class SeedPoolReportingTest(unittest.TestCase):
+    """A depth-1 or live run must be able to say which columns it could see.
+
+    candidate_columns was reported only when conjunctive discovery was
+    requested, and it carried the extension pool. A live run has no extension
+    pool and does not request conjunctions, so its audit printed None for the
+    only pool that decided anything -- which is how a live preflight could
+    report 64 selected strata without revealing that exactly two root columns
+    were available to pick them from.
+    """
+
+    def provider(self, column_names=None):
+        # Two tables, so the root-only seed pool and the all-DATA extension
+        # pool genuinely differ.  A single-table fixture makes them identical
+        # and cannot tell the two keys apart.
+        meta = ModelMetadata(
+            columns=(
+                ColumnMetadata("t:a", ColumnKind.DATA, (0, 1, 2), table="t"),
+                ColumnMetadata("t:b", ColumnKind.DATA, (0, 1, 2), table="t"),
+                ColumnMetadata("u:c", ColumnKind.DATA, (0, 1, 2), table="u"),
+            ),
+            full_join_cardinality=9.0,
+            join_root="t",
+            join_tables=("t", "u"),
+            join_edges=(("t", "u"),),
+        )
+        rows = np.asarray(
+            [[value % 3, value % 2, value % 3] for value in range(60)], dtype=np.int64
+        )
+        return ExactRootStratumProvider.from_encoded_rows(
+            meta, rows, column_names=column_names
+        )
+
+    def discover(self, source, conjunctive=None):
+        return source.discover(
+            n_total=10_000,
+            predicate_probabilities=PROBABILITIES,
+            minimum_expected_context_support=1e9,
+            max_selected_strata=8,
+            conjunctive=conjunctive or {},
+        )
+
+    def test_the_seed_pool_is_reported_without_conjunctive_discovery(self):
+        source = self.provider()
+        self.discover(source)
+        # Root-only: u:c belongs to the extension pool, not the seed pool.
+        self.assertEqual(
+            source.conjunctive_status["seed_candidate_columns"], ["t:a", "t:b"]
+        )
+        self.assertIn("u:c", source.conjunctive_status["candidate_columns"])
+        self.assertNotIn("u:c", source.conjunctive_status["seed_candidate_columns"])
+
+    def test_an_allowlist_shows_in_the_seed_pool_too(self):
+        source = self.provider(column_names=["t:a"])
+        self.discover(source)
+        self.assertEqual(source.conjunctive_status["seed_candidate_columns"], ["t:a"])
+        self.assertIn("t:b", source.conjunctive_status["columns_excluded_by_name"])
+
+    def test_exclusions_are_reported_without_conjunctive_discovery(self):
+        # The keys existed only under conjunctive_requested, so a depth-1 run
+        # could not tell a column that was never offered from one that lost.
+        source = self.provider(column_names=["t:a"])
+        self.discover(source)
+        for key in ("columns_excluded_by_name", "columns_skipped_by_domain_cap",
+                    "materialized_rows"):
+            self.assertIn(key, source.conjunctive_status)
 
 
 class AuditScriptInvocationTest(unittest.TestCase):

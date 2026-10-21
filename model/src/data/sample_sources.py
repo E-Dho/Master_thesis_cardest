@@ -47,6 +47,7 @@ def sample_source_from_config(
                     dataset.get("sampler_batch_size", dataset.get("sample_batch_size", 16384))
                 ),
                 seed=int(dataset.get("sampler_seed", config.get("training", {}).get("seed", 0))),
+                use_cols=dataset.get("use_cols"),
                 startup_callback=startup_callback,
             )
         else:

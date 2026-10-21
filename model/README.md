@@ -1479,6 +1479,25 @@ Two properties matter for reading a report:
   rare regions" and "this floor is too high for this fixture" need opposite
   fixes.
 
+Two candidate pools are reported, because they fail differently.
+`seed_candidate_columns` is the root-only pool depth-1 strata are drawn from,
+and is the only one a live run has; `candidate_columns` is the all-DATA
+extension pool a conjunction draws its later terms from, and is empty without
+materialized rows. Both are reported whether or not conjunctive discovery was
+requested, along with `columns_excluded_by_name` and
+`columns_skipped_by_domain_cap` — a live preflight otherwise reports a healthy
+64 selected strata while saying nothing about the two root columns that were
+all it had to choose from.
+
+`dataset.use_cols` applies on both sides of `sampling_mode`. The fixture path
+has honoured it since `prepare_neurocard_data` learned it; the live sampler
+pinned NeuroCard's `JOB_LIGHT_BASE` default, so a config asking for `content`
+got a root dataframe without `title:season_nr`, `title:episode_nr` or
+`title:series_years` while its manifest declared them, and discovery reported
+that only as `not_in_root_dataframe`. A live config therefore needs its own
+prepared directory built with the column set it intends to use, not the shared
+`data/neurocard_prepared/job_light`.
+
 `conjunctive_status` also carries `candidates_below_row_floor` and
 `selected_stratum_rows` (`min`, `median`, `max`, `at_or_below_one`).
 

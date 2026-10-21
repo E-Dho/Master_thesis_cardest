@@ -161,6 +161,7 @@ def main() -> None:
     print(f"required_columns_uncovered         = {status.get('required_columns_uncovered')}")
     print(f"columns_skipped_by_domain_cap      = {status.get('columns_skipped_by_domain_cap')}")
     print(f"columns_excluded_by_name           = {status.get('columns_excluded_by_name')}")
+    print(f"seed_candidate_columns             = {status.get('seed_candidate_columns')}")
     print(f"candidate_columns                  = {status.get('candidate_columns')}")
     print(f"minimum_stratum_rows               = {status.get('minimum_stratum_rows')}")
     # A floor only applies to materialized rows, so print whether it did.  A
