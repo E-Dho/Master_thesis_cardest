@@ -1,5 +1,9 @@
 # Query Generation
 
+> **POL benchmark v3** (exact spatio-temporal semantics, 8 x 250 + 8 x 750
+> grid) lives in [`benchmark_v3/`](benchmark_v3/README.md). The
+> segment-coupled v2 pipeline below is kept for reproducing earlier results.
+
 This directory contains the config-driven SQL workload generator used to create labeled cardinality-estimation queries.
 
 The generator samples COUNT queries across:

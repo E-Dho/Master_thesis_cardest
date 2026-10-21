@@ -1,0 +1,30 @@
+{
+  "name": "pol_exact_st_v3",
+  "semantics_version": "pol_exact_st_v3",
+  "base_config": "../pol_query_config.json",
+  "grid": {"single": 250, "multi": 750},
+  "center_live_probability": 0.9,
+  "temporal_width": {"distribution": "log_uniform", "min_seconds": 60},
+  "attribute_addons": {
+    "applies_to": "multi_non_standard",
+    "counts": [0, 1, 2],
+    "probabilities": [0.5, 0.25, 0.25]
+  },
+  "unbounded_spatial_margin": 1000000.0,
+  "segments": {
+    "table": "segments",
+    "spatial_attribute": "segment_geom",
+    "temporal_attribute": "segment_time",
+    "trip_key": "s.trip_id",
+    "columns": {
+      "sx": "s.s_x",
+      "sy": "s.s_y",
+      "ex": "s.e_x",
+      "ey": "s.e_y",
+      "ts": "s.t_s",
+      "te": "s.t_e"
+    }
+  },
+  "pools": {"size": 20000, "oversample": 1.5},
+  "max_attempts": 200
+}

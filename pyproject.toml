@@ -12,6 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "duckdb>=1.0",
 ]
 model = [
   "torch>=2.0",
