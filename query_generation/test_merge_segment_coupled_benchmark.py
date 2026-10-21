@@ -38,6 +38,13 @@ class SegmentCoupledBenchmarkMergeTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             merge_rows(original, {"q1": corrected_row(original[0])})
 
+    def test_rejects_correction_that_changes_sampling_bucket(self):
+        original = [original_row("q1")]
+        corrected = corrected_row(original[0])
+        corrected["category"] = dict(corrected["category"], relation="multi", key="changed")
+        with self.assertRaisesRegex(SystemExit, "changed its workload category"):
+            merge_rows(original, {"q1": corrected})
+
 
 if __name__ == "__main__":
     unittest.main()

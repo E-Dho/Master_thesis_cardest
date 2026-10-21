@@ -276,10 +276,7 @@ Physical POL spatial workload predicates use exact line-segment versus
 axis-aligned rectangle intersection for the
 `ST_Intersects(segment_geom, ST_MakeEnvelope(...))` case. The semantic payload is
 carried on `GeneratedTrainingContext` as an optional `TrajectoryQuerySemantics`,
-while the normal model still consumes ordinary Duet predicate tokens. The
-current one-pass base segment estimator can condition on scalar endpoint
-coordinates, but endpoint containment is not equivalent to physical
-line/rectangle intersection.
+while the normal model consumes scalar predicate tokens.
 
 The production predicate generator now creates one physical query decision and
 derives both representations from it:
@@ -293,13 +290,37 @@ sampled FOJ row
 
 For POL temporal predicates, the same `lower` and `upper` bounds produce
 `segments:t_e >= lower`, `segments:t_s < upper`, and the trajectory overlap
-predicate. For POL spatial predicates, exact multiplicity/oracle utilities
-retain the physical `ST_Intersects` rectangle for future extensions. Spatial
-`D_hat = M_hat * traj_dedup_factor` is intentionally disabled in this branch:
-training skips spatial trajectory targets with
-`unsupported_base_segment_spatial_measure`, and inference fails closed for
-spatial/spatio-temporal distinct trajectory queries until the base segment
-estimator represents the same physical event.
+predicate.
+
+### Segment-MBR Spatial Surrogate
+
+With `trajectory_spatial.enabled: true` and
+`trajectory_spatial.representation: segment_mbr`, a physical spatial rectangle
+`[x_l, x_u] x [y_l, y_u]` is encoded as:
+
+```text
+seg_min_x <= x_u
+seg_max_x >= x_l
+seg_min_y <= y_u
+seg_max_y >= y_l
+```
+
+This is an MBR-overlap surrogate for physical `ST_Intersects`, not the same
+event. Every physically intersecting segment has an overlapping MBR, but an MBR
+can overlap a rectangle even when its line segment misses it. Consequently the
+surrogate can introduce false-positive matching segments and, when used with
+the trajectory-dedup head, false-positive distinct trajectories. Evaluation
+returns these estimates with status
+`mbr_surrogate_physical_spatial_distinct_approximation` and keeps their q-error
+against physical SQL truth explicitly labeled as an approximation. The next
+analysis step is to measure that false-positive component and report it
+separately from crossing-only (`C`) segments, which are genuine physical
+intersections whose endpoints both lie outside the rectangle.
+
+Multiple `ST_Intersects` predicates on `segments.segment_geom` are conjunctive.
+Before token encoding the adapter intersects their rectangles, then emits one
+four-column MBR condition. A disjoint rectangle intersection is represented as
+zero support; it is never widened by overwriting one predicate with another.
 
 The terminal trajectory loss uses the main-batch tuple importance correction
 when present and multiplies every active `INV_FANOUT` reciprocal because the

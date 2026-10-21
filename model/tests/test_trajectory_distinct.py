@@ -1672,6 +1672,69 @@ trajectory_distinct:
         self.assertTrue(context_satisfies_row_with_trajectory_semantics(context, row, metadata))
         self.assertTrue(trajectory_base_measure_support(context).eligible)
 
+    def test_pol_mbr_intersects_repeated_spatial_predicates_before_encoding(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        record = {
+            "query_id": "two_spatial_predicates",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments", "attribute": "segment_geom", "dimension": "spatial",
+                    "type": "geometry", "mode": "spatial_intersects",
+                    "min_x": 0.0, "min_y": 0.0, "max_x": 2.0, "max_y": 2.0, "srid": 26916,
+                },
+                {
+                    "table": "segments", "attribute": "segment_geom", "dimension": "spatial",
+                    "type": "geometry", "mode": "spatial_intersects",
+                    "min_x": 1.0, "min_y": 1.0, "max_x": 3.0, "max_y": 3.0, "srid": 26916,
+                },
+            ],
+        }
+
+        context = pol_workload_record_to_context(
+            record, metadata, trajectory_spatial={"enabled": True, "representation": "segment_mbr"}
+        )
+
+        self.assertEqual(len(context.trajectory_query.spatial_predicates), 1)  # type: ignore[union-attr]
+        spatial = context.trajectory_query.spatial_predicates[0]  # type: ignore[union-attr]
+        self.assertIsInstance(spatial, SegmentMbrSpatialPredicate)
+        self.assertEqual((spatial.physical_min_x, spatial.physical_min_y), (1.0, 1.0))
+        self.assertEqual((spatial.physical_max_x, spatial.physical_max_y), (2.0, 2.0))
+        self.assertEqual(
+            context.ordinary_predicates["segments:seg_min_x"],
+            PredicateToken(PredicateOp.LESS_EQUAL, value=1.0),
+        )
+        self.assertEqual(
+            context.ordinary_predicates["segments:seg_max_x"],
+            PredicateToken(PredicateOp.GREATER_EQUAL, value=1.0),
+        )
+
+    def test_pol_mbr_disjoint_spatial_predicates_are_zero_support(self) -> None:
+        metadata = _pol_segment_mbr_metadata()
+        record = {
+            "query_id": "disjoint_spatial_predicates",
+            "tables": ["trips", "segments"],
+            "predicates": [
+                {
+                    "table": "segments", "attribute": "segment_geom", "dimension": "spatial",
+                    "type": "geometry", "mode": "spatial_intersects",
+                    "min_x": 0.0, "min_y": 0.0, "max_x": 1.0, "max_y": 1.0, "srid": 26916,
+                },
+                {
+                    "table": "segments", "attribute": "segment_geom", "dimension": "spatial",
+                    "type": "geometry", "mode": "spatial_intersects",
+                    "min_x": 2.0, "min_y": 0.0, "max_x": 3.0, "max_y": 1.0, "srid": 26916,
+                },
+            ],
+        }
+
+        context = pol_workload_record_to_context(
+            record, metadata, trajectory_spatial={"enabled": True, "representation": "segment_mbr"}
+        )
+
+        spatial = context.trajectory_query.spatial_predicates[0]  # type: ignore[union-attr]
+        self.assertTrue(spatial.zero_support)
+
     def test_pol_query_adapter_disabled_keeps_endpoint_representation(self) -> None:
         metadata = _pol_segment_mbr_metadata()
         record = {
@@ -1704,7 +1767,7 @@ trajectory_distinct:
             SegmentSpatialPredicate,
         )
 
-    def test_mbr_workload_distinct_evaluation_remains_fail_closed(self) -> None:
+    def test_mbr_workload_distinct_evaluation_is_labeled_surrogate(self) -> None:
         metadata = _pol_segment_mbr_metadata()
         record = {
             "query_id": "spatial_mbr_distinct",
@@ -1734,14 +1797,14 @@ trajectory_distinct:
         )
         self.assertEqual(
             result.distinct_estimate_status,
-            "unsupported_physical_spatial_distinct_mbr_approximation",
+            "mbr_surrogate_physical_spatial_distinct_approximation",
         )
         self.assertEqual(result.matching_segments_true, 10)
         self.assertEqual(result.matching_segment_estimate, 10.0)
         self.assertEqual(result.matching_segment_qerror, 1.0)
-        self.assertIsNone(result.distinct_trajectory_estimate)
+        self.assertEqual(result.distinct_trajectory_estimate, 5.0)
 
-    def test_pol_mbr_matching_segment_estimate_available_but_distinct_fail_closed(self) -> None:
+    def test_pol_mbr_matching_and_distinct_estimates_are_available_as_surrogates(self) -> None:
         metadata = _pol_segment_mbr_metadata()
         record = {
             "query_id": "spatial_mbr_matching",
@@ -1771,12 +1834,12 @@ trajectory_distinct:
         )
         self.assertEqual(
             result.distinct_estimate_status,
-            "unsupported_physical_spatial_distinct_mbr_approximation",
+            "mbr_surrogate_physical_spatial_distinct_approximation",
         )
         self.assertEqual(result.matching_segment_estimate, 10.0)
         self.assertEqual(result.matching_segment_qerror, 2.0)
-        self.assertIsNone(result.distinct_trajectory_estimate)
-        self.assertIsNone(result.distinct_trajectory_qerror)
+        self.assertEqual(result.distinct_trajectory_estimate, 2.0)
+        self.assertEqual(result.distinct_trajectory_qerror, 2.0)
 
     def test_pol_mbr_unsupported_physical_spatial_predicate_does_not_crash(self) -> None:
         metadata = _pol_segment_mbr_metadata()

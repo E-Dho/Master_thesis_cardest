@@ -67,6 +67,23 @@ class QueryGeneratorTest(unittest.TestCase):
         self.assertIn("spatial.range.single", keys)
         self.assertIn("spatio_temporal.range.multi", keys)
 
+    def test_pol_workload_excludes_trip_geometry_and_keeps_all_16_buckets(self):
+        config = self.load_pol_config()
+        self.assertEqual(len(all_valid_categories(config)), 16)
+
+        records = QueryGenerator(config, seed=17).generate(all_valid_categories(config), 5)
+        self.assertEqual(
+            {record["category"]["key"] for record in records},
+            {category.key for category in all_valid_categories(config)},
+        )
+        self.assertFalse(
+            any(
+                predicate["table"] == "trips" and predicate["attribute"] == "trip_geom"
+                for record in records
+                for predicate in record["predicates"]
+            )
+        )
+
     def test_spatial_sql_uses_st_intersects(self):
         config = self.load_pol_config()
         category = Category.parse("spatial.range.single")

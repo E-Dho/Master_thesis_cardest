@@ -8,12 +8,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 try:
-    from .rewrite_segment_coupled_queries import needs_segment_correction
+    from .rewrite_segment_coupled_queries import CORRECTION_NAME, needs_segment_correction
 except ImportError:  # Direct execution from query_generation/ on the cluster.
-    from rewrite_segment_coupled_queries import needs_segment_correction
-
-
-CORRECTION_NAME = "segment_coupled_spatio_temporal_v1"
+    from rewrite_segment_coupled_queries import CORRECTION_NAME, needs_segment_correction
 
 
 def load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -40,9 +37,11 @@ def load_corrected(paths: List[Path]) -> Dict[str, Dict[str, Any]]:
             correction = row.get("semantic_correction", {})
             if correction.get("name") != CORRECTION_NAME:
                 raise SystemExit(f"{query_id} is not a {CORRECTION_NAME} row")
-            if row.get("join_cardinality") is None or row.get("entity_cardinality") is None:
-                raise SystemExit(f"{query_id} has missing evaluated cardinalities")
-            if int(row["entity_cardinality"]) > int(row["join_cardinality"]):
+            if row.get("join_cardinality") is None:
+                raise SystemExit(f"{query_id} has missing join cardinality")
+            if row["category"]["relation"] == "multi" and row.get("entity_cardinality") is None:
+                raise SystemExit(f"{query_id} has missing distinct-trip cardinality")
+            if row.get("entity_cardinality") is not None and int(row["entity_cardinality"]) > int(row["join_cardinality"]):
                 raise SystemExit(f"{query_id} has entity cardinality greater than join cardinality")
             corrected[query_id] = row
     return corrected
@@ -63,6 +62,14 @@ def merge_rows(original: List[Dict[str, Any]], corrected: Dict[str, Dict[str, An
         if unexpected:
             message.append(f"unexpected corrected IDs ({len(unexpected)}): {', '.join(unexpected[:10])}")
         raise SystemExit("; ".join(message))
+    for row in original:
+        replacement = corrected.get(str(row["query_id"]))
+        if replacement is None:
+            continue
+        if replacement["category"] != row["category"]:
+            raise SystemExit(
+                f"{row['query_id']} changed its workload category during segment correction"
+            )
     return [corrected.get(str(row["query_id"]), row) for row in original]
 
 

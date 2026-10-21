@@ -17,8 +17,8 @@ fi
 source "$REPO_ROOT/dataset_generation/mobilitydb_loader/common.sh"
 activate_mobilitydb_env
 
-INPUT_JSONL=${INPUT_JSONL:-$MOBILITYDB_ROOT/query_runs/qgen_pol_50m_500qpc_20260824_segment_coupled_v1/queries.jsonl}
-RUN_LABEL=${RUN_LABEL:-qgen_pol_50m_500qpc_20260824_segment_coupled_nonzero_v1}
+INPUT_JSONL=${INPUT_JSONL:-$MOBILITYDB_ROOT/query_runs/qgen_pol_50m_500qpc_segment_coupled_v2/queries.jsonl}
+RUN_LABEL=${RUN_LABEL:-qgen_pol_50m_500qpc_segment_coupled_nonzero_v2}
 REPLACEMENT_SEED=${REPLACEMENT_SEED:-20261008}
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-1000}
 RUN_DIR="$MOBILITYDB_ROOT/query_runs/$RUN_LABEL"

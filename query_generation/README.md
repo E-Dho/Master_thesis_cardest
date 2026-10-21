@@ -91,9 +91,57 @@ actually zero-free.
 workload and replaces only its true-zero rows. Each replacement is a fresh
 category-local draw and is accepted only when its exact join cardinality is
 positive. The output retains the original query IDs and final category counts.
-Legacy POL candidates are normalized to the same-segment spatial-temporal
-semantics before evaluation. Porto candidates already use only `segments` for
+POL candidates are normalized to same-segment spatial-temporal semantics before
+evaluation. The correction preserves the original `category` as the workload
+sampling bucket and records the rewritten SQL table shape separately as
+`semantic_correction.rewritten_table_relation`. A corrected workload must still
+contain every one of the 16 dimension x interval x relation buckets with its
+requested number of queries: at 500 per bucket this is an exact 4,000 ordinary
+`COUNT(*)` / 4,000 multi-table distinct-trip split. Legacy corrected rows that
+changed `single` into `multi` are refused and must be regenerated.
+
+The POL configuration deliberately excludes `trips.trip_geom` from generated
+spatial predicates. A whole-trip geometry intersection cannot be represented
+exactly by the current per-segment model, whereas `segments.segment_geom` can
+be evaluated through the documented MBR surrogate. New POL benchmarks must be
+generated from this configuration rather than mixing old `trip_geom` rows with
+new segment-spatial rows. Porto candidates already use only `segments` for
 spatial and temporal predicates, so they need no SQL rewrite.
+
+Build the corrected v2 POL source workload as durable shards, merge it, then
+make its zero-free variant. Generation uses four 125-query chunks for each of
+the 16 buckets. Every evaluated query is appended and fsynced immediately, and
+each shard stores its sampled live-center pools in a bound state sidecar. A
+resubmitted array task validates and replays the cheap generator state, then
+continues after the last durable row without repeating completed cardinality
+queries.
+
+The array is throttled to one running task (`%1`) because all tasks start the
+same project-local PostgreSQL data directory. This still removes the single
+48-hour failure boundary: there are 64 independently resumable jobs, each with
+a 24-hour limit. After every shard succeeds, a dependent merge job verifies
+contiguous category indexes and writes exactly 500 rows in each of the 16
+buckets. The final dependent job replaces only zero-cardinality rows.
+
+```bash
+REPO_ROOT=/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_git \
+bash query_generation/submit_pol_segment_coupled_benchmark.sh
+```
+
+Their default labels are `qgen_pol_50m_500qpc_segment_coupled_v2` and
+`qgen_pol_50m_500qpc_segment_coupled_nonzero_v2` respectively.
+
+Shard files and resumable state live under:
+
+```text
+$MOBILITYDB_ROOT/query_runs/qgen_pol_50m_500qpc_segment_coupled_v2/shards/
+```
+
+If an array task times out, resubmit that task index with the same
+`REPO_ROOT`, `RUN_LABEL`, seed and query count. Do not delete its `.jsonl` or
+`.state.json`; the task resumes from those files. Once all task indexes are
+complete, rerun the merge and replacement dependencies if their original
+`afterok` chain was cancelled by the failed task.
 
 On the cluster, submit the serialized job after setting `REPO_ROOT` to the
 checkout containing the desired branch:
@@ -103,8 +151,8 @@ REPO_ROOT=/zfshome/sunip956/master_thesis_trajectories/Master_thesis_cardest_git
 sbatch query_generation/run_pol_nonzero_replacement.sbatch
 ```
 
-The default source is the finalized segment-coupled workload and the default
-output label is `qgen_pol_50m_500qpc_20260824_segment_coupled_nonzero_v1`.
+The default source is the balanced v2 segment-coupled workload and the default
+output label is `qgen_pol_50m_500qpc_segment_coupled_nonzero_v2`.
 The generated `benchmark_summary.json` records the source hash, replacement
 seed, replaced-row count, category counts, table-subset counts before and after
 replacement, the live-center pool fingerprints, and rejection-sampling attempts.

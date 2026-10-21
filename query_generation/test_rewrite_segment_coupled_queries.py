@@ -46,15 +46,29 @@ class SegmentCoupledRewriteTest(unittest.TestCase):
         rewritten = rewrite_row(row, "input.jsonl")
 
         self.assertEqual(rewritten["tables"], ["segments", "trips"])
-        self.assertEqual(rewritten["category"]["key"], "spatio_temporal.range.multi")
-        self.assertEqual(rewritten["category"]["relation"], "multi")
+        self.assertEqual(rewritten["category"], row["category"])
         self.assertIn("JOIN pol.trips t ON t.trip_id = s.trip_id", rewritten["sql"])
         self.assertIn("ST_Intersects(s.segment_geom", rewritten["sql"])
         self.assertIn("s.t_s <", rewritten["sql"])
         self.assertIn("s.t_e >=", rewritten["sql"])
-        self.assertIn("COUNT(DISTINCT t.trip_id)", rewritten["entity_sql"])
+        self.assertIsNone(rewritten["entity_sql"])
+        self.assertIsNone(rewritten["entity_key"])
         self.assertIsNone(rewritten["join_cardinality"])
+        self.assertEqual(rewritten["semantic_correction"]["rewritten_table_relation"], "multi")
         self.assertEqual(rewritten["semantic_correction"]["original"]["sql"], "old sql")
+
+    def test_preserves_multi_bucket_and_keeps_its_distinct_truth(self):
+        row = trip_row(["trips"])
+        row["category"].update(
+            relation="multi",
+            key="spatio_temporal.range.multi",
+        )
+
+        rewritten = rewrite_row(row, "input.jsonl")
+
+        self.assertEqual(rewritten["category"], row["category"])
+        self.assertIn("COUNT(DISTINCT t.trip_id)", rewritten["entity_sql"])
+        self.assertEqual(rewritten["entity_key"], "trip_id")
 
     def test_rewrites_trip_time_on_existing_segment_row(self):
         row = trip_row(["segments", "trips"])

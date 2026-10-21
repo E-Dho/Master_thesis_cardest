@@ -23,6 +23,7 @@ TRIP_TO_SEGMENT = {
         (("t.start_time", "s.t_s"), ("t.end_time", "s.t_e")),
     ),
 }
+CORRECTION_NAME = "segment_coupled_spatio_temporal_v2"
 
 
 def load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -129,9 +130,16 @@ def rewrite_row(row: Dict[str, Any], source_workload: str) -> Dict[str, Any]:
     predicates = [rewrite_predicate(predicate) for predicate in row["predicates"]]
     where_sql = " AND ".join(f"({predicate['sql']})" for predicate in predicates)
 
-    category = dict(row["category"])
-    category["relation"] = "multi"
-    category["key"] = f"{category['dimension']}.{category['interval']}.multi"
+    # `category` is the sampling bucket, not a restatement of the rewritten
+    # SQL's table count.  Reclassifying a generated single bucket as multi here
+    # silently breaks the 16 x queries-per-category workload contract.
+    category = copy.deepcopy(row["category"])
+    rewritten_relation = "multi" if len(tables) > 1 else "single"
+    entity_sql = (
+        f"SELECT COUNT(DISTINCT t.trip_id) AS entity_cardinality\n{from_sql}\nWHERE {where_sql};"
+        if category["relation"] == "multi"
+        else None
+    )
     output.update(
         {
             "category": category,
@@ -139,17 +147,18 @@ def rewrite_row(row: Dict[str, Any], source_workload: str) -> Dict[str, Any]:
             "joins": joins,
             "predicates": predicates,
             "sql": f"SELECT COUNT(*) AS join_cardinality\n{from_sql}\nWHERE {where_sql};",
-            "entity_sql": f"SELECT COUNT(DISTINCT t.trip_id) AS entity_cardinality\n{from_sql}\nWHERE {where_sql};",
-            "entity_key": "trip_id",
+            "entity_sql": entity_sql,
+            "entity_key": "trip_id" if entity_sql is not None else None,
             "join_cardinality": None,
             "entity_cardinality": None,
             "join_evaluation_seconds": None,
             "entity_evaluation_seconds": None,
             "evaluated_at": None,
             "semantic_correction": {
-                "name": "segment_coupled_spatio_temporal_v1",
+                "name": CORRECTION_NAME,
                 "description": "Trip spatial and temporal predicates were moved to one joined segments row.",
                 "source_workload": source_workload,
+                "rewritten_table_relation": rewritten_relation,
                 "original": original,
             },
             "semantic_rewritten_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -182,7 +191,7 @@ def main() -> None:
         "source_rows": len(rows),
         "rewritten_rows": written,
         "direct_trip_geom_rows": direct_trip_geom,
-        "semantic_correction": "segment_coupled_spatio_temporal_v1",
+        "semantic_correction": CORRECTION_NAME,
         "all_rows_include_segments": all("segments" in row["tables"] for row in affected),
         "all_rows_have_entity_sql": all(row["entity_sql"] is not None for row in affected),
     }

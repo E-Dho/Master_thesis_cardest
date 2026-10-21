@@ -23,6 +23,7 @@ from query_generation.resample_nonzero_benchmark import (
     replace_true_zeros,
     source_category,
     table_subset_counts,
+    validate_segment_coupled_category_stability,
     validate_output,
 )
 
@@ -178,6 +179,14 @@ class NonzeroReplacementTest(unittest.TestCase):
         }
 
         self.assertEqual(source_category(target).key, "spatio_temporal.range.single")
+
+    def test_rejects_legacy_segment_coupled_category_drift(self):
+        target = row("q00000001", 0)
+        target["semantic_correction"] = {
+            "original": {"category": dict(target["category"], relation="single", key="changed")}
+        }
+        with self.assertRaisesRegex(ValueError, "legacy segment-coupled category drift"):
+            validate_segment_coupled_category_stability([target])
 
     def test_porto_replacements_keep_native_segment_coupled_predicates(self):
         category = Category.parse("spatio_temporal.range.multi")

@@ -216,6 +216,20 @@ def source_category(row: dict[str, Any]) -> Category:
     return Category.parse(str(category["key"]))
 
 
+def validate_segment_coupled_category_stability(rows: Sequence[dict[str, Any]]) -> None:
+    """Reject legacy corrected rows whose rewrite changed sampling buckets."""
+
+    for row in rows:
+        correction = row.get("semantic_correction") or {}
+        original = correction.get("original") or {}
+        original_category = original.get("category")
+        if original_category is not None and original_category != row.get("category"):
+            raise ValueError(
+                f"{row.get('query_id')} has legacy segment-coupled category drift; "
+                "regenerate this workload with the current query configuration"
+            )
+
+
 def resolved_category_index(target: dict[str, Any], source_index: int) -> int:
     value = target["category"].get("category_index")
     return source_index if value is None else int(value)
@@ -515,6 +529,7 @@ def replace_true_zeros(
     progress_path: Path | None = None,
     centers_cache_path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[int], dict[str, Any]]:
+    validate_segment_coupled_category_stability(source_rows)
     output = [copy.deepcopy(row) for row in source_rows]
     used_sql_hashes = {
         canonical_sql_hash(row) for row in source_rows if not is_true_zero(row)

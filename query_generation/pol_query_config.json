@@ -1,5 +1,5 @@
 {
-  "name": "pol_mobilitydb",
+  "name": "pol_mobilitydb_segment_coupled_v2",
   "schema": "pol",
   "srid": 26916,
   "entity": {
@@ -55,7 +55,7 @@
       "name": "pol.trips",
       "alias": "t",
       "primary_key": "trip_id",
-      "flags": ["standard", "temporal", "spatial"],
+      "flags": ["standard", "temporal"],
       "attributes": [
         {
           "name": "num_of_segments",
@@ -72,19 +72,6 @@
           "end_expression": "t.end_time",
           "temporal_geometry_expression": "t.trip_tgeom",
           "domain": {"min": "2019-07-01 06:25:00", "max": "2020-06-30 00:03:01.055"}
-        },
-        {
-          "name": "trip_geom",
-          "type": "geometry",
-          "dimension": "spatial",
-          "expression": "t.trip_geom",
-          "srid": 26916,
-          "domain": {
-            "min_x": 739887.2356512973,
-            "min_y": 3733936.9598094677,
-            "max_x": 744069.4945482849,
-            "max_y": 3738855.946876442
-          }
         }
       ]
     },

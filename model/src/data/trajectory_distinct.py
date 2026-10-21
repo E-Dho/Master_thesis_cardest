@@ -280,8 +280,23 @@ def canonicalize_segment_mbr_predicate(
     x-bound.  The y-dimension follows the same rule.
     """
 
-    physical_min_x, physical_max_x = sorted((float(min_x), float(max_x)))
-    physical_min_y, physical_max_y = sorted((float(min_y), float(max_y)))
+    physical_min_x = float(min_x)
+    physical_max_x = float(max_x)
+    physical_min_y = float(min_y)
+    physical_max_y = float(max_y)
+    # A conjunction of spatial rectangles can be empty.  Keep that fact rather
+    # than sorting the bounds, which would accidentally turn the empty
+    # intersection back into a non-empty rectangle.
+    if physical_min_x > physical_max_x or physical_min_y > physical_max_y:
+        return _zero_support_mbr_predicate(
+            metadata,
+            min_x_column,
+            PredicateOp.LESS_THAN,
+            physical_min_x,
+            physical_min_y,
+            physical_max_x,
+            physical_max_y,
+        )
     upper_x = _floor_domain_literal(metadata, min_x_column, physical_max_x)
     lower_x = _ceil_domain_literal(metadata, max_x_column, physical_min_x)
     upper_y = _floor_domain_literal(metadata, min_y_column, physical_max_y)

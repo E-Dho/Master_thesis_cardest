@@ -20,6 +20,10 @@ from model.src.inference.estimator import OnePassEstimator
 from model.src.predicates.vocabulary import PredicateVocabularies
 
 
+MBR_SURROGATE_STATUS = "mbr_surrogate_physical_spatial_distinct_approximation"
+ESTIMATED_DISTINCT_STATUSES = frozenset({"ok", MBR_SURROGATE_STATUS})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate predicate-conditioned ResMADE on structured POL distinct queries."
@@ -190,7 +194,7 @@ def main() -> None:
                 database_truth_count += 1
             else:
                 missing_database_truth_count += 1
-            if status == "ok":
+            if status in ESTIMATED_DISTINCT_STATUSES:
                 supported_count += 1
             else:
                 unsupported_count += 1
@@ -228,6 +232,7 @@ def main() -> None:
                 "database_truth_status_counts": database_truth_status_counts,
                 "supported_query_count": supported_count,
                 "unsupported_query_count": unsupported_count,
+                "mbr_surrogate_query_count": int(status_counts.get(MBR_SURROGATE_STATUS, 0)),
                 "queries_with_database_truth": database_truth_count,
                 "queries_without_database_truth": missing_database_truth_count,
                 "startup_seconds": {

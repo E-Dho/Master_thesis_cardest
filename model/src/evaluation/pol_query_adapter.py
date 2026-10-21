@@ -153,6 +153,10 @@ def pol_workload_record_to_context(
     ordinary: dict[str, PredicateToken] = {}
     temporal_predicates: list[SegmentTemporalPredicate] = []
     spatial_predicates: list[object] = []
+    # The model has four virtual MBR columns per segment geometry.  Multiple
+    # ST_Intersects predicates over that one geometry are a conjunction, so
+    # they must be intersected before those four scalar tokens are emitted.
+    mbr_rectangles: dict[tuple[str, str, int], list[tuple[float, float, float, float]]] = {}
     for predicate in record.get("predicates", ()):
         table = str(predicate["table"])
         attribute = str(predicate["attribute"])
@@ -215,59 +219,9 @@ def pol_workload_record_to_context(
             max_x = float(predicate["max_x"])
             max_y = float(predicate["max_y"])
             if _uses_segment_mbr_spatial(trajectory_spatial, table, attribute, metadata):
-                min_x_column, max_x_column, min_y_column, max_y_column = _mbr_spatial_columns(
-                    table,
-                    attribute,
-                )
-                canonical = canonicalize_segment_mbr_predicate(
-                    metadata,
-                    min_x_column=min_x_column,
-                    max_x_column=max_x_column,
-                    min_y_column=min_y_column,
-                    max_y_column=max_y_column,
-                    min_x=min_x,
-                    min_y=min_y,
-                    max_x=max_x,
-                    max_y=max_y,
-                )
-                if canonical.zero_support:
-                    if canonical.zero_support_column is None or canonical.zero_support_token is None:
-                        raise ValueError("zero-support MBR canonicalization did not provide a token")
-                    ordinary[canonical.zero_support_column] = canonical.zero_support_token
-                else:
-                    ordinary[min_x_column] = PredicateToken(
-                        PredicateOp.LESS_EQUAL,
-                        value=canonical.max_x_literal,
-                    )
-                    ordinary[max_x_column] = PredicateToken(
-                        PredicateOp.GREATER_EQUAL,
-                        value=canonical.min_x_literal,
-                    )
-                    ordinary[min_y_column] = PredicateToken(
-                        PredicateOp.LESS_EQUAL,
-                        value=canonical.max_y_literal,
-                    )
-                    ordinary[max_y_column] = PredicateToken(
-                        PredicateOp.GREATER_EQUAL,
-                        value=canonical.min_y_literal,
-                    )
-                spatial_predicates.append(
-                    SegmentMbrSpatialPredicate(
-                        canonical.min_x,
-                        canonical.min_y,
-                        canonical.max_x,
-                        canonical.max_y,
-                        srid=(srid if srid is not None else int(predicate.get("srid", 26916))),
-                        min_x_column=min_x_column,
-                        max_x_column=max_x_column,
-                        min_y_column=min_y_column,
-                        max_y_column=max_y_column,
-                        physical_min_x=canonical.physical_min_x,
-                        physical_min_y=canonical.physical_min_y,
-                        physical_max_x=canonical.physical_max_x,
-                        physical_max_y=canonical.physical_max_y,
-                        zero_support=canonical.zero_support,
-                    )
+                spatial_srid = srid if srid is not None else int(predicate.get("srid", 26916))
+                mbr_rectangles.setdefault((table, attribute, spatial_srid), []).append(
+                    (min_x, min_y, max_x, max_y)
                 )
             else:
                 columns = _spatial_columns(table, attribute)
@@ -314,6 +268,63 @@ def pol_workload_record_to_context(
                     )
         else:
             raise ValueError(f"unsupported POL predicate mode {mode!r}")
+
+    for (table, attribute, spatial_srid), rectangles in mbr_rectangles.items():
+        min_x, min_y, max_x, max_y = _intersect_spatial_rectangles(rectangles)
+        min_x_column, max_x_column, min_y_column, max_y_column = _mbr_spatial_columns(
+            table,
+            attribute,
+        )
+        canonical = canonicalize_segment_mbr_predicate(
+            metadata,
+            min_x_column=min_x_column,
+            max_x_column=max_x_column,
+            min_y_column=min_y_column,
+            max_y_column=max_y_column,
+            min_x=min_x,
+            min_y=min_y,
+            max_x=max_x,
+            max_y=max_y,
+        )
+        if canonical.zero_support:
+            if canonical.zero_support_column is None or canonical.zero_support_token is None:
+                raise ValueError("zero-support MBR canonicalization did not provide a token")
+            ordinary[canonical.zero_support_column] = canonical.zero_support_token
+        else:
+            ordinary[min_x_column] = PredicateToken(
+                PredicateOp.LESS_EQUAL,
+                value=canonical.max_x_literal,
+            )
+            ordinary[max_x_column] = PredicateToken(
+                PredicateOp.GREATER_EQUAL,
+                value=canonical.min_x_literal,
+            )
+            ordinary[min_y_column] = PredicateToken(
+                PredicateOp.LESS_EQUAL,
+                value=canonical.max_y_literal,
+            )
+            ordinary[max_y_column] = PredicateToken(
+                PredicateOp.GREATER_EQUAL,
+                value=canonical.min_y_literal,
+            )
+        spatial_predicates.append(
+            SegmentMbrSpatialPredicate(
+                canonical.min_x,
+                canonical.min_y,
+                canonical.max_x,
+                canonical.max_y,
+                srid=spatial_srid,
+                min_x_column=min_x_column,
+                max_x_column=max_x_column,
+                min_y_column=min_y_column,
+                max_y_column=max_y_column,
+                physical_min_x=canonical.physical_min_x,
+                physical_min_y=canonical.physical_min_y,
+                physical_max_x=canonical.physical_max_x,
+                physical_max_y=canonical.physical_max_y,
+                zero_support=canonical.zero_support,
+            )
+        )
     inverse_fanouts = inverse_fanouts_for_table_subset(metadata, included_tables)
     tokens = tokens_for_query_tables(metadata, set(included_tables), set(inverse_fanouts), ordinary)
     trajectory_query = (
@@ -332,6 +343,18 @@ def pol_workload_record_to_context(
         ordinary_predicates=ordinary,
         trajectory_query=trajectory_query,
     )
+
+
+def _intersect_spatial_rectangles(
+    rectangles: list[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float]:
+    if not rectangles:
+        raise ValueError("cannot intersect an empty set of spatial rectangles")
+    min_x = max(rectangle[0] for rectangle in rectangles)
+    min_y = max(rectangle[1] for rectangle in rectangles)
+    max_x = min(rectangle[2] for rectangle in rectangles)
+    max_y = min(rectangle[3] for rectangle in rectangles)
+    return min_x, min_y, max_x, max_y
 
 
 def database_truth_for_trajectory_query(
@@ -412,11 +435,18 @@ def evaluate_pol_distinct_record(
                 if not database_truth.available
                 else _q_error(0.0, database_truth.matching_segments_true)
             )
+            distinct_qerror = (
+                None
+                if not database_truth.available
+                else _q_error(0.0, database_truth.distinct_trajectories_true)
+            )
             return PolDistinctEvaluation(
                 query_id=record.get("query_id"),
-                distinct_estimate_status="unsupported_physical_spatial_distinct_mbr_approximation",
+                distinct_estimate_status="mbr_surrogate_physical_spatial_distinct_approximation",
                 matching_segment_estimate=0.0,
                 matching_segment_qerror=matching_qerror,
+                distinct_trajectory_estimate=0.0,
+                distinct_trajectory_qerror=distinct_qerror,
                 model_forward_calls=0,
                 latency_seconds=0.0,
                 **common_truth,
@@ -441,11 +471,28 @@ def evaluate_pol_distinct_record(
                 database_truth.matching_segments_true,
             )
         )
+        distinct_qerror = (
+            None
+            if not database_truth.available
+            else _q_error(
+                estimate.distinct_trajectory_estimate,
+                database_truth.distinct_trajectories_true,
+            )
+        )
+        a_abs_error = (
+            None
+            if not database_truth.available or database_truth.a_true is None
+            else abs(float(estimate.traj_dedup_factor) - float(database_truth.a_true))
+        )
         return PolDistinctEvaluation(
             query_id=record.get("query_id"),
-            distinct_estimate_status="unsupported_physical_spatial_distinct_mbr_approximation",
+            distinct_estimate_status="mbr_surrogate_physical_spatial_distinct_approximation",
             matching_segment_estimate=estimate.matching_segment_estimate,
             matching_segment_qerror=matching_qerror,
+            distinct_trajectory_estimate=estimate.distinct_trajectory_estimate,
+            distinct_trajectory_qerror=distinct_qerror,
+            a_hat=estimate.traj_dedup_factor,
+            a_abs_error=a_abs_error,
             model_forward_calls=estimate.model_forward_calls,
             latency_seconds=estimate.latency_seconds,
             **common_truth,
