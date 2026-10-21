@@ -290,6 +290,19 @@ class ExactRootStratumProvider:
             if limit is not None and column.domain_size > limit:
                 skipped[column.name] = int(column.domain_size)
                 continue
+            # The live path refuses a non-numeric domain declared "ordered";
+            # this path used to accept it and then quietly drop every
+            # non-numeric value when building regions, so a column could sit
+            # in candidate_column_names for an entire run, produce nothing,
+            # and leave no trace of why.  The two paths must agree on whether
+            # a config is valid.
+            semantic_type = _semantic_for_column(column.name, root_column_semantics)
+            if semantic_type == "ordered" and not _ordered_numeric_values(column.domain):
+                raise ValueError(
+                    f"importance_sampling.discovery.root_column_semantics declares "
+                    f"{column.name!r} as ordered, but its complete domain is not "
+                    "comparable numeric"
+                )
             counts = np.bincount(
                 encoded_rows[:, column_index],
                 minlength=column.domain_size,
@@ -300,7 +313,7 @@ class ExactRootStratumProvider:
                 counts=counts,
                 total_count=float(counts.sum()),
                 source=source,
-                semantic_type=_semantic_for_column(column.name, root_column_semantics),
+                semantic_type=semantic_type,
             )
             # Every DATA column can extend a conjunction; only root columns can
             # seed a depth-1 stratum.

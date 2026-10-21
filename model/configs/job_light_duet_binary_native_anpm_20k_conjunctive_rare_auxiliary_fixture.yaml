@@ -179,7 +179,12 @@ rare_support:
         # as equality -- which is what a range workload needs.
         season_nr: ordered
         episode_nr: ordered
-        series_years: ordered
+        # Values are strings such as "1990-1995", not numbers, so this is
+        # categorical however much the tail attribution likes the column.
+        # Declared ordered it produced nothing at all: region building
+        # drops non-numeric values, so the column sat in the candidate
+        # list for a whole run and never yielded a stratum.
+        series_years: categorical
         phonetic_code: categorical
     conjunctive:
       enabled: true

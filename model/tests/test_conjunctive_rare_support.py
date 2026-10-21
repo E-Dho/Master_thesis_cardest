@@ -3360,6 +3360,73 @@ class PrunedDistributionTest(unittest.TestCase):
         self.assertEqual(entry["best_pruned_joint_count"], float(self.VALUES))
 
 
+class OrderedSemanticsAgreementTest(unittest.TestCase):
+    """Both providers must agree on whether a config is valid.
+
+    The live path refused a non-numeric domain declared "ordered"; the
+    materialized path accepted it and then dropped every non-numeric value
+    while building regions. A column could therefore sit in
+    candidate_column_names for an entire run, yield nothing, and leave no
+    trace of why -- which is what title:series_years did.
+    """
+
+    def metadata(self):
+        return ModelMetadata(
+            columns=(
+                ColumnMetadata("t:years", ColumnKind.DATA, ("1990-1995", "1996-2000"),
+                               table="t"),
+                ColumnMetadata("t:year", ColumnKind.DATA, (1990, 1991), table="t"),
+            ),
+            full_join_cardinality=4.0,
+            join_root="t",
+            join_tables=("t",),
+            join_edges=(),
+        )
+
+    def rows(self):
+        return np.asarray([[index % 2, index % 2] for index in range(40)], dtype=np.int64)
+
+    def test_a_string_domain_declared_ordered_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "t:years"):
+            ExactRootStratumProvider.from_encoded_rows(
+                self.metadata(),
+                self.rows(),
+                root_column_semantics={"t": {"years": "ordered", "year": "ordered"}},
+            )
+
+    def test_the_same_column_is_accepted_as_categorical(self):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            self.metadata(),
+            self.rows(),
+            root_column_semantics={"t": {"years": "categorical", "year": "ordered"}},
+        )
+        self.assertIn("t:years", source.metadata.columns[0].name)
+        self.assertEqual(len(source.column_masses), 2)
+
+    def test_a_numeric_domain_declared_ordered_is_accepted(self):
+        source = ExactRootStratumProvider.from_encoded_rows(
+            self.metadata(),
+            self.rows(),
+            root_column_semantics={"t": {"year": "ordered"}},
+        )
+        self.assertEqual(len(source.column_masses), 2)
+
+    def test_the_shipped_configs_do_not_declare_a_string_column_ordered(self):
+        # title:series_years holds strings such as "1990-1995".
+        for path in sorted(pathlib.Path("model/configs").glob("*.yaml")):
+            semantics = (
+                ((load_simple_yaml(str(path)).get("rare_support", {}) or {})
+                 .get("discovery", {}) or {})
+                .get("root_column_semantics", {})
+                or {}
+            )
+            with self.subTest(config=path.name):
+                self.assertNotEqual(
+                    (semantics.get("title", {}) or {}).get("series_years"),
+                    "ordered",
+                )
+
+
 class LiveSamplerUseColsTest(unittest.TestCase):
     """dataset.use_cols must mean the same thing on both sides of sampling_mode.
 
