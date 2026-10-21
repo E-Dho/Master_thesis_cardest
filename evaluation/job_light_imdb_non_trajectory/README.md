@@ -430,8 +430,9 @@ apart between processes before this change.
    (recomputed from each run's `resolved_config.json`), so a pre-profile seed-0
    run aggregates with later seeds; the full hashes and the timing-only keys in
    which the seed configs differ are listed in the aggregate. `aggregate` and
-   `compare` add one table per profile (with CPU/GPU model and the estimate
-   consistency), keep the evaluate-stage table separately labelled, and write
+   `compare` use `timing.primary_profile` for the headline latency, add one
+   table per profile (with CPU/GPU model and the estimate consistency), keep
+   the evaluate-stage table as a secondary diagnostic, and write
    `timing.<profile>.*` CSV columns. Profiles missing for some seeds are listed
    as incomplete instead of being averaged.
 6. Hardware classes are enforced, not only recorded. CPU profiles use the
@@ -510,15 +511,16 @@ execution class of each method's published setup and is not the standardized
 comparison above.
 
 
-The headline device follows the method's published evaluation protocol rather
-than forcing every method onto CPU. Every latency row records `device` and
+The evaluate-stage device follows the method's published evaluation protocol
+rather than forcing every method onto CPU. Headline latency instead comes from
+the standardized `timing.primary_profile`. Every latency row records `device` and
 `device_name`; summaries preserve all profiles under `inference_by_device` and
 identify one `timing_protocol.primary_device`. CUDA is synchronized immediately
 before and after every timed query. Reports include the actual cluster device
 and the paper's reference hardware, since measurements on different GPU models
 are not hardware-normalized.
 
-| Method | Headline device | Published/reference setup |
+| Method | Evaluate-stage device | Published/reference setup |
 | --- | --- | --- |
 | PostgreSQL 16.10 | CPU | Native planner; no GPU inference path |
 | MSCN | GPU | Original MSCN reports AWS ml.p2.xlarge with CUDA; the NeuroCard comparison reruns MSCN on an NVIDIA V100 |
@@ -526,7 +528,7 @@ are not hardware-normalized.
 | NeuroCard | GPU | AWS EC2, NVIDIA V100, 32 vCPUs |
 | DistJoin | GPU | NVIDIA RTX4070Ti 12GB with AMD Ryzen9 7950X3D; the paper reports GPU inference memory |
 | FOJ sampling | CPU | Weighted sample scan; no neural accelerator path |
-| Own approach | GPU plus CPU supplement | Actual cluster GPU/CPU are recorded for each profile |
+| Own approach | CPU for JOB-light; GPU for JOB-light-ranges | Both profiles are reported; the faster measured profile is primary for each workload |
 
 Primary sources are the MSCN, NeuroCard, DeepDB, and DistJoin papers and their
 official repositories. This policy aligns the execution class, not the

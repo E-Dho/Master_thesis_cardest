@@ -357,9 +357,24 @@ class TimingStageIntegrationTests(unittest.TestCase):
         aggregate = aggregate_runs(runs, self.root / "aggregate")
         timing = aggregate["workloads"]["job_light"]["standardized_timing"]["cpu_1core"]
         self.assertTrue(timing["available"])
-        self.assertIn("Standardized latency", (self.root / "aggregate" / "comparison.md").read_text())
-        compare_aggregates([self.root / "aggregate" / "comparison.json"], self.root / "compare")
+        workload = aggregate["workloads"]["job_light"]
+        self.assertEqual(aggregate["primary_timing_profile"], "cpu_1core")
+        self.assertEqual(workload["primary_timing_device"], "cpu")
+        self.assertEqual(
+            workload["metrics"]["inference.mean_ms"], timing["metrics"]["mean_ms"]
+        )
+        self.assertEqual(
+            workload["metrics"]["evaluate_stage_inference.mean_ms"]["mean"], 1.0
+        )
+        aggregate_markdown = (self.root / "aggregate" / "comparison.md").read_text()
+        self.assertIn("Primary standardized latency (`cpu_1core`)", aggregate_markdown)
+        comparison = compare_aggregates(
+            [self.root / "aggregate" / "comparison.json"], self.root / "compare"
+        )
+        self.assertEqual(comparison["results"][0]["inference_device"], "cpu")
+        self.assertEqual(comparison["results"][0]["primary_timing_profile"], "cpu_1core")
         markdown = (self.root / "compare" / "comparison.md").read_text()
+        self.assertIn("## Primary standardized latency", markdown)
         self.assertIn("(`cpu_1core`)", markdown)
         self.assertIn("timing.cpu_1core.mean_ms.mean", (self.root / "compare" / "comparison.csv").read_text())
 

@@ -47,7 +47,8 @@ LATENCY_METRICS = ("mean_ms", "p50_ms", "p95_ms", "p99_ms", "throughput_queries_
 MODEL_CORE_METRICS = ("mean_ms", "p50_ms", "p95_ms", "p99_ms")
 EVALUATE_STAGE_TIMING_NOTE = (
     "Evaluate-stage timing is not profile-controlled (thread limits, pinning, and "
-    "hardware class are not enforced); report the standardized profile tables instead."
+    "hardware class are not enforced), is retained only as a secondary diagnostic, "
+    "and is not used as the headline latency."
 )
 
 
@@ -85,6 +86,7 @@ def aggregate_runs(
         for path in config_drift(resolved[0], raw)
     })
     timings = [load_timing_summaries(path) for path in directories]
+    primary_timing_profile = _configured_primary_timing_profile(resolved)
     all_profiles = sorted({profile for timing in timings for profile in timing})
     complete_profiles = [
         profile for profile in all_profiles if all(profile in timing for timing in timings)
@@ -110,6 +112,7 @@ def aggregate_runs(
         "seed_count": len(seeds),
         "runs": [str(path) for path in directories],
         "standardized_timing_profiles": complete_profiles,
+        "primary_timing_profile": primary_timing_profile,
         "incomplete_timing_profiles": {
             profile: sorted(
                 int(summary["seed"])
@@ -164,7 +167,11 @@ def aggregate_runs(
                 summary["workloads"][workload_id]["inference"][name]
                 for summary in summaries
             ]
-            workload_result["metrics"][f"inference.{name}"] = _mean_std(values)
+            metric = _mean_std(values)
+            workload_result["metrics"][f"evaluate_stage_inference.{name}"] = metric
+            # Legacy runs without standardized profiles still have a usable,
+            # explicitly non-profile-controlled fallback.
+            workload_result["metrics"][f"inference.{name}"] = metric
         timing_protocol = summaries[0]["workloads"][workload_id].get(
             "timing_protocol", {}
         )
@@ -205,6 +212,19 @@ def aggregate_runs(
             )
             for profile in complete_profiles
         }
+        workload_result["primary_timing_profile"] = primary_timing_profile
+        primary_timing = workload_result["standardized_timing"].get(
+            primary_timing_profile or ""
+        )
+        if primary_timing and primary_timing.get("available"):
+            for name, metric in primary_timing["metrics"].items():
+                workload_result["metrics"][f"inference.{name}"] = metric
+        workload_result["primary_timing_device"] = (
+            PROFILES[primary_timing_profile].device
+            if primary_timing_profile in PROFILES and primary_timing
+            and primary_timing.get("available")
+            else None
+        )
         aggregate["workloads"][workload_id] = workload_result
         for profile, result in workload_result["standardized_timing"].items():
             status = hardware_status(result)
@@ -214,6 +234,10 @@ def aggregate_runs(
                      "cpu_models": result["cpu_models"], "gpu_names": result["gpu_names"],
                      "declared_hardware": result["declared_hardware"]}
                 )
+        evaluate_stage_device = timing_protocol.get(
+            "primary_device", timing_protocol.get("device", "unspecified")
+        )
+        primary_device = workload_result["primary_timing_device"] or evaluate_stage_device
         row: dict[str, Any] = {
             "experiment_id": experiment_id,
             "method_id": method_id,
@@ -223,11 +247,15 @@ def aggregate_runs(
             "workload": workload_id,
             "seed_count": len(seeds),
             "coverage_complete_all_seeds": workload_result["coverage_complete_all_seeds"],
-            "inference_device": timing_protocol.get("primary_device", timing_protocol.get("device", "unspecified")),
+            "primary_timing_profile": primary_timing_profile,
+            "inference_device": primary_device,
+            "evaluate_stage_device": evaluate_stage_device,
             "published_reference_hardware": timing_protocol.get("published_reference_hardware", ""),
-            "actual_hardware": ", ".join(
+            "actual_hardware": _primary_hardware(primary_timing)
+            if primary_timing and primary_timing.get("available")
+            else ", ".join(
                 workload_result["inference_profiles"]
-                .get(timing_protocol.get("primary_device", timing_protocol.get("device", "")), {})
+                .get(evaluate_stage_device, {})
                 .get("device_names", [])
             ),
             "inference_profiles_json": json.dumps(
@@ -281,6 +309,16 @@ def compare_aggregates(
     rows: list[dict[str, Any]] = []
     for aggregate in aggregates:
         for workload_id, workload in sorted(aggregate["workloads"].items()):
+            primary_timing_profile = workload.get(
+                "primary_timing_profile", aggregate.get("primary_timing_profile")
+            )
+            primary_timing = workload.get("standardized_timing", {}).get(
+                primary_timing_profile or ""
+            )
+            timing_protocol = workload.get("timing_protocol", {})
+            evaluate_stage_device = timing_protocol.get(
+                "primary_device", timing_protocol.get("device", "unspecified")
+            )
             row: dict[str, Any] = {
                 "experiment_id": aggregate["experiment_id"],
                 "method_id": aggregate["method_id"],
@@ -290,10 +328,14 @@ def compare_aggregates(
                 "workload": workload_id,
                 "seed_count": aggregate["seed_count"],
                 "coverage_complete_all_seeds": workload["coverage_complete_all_seeds"],
-                "inference_device": workload.get("timing_protocol", {}).get(
-                    "primary_device",
-                    workload.get("timing_protocol", {}).get("device", "unspecified"),
+                "primary_timing_profile": primary_timing_profile,
+                "inference_device": (
+                    PROFILES[primary_timing_profile].device
+                    if primary_timing_profile in PROFILES and primary_timing
+                    and primary_timing.get("available")
+                    else evaluate_stage_device
                 ),
+                "evaluate_stage_device": evaluate_stage_device,
                 "published_reference_hardware": workload.get(
                     "timing_protocol", {}
                 ).get("published_reference_hardware", ""),
@@ -302,11 +344,13 @@ def compare_aggregates(
             for name, metric in workload["metrics"].items():
                 row[f"{name}.mean"] = metric["mean"]
                 row[f"{name}.std"] = metric["std"]
-            primary_profile = row["inference_profiles"].get(
-                row["inference_device"], {}
+            evaluate_stage_profile = row["inference_profiles"].get(
+                evaluate_stage_device, {}
             )
-            row["actual_hardware"] = ", ".join(
-                primary_profile.get("device_names", [])
+            row["actual_hardware"] = (
+                _primary_hardware(primary_timing)
+                if primary_timing and primary_timing.get("available")
+                else ", ".join(evaluate_stage_profile.get("device_names", []))
             )
             row["inference_profiles_json"] = json.dumps(
                 row["inference_profiles"], sort_keys=True
@@ -371,6 +415,12 @@ def _hardware_label(timing: dict[str, Any]) -> str:
     return hardware
 
 
+def _primary_hardware(timing: dict[str, Any] | None) -> str:
+    if not timing:
+        return ""
+    return ", ".join(timing.get("cpu_models", []) + timing.get("gpu_names", []))
+
+
 def hardware_mismatches(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[str]]]:
     """Per profile: hardware -> rows, when rows do not share one declared class."""
     result: dict[str, dict[str, list[str]]] = {}
@@ -407,6 +457,24 @@ def _resolved_config(path: Path) -> dict[str, Any] | None:
     if not resolved.exists():
         return None
     return json.loads(resolved.read_text(encoding="utf-8"))
+
+
+def _configured_primary_timing_profile(
+    resolved_configs: Iterable[dict[str, Any] | None],
+) -> str | None:
+    profiles = {
+        str(profile)
+        for raw in resolved_configs
+        if raw is not None
+        for profile in [raw.get("timing", {}).get("primary_profile")]
+        if profile
+    }
+    if len(profiles) > 1:
+        raise ValueError(
+            "seed configs declare different timing.primary_profile values: "
+            + ", ".join(sorted(profiles))
+        )
+    return next(iter(profiles), None)
 
 
 def _accuracy_hash(path: Path, summary: dict[str, Any], raw: dict[str, Any] | None) -> str:
@@ -697,12 +765,33 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
                 for name in Q_ERROR_PERCENTILES
             ]
             lines.append("| " + " | ".join([label, *values]) + " |")
+        primary_profile = workload.get(
+            "primary_timing_profile", aggregate.get("primary_timing_profile")
+        )
+        primary_result = workload.get("standardized_timing", {}).get(
+            primary_profile or ""
+        )
+        if primary_result and primary_result.get("available"):
+            lines.extend(
+                [
+                    "",
+                    f"### Primary standardized latency (`{primary_profile}`)",
+                    "",
+                    "This profile supplies the headline inference latency.",
+                    "",
+                ]
+            )
+            lines.extend(
+                _profile_table_lines(
+                    [([str(primary_profile)], primary_result)], ["Profile"]
+                )
+            )
         protocol = workload.get("timing_protocol", {})
         primary = protocol.get("primary_device", protocol.get("device", "unspecified"))
         lines.extend(
             [
                 "",
-                "### Evaluate-stage timing (not profile-controlled)",
+                "### Secondary evaluate-stage timing (not profile-controlled)",
                 "",
                 EVALUATE_STAGE_TIMING_NOTE,
                 "",
@@ -739,7 +828,8 @@ def _markdown_table(aggregate: dict[str, Any]) -> str:
         for profile, result in workload.get("standardized_timing", {}).items():
             if not result.get("available"):
                 continue
-            lines.extend(["", f"### Standardized latency: {result['report_table']} (`{profile}`)", ""])
+            role = "primary" if profile == primary_profile else "supplementary"
+            lines.extend(["", f"### Standardized latency: {result['report_table']} (`{profile}`, {role})", ""])
             lines.extend(_profile_table_lines([([profile], result)], ["Profile"]))
     missing = aggregate.get("incomplete_timing_profiles", {})
     if missing:
@@ -788,6 +878,50 @@ def _multi_method_markdown(
         for label, family in Q_ERROR_REPORT_FAMILIES:
             values = [metric(f"{family}.{name}") for name in Q_ERROR_PERCENTILES]
             lines.append("| " + " | ".join([*identity, label, *values]) + " |")
+    primary_entries = []
+    for row in rows:
+        profile = row.get("primary_timing_profile")
+        result = row.get("standardized_timing", {}).get(profile or "")
+        if result and result.get("available"):
+            primary_entries.append(
+                (
+                    [
+                        str(row["method_id"]),
+                        str(row["variant_id"]),
+                        str(row["display_name"]),
+                        str(row.get("protocol", "native")),
+                        str(row["workload"]),
+                        str(profile),
+                        PROFILES[profile].device,
+                    ],
+                    result,
+                )
+            )
+    if primary_entries:
+        lines.extend(
+            [
+                "",
+                "## Primary standardized latency",
+                "",
+                "Each row uses the method configuration's `timing.primary_profile`; "
+                "supplementary profiles remain in the profile-specific tables below.",
+                "",
+            ]
+        )
+        lines.extend(
+            _profile_table_lines(
+                primary_entries,
+                [
+                    "Method",
+                    "Variant",
+                    "Display name",
+                    "Protocol",
+                    "Workload",
+                    "Profile",
+                    "Device",
+                ],
+            )
+        )
     profiles = sorted({profile for row in rows for profile, result in row.get("standardized_timing", {}).items()
                        if result.get("available")},
                       key=lambda name: list(PROFILES).index(name))
@@ -817,7 +951,7 @@ def _multi_method_markdown(
     lines.extend(
         [
             "",
-            "## Evaluate-stage timing (not profile-controlled)",
+            "## Secondary evaluate-stage timing (not profile-controlled)",
             "",
             EVALUATE_STAGE_TIMING_NOTE,
             "",
