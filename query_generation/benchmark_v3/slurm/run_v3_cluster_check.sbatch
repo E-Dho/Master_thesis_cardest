@@ -14,10 +14,21 @@ v3_resolve_repo_root
 activate_mobilitydb_env
 mkdir -p "$RUN_DIR"
 cd "$REPO_ROOT"
-python -c "import sys, numpy, psycopg; print('python', sys.version.split()[0], 'numpy', numpy.__version__, 'psycopg', psycopg.__version__)"
+REPORT="$MOBILITYDB_ROOT/query_runs/v3_cluster_check_$(date -u +%Y%m%dT%H%M%SZ).txt"
+# Report the Python packages of the job environment (informational, never fatal):
+# psycopg is needed by every stage, numpy only by the verification job.
+python - <<'PY' | tee "$REPORT"
+import importlib, sys
+print("python", sys.version.split()[0])
+for name, needed_by in (("psycopg", "all stages"), ("numpy", "verify only")):
+    try:
+        module = importlib.import_module(name)
+        print(f"{name} {module.__version__} ({needed_by})")
+    except ImportError:
+        print(f"{name} MISSING ({needed_by})")
+PY
 start_postgres
 trap 'stop_postgres' EXIT
-REPORT="$MOBILITYDB_ROOT/query_runs/v3_cluster_check_$(date -u +%Y%m%dT%H%M%SZ).txt"
 psql -X -h "$MOBILITYDB_SOCKET_DIR" -p "$MOBILITYDB_PORT" -d "$MOBILITYDB_DB" \
-  -f query_generation/benchmark_v3/cluster_check.sql 2>&1 | tee "$REPORT"
+  -f query_generation/benchmark_v3/cluster_check.sql 2>&1 | tee -a "$REPORT"
 echo "report=$REPORT"

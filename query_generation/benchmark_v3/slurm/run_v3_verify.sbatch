@@ -15,6 +15,11 @@ activate_mobilitydb_env
 mkdir -p "$RUN_DIR"
 cd "$REPO_ROOT"
 PER_CATEGORY=${PER_CATEGORY:-25}
+if ! python -c "import numpy" 2>/dev/null; then
+  echo "The verification job needs numpy in $MOBILITYDB_ENV (pools, generation and merge do not)." >&2
+  echo "Install it once, e.g.: micromamba install -p $MOBILITYDB_ENV -c conda-forge numpy" >&2
+  exit 3
+fi
 start_postgres
 trap 'stop_postgres' EXIT
 python -m query_generation.benchmark_v3.verify \

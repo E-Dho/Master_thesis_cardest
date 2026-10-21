@@ -13,6 +13,7 @@ env/
 .env
 
 # Generated datasets, database files, and cluster runtime output
+/cluster_results/
 data/
 !model/src/data/
 !model/src/data/**/*.py
