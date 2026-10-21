@@ -290,6 +290,15 @@ def _range_token_or_wildcard(
     return TokenBuild(PredicateToken(op, value=threshold))
 
 
+def normalize_evaluation_token(token: PredicateToken) -> tuple[PredicateToken, bool]:
+    """Normalize an ordinary evaluation token without treating no-filter as a predicate."""
+
+    if token.op == PredicateOp.WILDCARD:
+        return token, False
+    normalized = ColumnPredicateSet((token,)).normalize(max_predicates=2)
+    return normalized.output_token(), normalized.contradiction
+
+
 def lower_complement(predicate: RawPredicate) -> RawPredicate:
     if predicate.op == ">":
         return RawPredicate(predicate.column, "<=", predicate.literal, f"{predicate.column}<={predicate.literal}")
@@ -360,8 +369,8 @@ def eval_query_native(
             missing.append(column_name)
             continue
         assert built_normalized.token is not None
-        normalized = ColumnPredicateSet((built_normalized.token,)).normalize(max_predicates=2)
-        if normalized.contradiction:
+        output_token, contradiction = normalize_evaluation_token(built_normalized.token)
+        if contradiction:
             zero_factors = np.zeros(len(metadata.columns), dtype=float)
             return (
                 "zero_due_to_contradiction",
@@ -373,15 +382,14 @@ def eval_query_native(
                 "",
                 column_name,
                 zero_factors,
-                int(normalized.is_native_range),
+                int(output_token.op == PredicateOp.RANGE),
                 sorted(by_col),
                 sorted(predicate.op for predicate in predicates),
             )
-        output_token = normalized.output_token()
         if output_token.op != PredicateOp.WILDCARD:
             output_tokens[column_name] = output_token
             conditioning_tokens[column_name] = output_token
-        if normalized.is_native_range:
+        if output_token.op == PredicateOp.RANGE:
             native_range_count += 1
     if unsupported:
         return _empty_eval("unsupported", ";".join(sorted(set(unsupported))), metadata, predicates, included_tables)

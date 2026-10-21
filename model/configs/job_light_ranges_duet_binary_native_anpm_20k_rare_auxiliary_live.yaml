@@ -1,0 +1,222 @@
+# Ablation A of the dropout-0.2 fixture run: the live NeuroCard sampler
+# instead of the 2M-row fixture, nothing else changed.
+#
+# The fixture run trained on 2,000,000 DISTINCT rows cycled about twenty times
+# (fixture_rows_reused 39,936,000, fresh_sampler_rows 0).  NeuroCard draws
+# fresh i.i.d. join samples throughout and its tuning guide suggests a few to
+# ten-plus million; at this model size (21 MB) it reports p99 232 and max 1029
+# on JOB-light-ranges against this run's 2910 and 8169.  Distinct rows are the
+# resource tail accuracy depends on, and the fixture existed only so
+# conjunctive discovery could compute exact joint counts -- which it then
+# never produced at this scale.  This run pays the fixture back.
+#
+# minimum_stratum_rows stays set but does not apply here: the live provider
+# counts root-table rows rather than full-outer-join rows, and conditional
+# sampling redraws fanout partners every step, so conjunctive_status reports
+# row_floor_applied false.  That is expected, not a misconfiguration.
+dataset:
+  type: neurocard_full_join
+  name: job_light_ranges_duet_binary_native_anpm_20k_rare_auxiliary_live_seed_0
+  csv_directory: datasets/job
+  prepared_directory: data/neurocard_prepared/job_light
+  use_cols: content
+  sampling_mode: live
+  sampler_batch_size: 16384
+  sampler_seed: 0
+  sample_batch_size: 2048
+  neurocard_path: /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard
+  num_workers: 0
+
+schema:
+  join_type: acyclic
+  column_order: data_indicators_fanouts
+
+model:
+  type: predicate_resmade
+  hidden_sizes: [512, 512, 512, 512]
+  residual_connections: true
+  direct_io_connections: true
+  direct_io_source_kinds: [data, indicator, fanout]
+  direct_io_destination_kinds: [data, indicator, fanout]
+  activation: relu
+  input_encoding: duet_binary
+  output_encoding: embed
+  output_embedding_size: 64
+  output_embeddings_tied: false
+  embedding_size: 32
+  residual_dropout: 0.2
+  fixed_ordering: true
+
+factorization:
+  enabled: true
+  strategy: bitwise_lossless
+  word_size_bits: 11
+  minimum_domain_size: 2048
+  factor_order: most_significant_first
+  blacklist_columns: []
+  blacklist_kinds: [indicator, fanout]
+
+anpm:
+  enabled: true
+  previous_factor_embedding_size: 64
+  hidden_size: 64
+  teacher_force_during_training: true
+  mask_invalid_combinations: true
+  decode_chunk_size: 4096
+  final_activation: relu
+  materialize_original_distribution_for_debug: false
+
+fanout:
+  token: inv_fanout
+  wildcard_token: wildcard
+  compute_weights_in_log_space: true
+  weight_normalization: batch_sum
+  weight_clipping: null
+
+predicate_generation:
+  enabled: true
+  strategy: duet_batch_bounds
+  table_subset_sampling: neurocard_table_dropout_rooted
+  enable_native_range_tokens: true
+  normalize_predicate_probabilities: false
+  wildcard_probability: 0.2
+  equality_probability: 0.2
+  lower_bound_probability: 0.2
+  upper_bound_probability: 0.2
+  native_range_probability: 0.2
+  per_row_contexts: 1
+  seed: 0
+
+predicate_encoding:
+  mode: two_slot_binary_duet
+  multi_predicate_merge: sum
+  max_predicates_per_column: 2
+
+importance_sampling:
+  enabled: false
+
+rare_support:
+  enabled: true
+  discovery:
+    enabled: true
+    root_data_only: true
+    # Root columns default to "categorical" when root_column_semantics does not
+    # name them, and false here skipped every one of those, so on the live path
+    # title:production_year was the only seed column that ever existed.
+    include_categorical_root_data: true
+    max_candidate_domain_size: 262144
+    max_candidates_per_column: 4096
+    candidate_column_names:
+      - title:production_year
+      - title:kind_id
+      # Enriched 9.5x, 7.4x and 8.3x respectively in the worst 20 queries.
+      # Omitting them is why every selected stratum paired production_year with
+      # something: on the live path include_categorical_root_data=false left
+      # production_year as the only seed column in existence, and here this
+      # allowlist left out the columns that actually carry the tail.
+      - title:season_nr
+      - title:episode_nr
+      - title:series_years
+      - title:phonetic_code
+      - movie_keyword:keyword_id
+      - movie_companies:company_id
+      - movie_info:info_type_id
+      - movie_info_idx:info_type_id
+      - cast_info:role_id
+      - cast_info:nr_order
+    minimum_expected_context_support: 100
+    deficit_objective: log_ratio
+    # A rare region still has to hold enough distinct rows that oversampling it
+    # teaches the shape of the region rather than the identity of its rows.
+    # minimum_joint_rows guards only conjunctions; this guards every depth.
+    # Sizing: the auxiliary stream draws 512 x 20,000 = 10.24M rows, so 64
+    # evenly weighted strata take ~160,000 draws each, while the main stream
+    # shows a typical fixture row 2048 x 20,000 / 2e6 = 20.5 times.  A floor of
+    # 1000 rows holds a stratum's per-row exposure to ~160, under 8x the main
+    # stream.  Without it, log_ratio ranks a one-row region top and 53 of 64
+    # selected strata covered a single row apiece -- 160,000 draws of one row.
+    # Raising it further is safe (the run refuses rather than degrades); the
+    # audit must report row_floor_applied: true and at_or_below_one: 0.
+    minimum_stratum_rows: 1000
+    max_selected_strata: 64
+    support_planning_steps: 20000
+    root_column_semantics:
+      title:
+        production_year: ordered
+        kind_id: categorical
+        # The tail-attribution analysis puts these three 7-9x above their base
+        # rate in the worst 20 queries of the 1000-query ranges workload, with
+        # group medians four to six orders of magnitude worse than anything
+        # else.  They are numeric with nulls, and _ordered_numeric_values skips
+        # structural values, so "ordered" holds and gives tail regions as well
+        # as equality -- which is what a range workload needs.
+        season_nr: ordered
+        episode_nr: ordered
+        series_years: ordered
+        phonetic_code: categorical
+    conjunctive:
+      # The live sampler owns no materialized rows, so it cannot compute exact
+      # joint counts and refuses conjunctive discovery by design.  Off here so
+      # the run does not pay for a beam search that cannot produce anything.
+      enabled: false
+      max_depth: 2
+      beam_width: 64
+      seed_width: 64
+      extension_width: 64
+      conditional_extension_width: 8
+      minimum_joint_rows: 100
+      max_joint_row_fraction: 0.01
+      require_distinct_tables: true
+      max_stratum_share: 0.1
+      # movie_keyword:keyword_id is no longer required.  Tail attribution puts
+      # it at 0.70x its base rate in the worst 20 queries -- it is DEPLETED in
+      # the tail, not enriched -- so demanding a conjunction on it was aiming
+      # at the wrong column.
+      #
+      # require_conjunctions is off because this fixture provably cannot
+      # satisfy it.  The best joint count the beam can reach here is 15
+      # against minimum_joint_rows: 100, and clearing 100 even once needs on
+      # the order of 13M rows; a three-floor audit at 0, 100 and 1000 selected
+      # zero conjunctions at every floor.  Lowering minimum_joint_rows to
+      # admit a 15-row conjunction would hand it straight to
+      # minimum_stratum_rows, which exists to reject regions that small, so
+      # the two guards would simply cancel.  This run is therefore depth-1
+      # rare support on the tail columns, and the honest way to say so is to
+      # stop requiring something that cannot happen.  Discovery still runs the
+      # beam and still reports conjunctive_status, so the day the fixture
+      # grows the audit says so without a config change.
+      require_conjunctions: false
+  allocation:
+    strategy: support_deficit
+  diagnostics:
+    enabled: true
+
+rare_auxiliary:
+  enabled: true
+  batch_size: 512
+  beta: 0.25
+
+training:
+  seed: 0
+  device: auto
+  batch_size: 2048
+  learning_rate: 0.0001
+  optimizer: adam
+  epochs: 1
+  steps_per_epoch: 20000
+  early_stopping_patience_steps: 3000
+  early_stopping_monitor: train_loss
+  early_stopping_min_delta: 0.0
+  gradient_clip_norm: 5.0
+  checkpoint_interval_steps: 500
+  validation_interval_steps: 250
+  head_loss_reduction: sum
+  mixed_precision: false
+
+inference:
+  progressive_sampling: false
+  factorized_decoder: anpm
+  use_log_space_product: true
+
+logging:
+  output_directory: model/runs/job_light_ranges_duet_binary_native_anpm_20k_rare_auxiliary_live_seed_0

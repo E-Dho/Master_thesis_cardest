@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from model.src.evaluation.metrics import q_error, q_error_floor_one
-from model.scripts.evaluate_job_light_queries import RawPredicate, build_normalized_token
+from model.scripts.evaluate_job_light_queries import (
+    RawPredicate,
+    build_normalized_token,
+    normalize_evaluation_token,
+)
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.sets import ColumnPredicateSet
 from model.src.predicates.vocabulary import PredicateVocabularies
@@ -123,6 +127,22 @@ class NativeRangeNormalizationTest(unittest.TestCase):
             ],
         )
         self.assertEqual(ranged.token, PredicateToken.range(20, 50))
+
+    def test_evaluator_treats_full_domain_bound_as_no_filter(self) -> None:
+        metadata = ModelMetadata(
+            columns=(ColumnMetadata("x", ColumnKind.DATA, (10, 20, 50, 60)),),
+            full_join_cardinality=4,
+        )
+        built = build_normalized_token(
+            metadata,
+            "x",
+            [RawPredicate("x", ">=", 10, "x>=10")],
+        )
+
+        self.assertEqual(built.token, PredicateToken.wildcard())
+        token, contradiction = normalize_evaluation_token(built.token)
+        self.assertEqual(token, PredicateToken.wildcard())
+        self.assertFalse(contradiction)
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ assert training["early_stopping_patience_steps"] == 3_000
 assert training["checkpoint_interval_steps"] == 500
 assert config["rare_auxiliary"]["batch_size"] == 512
 assert config["rare_auxiliary"]["beta"] == 0.25
-assert conjunctive["require_conjunctions"] is True
+assert conjunctive["require_conjunctions"] is False
 assert config["model"]["residual_dropout"] == expected_dropout
 assert Path(config["logging"]["output_directory"]) == run_dir
 print(f"confirmed_range_workload_queries={range_count}")
