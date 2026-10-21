@@ -16,6 +16,14 @@ prototype remains available as `model.type: prototype_table` for fast exact
 tests. Real training is now wired through a PyTorch predicate-conditioned
 ResMADE backend, `model.type: predicate_resmade`.
 
+## Status Of The Null-Token Zero-Cardinality Ablation
+
+The null-token/zero-cardinality approach on this branch is an experimental
+ablation and is currently not suitable for ordinary use or benchmark
+comparison. Its observed behavior does not provide a reliable treatment of
+zero-cardinality queries. Do not use its configurations or checkpoints unless
+the approach is being explicitly developed and revalidated further.
+
 ## Relationship To Upstream Work
 
 - NeuroCard: https://github.com/neurocard/neurocard
