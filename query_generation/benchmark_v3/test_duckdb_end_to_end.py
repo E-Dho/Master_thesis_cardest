@@ -22,6 +22,7 @@ from pathlib import Path
 
 from query_generation.benchmark_v3 import synthetic
 from query_generation.benchmark_v3.backends import SqlBackend
+from query_generation.benchmark_v3.build_pools import data_domains, diagnostics, domain_violations
 from query_generation.benchmark_v3.config import load_settings
 from query_generation.benchmark_v3.generate import generate_category
 from query_generation.benchmark_v3.merge import merge
@@ -114,6 +115,24 @@ class DuckDbEndToEnd(unittest.TestCase):
                 self.assertEqual(self.sql.count(record), expected, record["slot_id"])
                 positive += expected > 0
         self.assertGreater(positive, 300)
+
+    def test_data_domains_and_violations(self):
+        domains = data_domains(self.settings, self.session)
+        seg = self.data["segments"]
+        geom = domains["segments.segment_geom"]
+        self.assertEqual(geom["min_x"], min(seg["sx"].min(), seg["ex"].min()))
+        self.assertEqual(geom["max_y"], max(seg["sy"].max(), seg["ey"].max()))
+        self.assertEqual(domains["agents.age"]["max"], self.data["agents"]["age"].max())
+        self.assertEqual(domains_violations := domain_violations(self.settings, domains), [])
+        domains["agents.age"]["max"] = 999.0
+        domains["trips.trip_time"]["min"] = "2019-01-01 00:00:00.000000"
+        violations = domain_violations(self.settings, domains)
+        self.assertEqual(len(violations), 2, violations)
+        self.assertEqual(domains_violations, [])
+
+    def test_diagnostics_never_raise(self):
+        result = diagnostics(self.settings, self.session)
+        self.assertEqual(set(result), {"pg_stats_columns_per_table", "segment_tgeom_start_offset_seconds"})
 
     def test_generate_merge_verify_on_sql(self):
         with tempfile.TemporaryDirectory() as tmp:

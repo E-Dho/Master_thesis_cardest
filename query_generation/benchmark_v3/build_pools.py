@@ -10,21 +10,99 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from query_generation.query_generator import parse_timestamp
+
 from .config import Settings, load_settings
-from .pools import Pools, pool_columns, subsample
+from .pools import Pools, encode_value, pool_columns, subsample
+
+
+def data_domains(settings: Settings, session) -> Dict[str, Dict[str, Any]]:
+    """Measured min/max of every ordered attribute, keyed like ``domain_overrides``."""
+
+    seg = settings.segments
+    domains: Dict[str, Dict[str, Any]] = {}
+    for table_id, table in sorted(settings.base["tables"].items()):
+        parts: List[str] = []
+        keys: List[tuple] = []
+        for attr in table["attributes"]:
+            name = f"{table_id}.{attr['name']}"
+            if attr["type"] in {"numeric", "integer"}:
+                parts += [f"min({attr['expression']})", f"max({attr['expression']})"]
+                keys += [(name, "min"), (name, "max")]
+            elif attr["type"] == "temporal_interval":
+                parts += [f"min({attr['start_expression']})", f"max({attr['end_expression']})"]
+                keys += [(name, "min"), (name, "max")]
+            elif attr["type"] == "geometry" and table_id == seg.table:
+                c = seg.columns
+                parts += [
+                    f"least(min({c['sx']}), min({c['ex']}))", f"least(min({c['sy']}), min({c['ey']}))",
+                    f"greatest(max({c['sx']}), max({c['ex']}))", f"greatest(max({c['sy']}), max({c['ey']}))",
+                ]
+                keys += [(name, "min_x"), (name, "min_y"), (name, "max_x"), (name, "max_y")]
+        if not parts:
+            continue
+        values = session.rows(f"SELECT {', '.join(parts)} FROM {table['name']} {table['alias']}")[0]
+        for (name, field), value in zip(keys, values):
+            domains.setdefault(name, {})[field] = encode_value(value)
+    return domains
+
+
+def domain_violations(settings: Settings, domains: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Data outside the configured domain cannot be reached by range predicates."""
+
+    problems = []
+    for name, measured in sorted(domains.items()):
+        table_id, _, attribute = name.partition(".")
+        configured = settings.attr(table_id, attribute)["domain"]
+        for field, value in measured.items():
+            bound = configured[field]
+            if field in ("min", "max") and settings.attr(table_id, attribute)["type"] == "temporal_interval":
+                value, bound = parse_timestamp(value), parse_timestamp(bound)
+            else:
+                value, bound = float(value), float(bound)
+            outside = value < bound if field.startswith("min") else value > bound
+            if outside:
+                problems.append(f"{name}.{field}: data {value} outside configured {bound}")
+    return problems
+
+
+def diagnostics(settings: Settings, session) -> Dict[str, Any]:
+    """Informational checks; failures are recorded, never raised."""
+
+    result: Dict[str, Any] = {}
+    seg = settings.segments
+    seg_table = settings.table(seg.table)
+
+    def attempt(key, sql):
+        try:
+            result[key] = [[encode_value(v) for v in row] for row in session.rows(sql)]
+        except Exception as error:  # noqa: BLE001 - diagnostics only
+            result[key] = f"unavailable: {type(error).__name__}: {error}"
+
+    attempt(
+        "pg_stats_columns_per_table",
+        "SELECT tablename, count(*) FROM pg_stats WHERE schemaname = "
+        f"'{settings.base['schema']}' GROUP BY tablename ORDER BY tablename",
+    )
+    # segment_tgeom is not used for labels; this measures how far its start
+    # time deviates from t_s (rounding vs. time-zone shift), on a 1 % sample.
+    attempt(
+        "segment_tgeom_start_offset_seconds",
+        "SELECT count(*) FILTER (WHERE d <> 0), count(*), min(d), max(d), "
+        "count(*) FILTER (WHERE abs(d) >= 1) FROM ("
+        f"SELECT EXTRACT(EPOCH FROM (startTimestamp(segment_tgeom) - ({seg.columns['ts']} AT TIME ZONE 'UTC')))::float8 AS d "
+        f"FROM {seg_table['name']} {seg_table['alias']} TABLESAMPLE SYSTEM (1) REPEATABLE (1)) q",
+    )
+    return result
 
 
 def database_fingerprint(settings: Settings, session) -> Dict[str, Any]:
-    seg = settings.segments
     fingerprint: Dict[str, Any] = {}
     for table_id, table in sorted(settings.base["tables"].items()):
         fingerprint[f"{table_id}.rows"] = int(session.scalar(f"SELECT count(*) FROM {table['name']}"))
-    seg_table = settings.table(seg.table)
-    lo, hi = session.rows(
-        f"SELECT min({seg.columns['ts']}), max({seg.columns['te']}) FROM {seg_table['name']} {seg_table['alias']}"
-    )[0]
-    fingerprint["segments.t_s.min"] = str(lo)
-    fingerprint["segments.t_e.max"] = str(hi)
+    fingerprint["data_domains"] = data_domains(settings, session)
+    fingerprint["domain_violations"] = domain_violations(settings, fingerprint["data_domains"])
+    fingerprint["diagnostics"] = diagnostics(settings, session)
     return fingerprint
 
 
@@ -91,7 +169,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     with SqlSession(args.host, args.port, args.dbname, args.user) as session:
         pools = build_pools(settings, session, args.base_seed)
     pools.save(output)
+    violations = pools.binding["database"]["domain_violations"]
     print(json.dumps({
+        "domain_violations": violations,
         "pools": str(output),
         "sha256": pools.sha256,
         "rows": {table: len(payload["rows"]) for table, payload in pools.tables.items()},

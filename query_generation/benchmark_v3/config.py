@@ -19,6 +19,7 @@ from query_generation.query_generator import (
     attribute_value_dependencies,
     load_config,
     parse_timestamp,
+    validate_config,
 )
 
 from . import SEMANTICS_VERSION
@@ -168,7 +169,7 @@ def load_settings(
             f"{path} declares semantics {v3.get('semantics_version')!r}, expected {SEMANTICS_VERSION!r}"
         )
     base_path = (path.parent / v3["base_config"]).resolve()
-    base = load_config(base_path)
+    base = apply_domain_overrides(load_config(base_path), v3.get("domain_overrides") or {})
     grid = {
         "single": int(single_count if single_count is not None else v3["grid"]["single"]),
         "multi": int(multi_count if multi_count is not None else v3["grid"]["multi"]),
@@ -176,6 +177,27 @@ def load_settings(
     settings = Settings(path=path, v3=v3, base=base, base_path=base_path, grid=grid)
     validate_settings(settings)
     return settings
+
+
+def apply_domain_overrides(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace attribute domains of the shared base config for v3 only.
+
+    ``pol_query_config.json`` is shared with v2 and stays untouched; v3 records
+    the measured data domains as ``"table.attribute": {domain}`` overrides.
+    """
+
+    base = json.loads(json.dumps(base))
+    for key, domain in overrides.items():
+        table_id, _, name = key.partition(".")
+        attrs = base["tables"].get(table_id, {}).get("attributes", [])
+        matches = [attr for attr in attrs if attr["name"] == name]
+        if not matches:
+            raise ConfigError(f"domain_overrides: unknown attribute {key!r}")
+        if set(domain) != set(matches[0]["domain"]):
+            raise ConfigError(f"domain_overrides[{key!r}] must have the keys {sorted(matches[0]['domain'])}")
+        matches[0]["domain"] = dict(domain)
+    validate_config(base)
+    return base
 
 
 def validate_settings(settings: Settings) -> None:

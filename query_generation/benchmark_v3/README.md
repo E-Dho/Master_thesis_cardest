@@ -47,6 +47,11 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    The report lands in `$MOBILITYDB_ROOT/query_runs/v3_cluster_check_*.txt`.
    Every check states its expected value in `cluster_check.sql`.
 
+   Data domains: `pol_v3_config.json` carries the measured spatial and
+   temporal domains in `domain_overrides`. The pools job (first stage of
+   every run) prints `domain_violations` for all other attributes; copy any
+   reported domain into `domain_overrides` before the full run.
+
 2. **Pilot** (10 queries per category, own run directory):
 
    ```bash

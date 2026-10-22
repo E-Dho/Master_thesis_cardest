@@ -2,13 +2,44 @@
   "name": "pol_exact_st_v3",
   "semantics_version": "pol_exact_st_v3",
   "base_config": "../pol_query_config.json",
-  "grid": {"single": 250, "multi": 750},
+  "domain_overrides_source": "cluster check job 22321118 (2026-10-21), segments.extent; trips.trip_time equals the segment span",
+  "domain_overrides": {
+    "segments.segment_geom": {
+      "min_x": 739732.900565014,
+      "min_y": 3733936.9598094677,
+      "max_x": 744490.651384115,
+      "max_y": 3739125.101412267
+    },
+    "segments.segment_time": {
+      "min": "2019-07-01 05:25:00",
+      "max": "2020-06-30 00:05:00"
+    },
+    "trips.trip_time": {
+      "min": "2019-07-01 05:25:00",
+      "max": "2020-06-30 00:05:00"
+    }
+  },
+  "grid": {
+    "single": 250,
+    "multi": 750
+  },
   "center_live_probability": 0.9,
-  "temporal_width": {"distribution": "log_uniform", "min_seconds": 60},
+  "temporal_width": {
+    "distribution": "log_uniform",
+    "min_seconds": 60
+  },
   "attribute_addons": {
     "applies_to": "multi_non_standard",
-    "counts": [0, 1, 2],
-    "probabilities": [0.5, 0.25, 0.25]
+    "counts": [
+      0,
+      1,
+      2
+    ],
+    "probabilities": [
+      0.5,
+      0.25,
+      0.25
+    ]
   },
   "unbounded_spatial_margin": 1000000.0,
   "segments": {
@@ -25,6 +56,9 @@
       "te": "s.t_e"
     }
   },
-  "pools": {"size": 20000, "oversample": 1.5},
+  "pools": {
+    "size": 20000,
+    "oversample": 1.5
+  },
   "max_attempts": 200
 }

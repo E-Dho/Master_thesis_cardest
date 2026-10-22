@@ -13,7 +13,8 @@ verification job (`verify_sample.py`) all implement exactly these rules.
   describes a movement that is **linear in space and time**: at time
   `t = t_s + u * (t_e - t_s)` with `u in [0, 1]` the object is at
   `(s_x + u * (e_x - s_x), s_y + u * (e_y - s_y))`.
-- If `t_s = t_e` the segment is an **instant**: the object is at `(s_x, s_y)`
+- If `t_s = t_e` the segment is an **instant** (POL has none, but the
+  definition and the tests cover them): the object is at `(s_x, s_y)`
   at exactly that time.
 - If the start and end position coincide but `t_s < t_e`, the object is
   **stationary** at that position for the whole interval.
@@ -38,6 +39,13 @@ only equivalent to the definition for non-empty intervals.
 | `temporal` | `trips.trip_time`, `segments.segment_time` | the row's interval `[start, end]` intersects the query interval `[L, U]` |
 | `spatial` | `segments.segment_geom` only | the segment's line (section 1) intersects the closed window `W` |
 | `spatio_temporal` | `segments` only | there is a `u in [0, 1]` with time `t(u)` in `[L, U]` **and** position `p(u)` in `W` |
+
+Domains are the measured data domains: `pol_v3_config.json` overrides the
+spatial and temporal domains of the shared base config with the extent the
+cluster check measured (the base config's domains came from an earlier,
+smaller dataset and cut off up to ~420 m of space and the first hour of
+time). The pools job records the data domain of every ordered attribute and
+lists any remaining violation.
 
 Unbounded temporal or spatial bounds are represented by `null` (temporal) or
 by extending the window by `unbounded_spatial_margin` beyond the data domain
@@ -158,10 +166,14 @@ Single queries never receive add-ons.
 The exact predicate could be written with MobilityDB
 (`eIntersects(atTime(segment_tgeom, span), W)`), but:
 
-1. `load.sql` builds instant segments through text in the session time zone
-   and moving segments through epoch seconds; unless the loading session ran
-   in UTC the two are shifted against each other (to be checked by the
-   cluster validation script).
+1. `segment_tgeom` does not reproduce the stored times exactly. The cluster
+   check (job 22321118) found 107,188 mismatches between
+   `startTimestamp(segment_tgeom)` and `t_s` in a 1 % sample. The text path
+   for instants in `load.sql` cannot be the cause, because POL contains no
+   instants; the size of the deviations (rounding of the float epoch in
+   the M coordinate vs. a time-zone shift) is measured by the pools job
+   (`diagnostics.segment_tgeom_start_offset_seconds`). Either way the raw
+   columns are the reference.
 2. Function names differ between MobilityDB versions.
 3. The closed form on the raw columns is the same formula as the numpy
    reference and the model's segment representation, so verification can be

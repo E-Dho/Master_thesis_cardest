@@ -26,7 +26,8 @@ SELECT 'segments.geom_differs_from_raw' AS check, count(*) FROM pol.segments
 WHERE ST_X(ST_StartPoint(segment_geom)) <> s_x OR ST_Y(ST_StartPoint(segment_geom)) <> s_y
    OR ST_X(ST_EndPoint(segment_geom)) <> e_x OR ST_Y(ST_EndPoint(segment_geom)) <> e_y;
 
--- Domain of the config (expected: inside min/max of pol_query_config.json).
+-- Data domain (expected: inside the domains of pol_v3_config.json, i.e. its
+-- domain_overrides; pol_query_config.json is older and narrower).
 SELECT 'segments.extent' AS check,
        least(min(s_x), min(e_x)) AS min_x, greatest(max(s_x), max(e_x)) AS max_x,
        least(min(s_y), min(e_y)) AS min_y, greatest(max(s_y), max(e_y)) AS max_y,
@@ -46,8 +47,8 @@ JOIN (SELECT trip_id, min(t_s) AS lo, max(t_e) AS hi FROM pol.segments GROUP BY 
 WHERE t.start_time <> g.lo OR t.end_time <> g.hi;
 
 -- Consistency of the MobilityDB columns with the raw times (informational:
--- v3 labels do not use tgeom; a non-zero result confirms the time-zone shift
--- described in SEMANTICS.md, section 6).
+-- v3 labels do not use tgeom; see SEMANTICS.md, section 6. The pools job
+-- measures the size of the deviations).
 SELECT 'segment_tgeom.start_differs' AS check, count(*) FROM pol.segments TABLESAMPLE SYSTEM (1)
 WHERE startTimestamp(segment_tgeom) <> (t_s AT TIME ZONE 'UTC');
 
