@@ -11,6 +11,8 @@ produce and check the benchmark.
 | Spatio-temporal match | geometry and segment time span tested separately | exact: the object is inside the window *during* the interval (Liang-Barsky clipping on the raw columns) |
 | Grid | 16 x 500 | 8 x 250 single (`COUNT(*)`) + 8 x 750 multi (`COUNT(DISTINCT trip_id)` only) |
 | Temporal widths | 50 % uniform, 50 % exponential | log-uniform, 60 s to the full year |
+| Spatial widths | 50 % uniform, 50 % exponential | log-uniform per axis, 10 m to the full extent |
+| Domains | from an earlier, smaller dataset | measured on the 7-seed data (`domain_overrides`) |
 | Spatio-temporal centers | space and time from different rows | jointly from one segment at one point in time |
 | Attribute filters on spatial/temporal queries | none | non-standard multi queries: exactly 50 / 25 / 25 % with 0 / 1 / 2 add-ons |
 | Spatial windows per query | possibly several | at most one |
@@ -30,7 +32,7 @@ produce and check the benchmark.
 | `pools.py`, `build_pools.py` | seeded center pools |
 | `generate.py` | one category: label, reject zero/duplicate, resume |
 | `merge.py` | 16 categories -> `benchmark.jsonl`, all gates |
-| `verify.py` | independent numpy recount + `EXISTS` recount of a sample |
+| `verify.py` | recount of a stratified sample: numpy (rows fetched), `EXISTS` (multi), independent PostGIS formulation (spatial and spatio-temporal) |
 | `cluster_check.sql` | Phase 1 data checks (read-only) |
 | `slurm/` | jobs and `submit_v3.sh` |
 
@@ -47,10 +49,10 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    The report lands in `$MOBILITYDB_ROOT/query_runs/v3_cluster_check_*.txt`.
    Every check states its expected value in `cluster_check.sql`.
 
-   Data domains: `pol_v3_config.json` carries the measured spatial and
-   temporal domains in `domain_overrides`. The pools job (first stage of
-   every run) prints `domain_violations` for all other attributes; copy any
-   reported domain into `domain_overrides` before the full run.
+   Data domains: `pol_v3_config.json` carries the measured domains of all
+   ordered attributes in `domain_overrides`. The pools job (first stage of
+   every run) re-measures them and prints `domain_violations`; the list must
+   be empty.
 
 2. **Pilot** (10 queries per category, own run directory):
 

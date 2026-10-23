@@ -349,9 +349,7 @@ class Sampler:
                 return {"lower": None, "upper": timestamp_text(center), "mode": "unbounded"}
             return {"lower": timestamp_text(center), "upper": None, "mode": "unbounded"}
         span = (domain_max - domain_min).total_seconds()
-        low = math.log(self.settings.temporal_min_seconds)
-        high = math.log(max(span, self.settings.temporal_min_seconds))
-        width = math.exp(rng.uniform(low, high))
+        width = log_uniform(rng, self.settings.temporal_min_seconds, span)
         lower = max(domain_min, center - timedelta(seconds=width / 2.0))
         upper = min(domain_max, center + timedelta(seconds=width / 2.0))
         return {
@@ -380,20 +378,29 @@ class Sampler:
             )
             bounds.update({"mode": "unbounded", "unbounded_side": side})
             return bounds
-        width, source_x = sample_width(rng, d["max_x"] - d["min_x"])
-        height, source_y = sample_width(rng, d["max_y"] - d["min_y"])
+        width = log_uniform(rng, self.settings.spatial_min_width, d["max_x"] - d["min_x"])
+        height = log_uniform(rng, self.settings.spatial_min_width, d["max_y"] - d["min_y"])
         return {
             "min_x": max(d["min_x"], cx - width / 2.0),
             "min_y": max(d["min_y"], cy - height / 2.0),
             "max_x": min(d["max_x"], cx + width / 2.0),
             "max_y": min(d["max_y"], cy + height / 2.0),
             "mode": "range",
-            "width_source": source_x if source_x == source_y else "mixed",
+            "width_source": "log_uniform",
+            "width_x_meters": width,
+            "width_y_meters": height,
         }
 
 
+def log_uniform(rng: random.Random, low: float, high: float) -> float:
+    """exp(U(log low, log high)); the full range collapses to ``low`` if high < low."""
+
+    high = max(high, low)
+    return math.exp(rng.uniform(math.log(low), math.log(high)))
+
+
 def sample_width(rng: random.Random, size: float) -> Tuple[float, str]:
-    """v2 width rule: 50 % uniform over the domain, 50 % exponential (mean size/10)."""
+    """v2 width rule for scalar ranges: 50 % uniform over the domain, 50 % exponential (mean size/10)."""
 
     if size <= 0:
         raise ConfigError("domain size must be positive")

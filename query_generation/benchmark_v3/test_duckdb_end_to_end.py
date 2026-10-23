@@ -49,6 +49,7 @@ class DuckSession:
         sql = ENVELOPE_SRID.sub(r"\1)", sql)
         sql = EPOCH_US.sub(r"epoch_us(\1)", sql)
         sql = sql.replace("= ANY(%s)", "IN (SELECT UNNEST(?))").replace("%s", "?")
+        sql = sql.replace("ST_MakePoint(", "ST_Point(")
         return sql
 
     def scalar(self, sql, params=None):
@@ -116,6 +117,24 @@ class DuckDbEndToEnd(unittest.TestCase):
                 positive += expected > 0
         self.assertGreater(positive, 300)
 
+    def test_postgis_formulation_equals_numpy_for_spatial_queries(self):
+        from query_generation.benchmark_v3.verify import postgis_sql
+
+        wide = load_settings(CONFIG, single_count=40, multi_count=40)
+        sampler = Sampler(wide, self.pools, base_seed=13)
+        checked = positive = 0
+        for category in wide.categories():
+            if category.dimension not in ("spatial", "spatio_temporal"):
+                continue
+            for index in range(40):
+                record = sampler.candidate(category, index, 0)
+                expected = self.numpy.count(record)
+                self.assertEqual(int(self.session.scalar(postgis_sql(wide, record))), expected, record["slot_id"])
+                checked += 1
+                positive += expected > 0
+        self.assertEqual(checked, 8 * 40)
+        self.assertGreater(positive, 200)
+
     def test_data_domains_and_violations(self):
         domains = data_domains(self.settings, self.session)
         seg = self.data["segments"]
@@ -150,6 +169,8 @@ class DuckDbEndToEnd(unittest.TestCase):
         self.assertEqual(summary["st_intersects_disagreements"], 0)
         self.assertGreaterEqual(summary["numpy_checked"], 12 * 5)
         self.assertEqual(summary["exists_checked"], 8 * 6)
+        self.assertEqual(summary["postgis_mismatches"], [])
+        self.assertEqual(summary["postgis_checked"], 2 * 5 + 2 * 6 + 2 * 5 + 2 * 6)
 
 
 if __name__ == "__main__":

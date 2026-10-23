@@ -41,8 +41,8 @@ only equivalent to the definition for non-empty intervals.
 | `spatio_temporal` | `segments` only | there is a `u in [0, 1]` with time `t(u)` in `[L, U]` **and** position `p(u)` in `W` |
 
 Domains are the measured data domains: `pol_v3_config.json` overrides the
-spatial and temporal domains of the shared base config with the extent the
-cluster check measured (the base config's domains came from an earlier,
+domains of the shared base config with the values the cluster check and the
+pilot's pools job measured (the base config's domains came from an earlier,
 smaller dataset and cut off up to ~420 m of space and the first hour of
 time). The pools job records the data domain of every ordered attribute and
 lists any remaining violation.
@@ -147,9 +147,13 @@ Single queries never receive add-ons.
     that time.
   - `spatial`: a uniform point along a pool segment.
   - `temporal`: a uniform time inside a pool row's interval.
-- Widths: numeric and spatial as in v2 (50 % uniform over the domain, 50 %
-  exponential with mean domain/10, x and y independent); **temporal widths
-  log-uniform** between `min_seconds` (60 s) and the full temporal domain.
+- Widths: numeric ranges as in v2 (50 % uniform over the domain, 50 %
+  exponential with mean domain/10); **spatial widths log-uniform** per axis
+  (independently for x and y) between `min_meters` (10 m) and the extent of
+  that axis; **temporal widths log-uniform** between `min_seconds` (60 s)
+  and the full temporal domain. The pilot showed why spatial widths need it:
+  POL holds about 2.5 million segments per km², so with the v2 rule even the
+  smallest spatial window matched 0.46 % of all segments.
 - Positivity: every candidate is labelled exactly with one SQL statement.
   A label of 0 rejects the candidate and the slot moves to its next attempt;
   so does a duplicate (same canonical predicate hash as an already accepted

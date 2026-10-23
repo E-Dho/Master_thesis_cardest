@@ -8,6 +8,15 @@ cannot drop a true match), evaluates the predicates with the numpy reference
 queries are also recounted with a second SQL formulation (``EXISTS`` instead
 of ``COUNT(DISTINCT ...)``). Diagnostics per query:
 
+Every sampled spatial or spatio-temporal query is additionally recounted in
+the database with an independent formulation (``postgis_sql``): PostGIS
+``ST_Intersects`` for spatial predicates, and for spatio-temporal predicates
+the segment is first cut to the query interval by linear interpolation and the
+resulting sub-segment is tested with ``ST_Intersects``. This covers the wide
+queries whose candidate rows are too many for the numpy recount.
+
+Diagnostics per query:
+
 - ``decoupled``: the count under the v2 semantics (geometry and time span
   tested separately) for spatio-temporal queries;
 - ``st_intersects_disagreements``: fetched segments where PostGIS
@@ -33,7 +42,7 @@ from query_generation.generate_pol_segment_coupled_benchmark import write_json_a
 from . import exact
 from .numpy_backend import JOIN_CONDITION, NumpyBackend
 from .config import Settings, load_settings
-from .query_model import envelope_sql, from_clause, predicate_sql, ts_sql
+from .query_model import envelope_sql, from_clause, predicate_sql, ts_sql, window_of
 
 SPATIAL_KINDS = {"spatial", "spatio_temporal"}
 
@@ -185,6 +194,60 @@ class Fetcher:
         raise ValueError("segments do not join the entity table directly")
 
 
+def _plain_envelope(window) -> str:
+    """Envelope without SRID; compared only with lines built from raw coordinates."""
+
+    x0, y0, x1, y1 = window
+    return f"ST_MakeEnvelope({float(x0)!r}, {float(y0)!r}, {float(x1)!r}, {float(y1)!r})"
+
+
+def postgis_predicate_sql(settings: Settings, predicate: Dict[str, Any]) -> str:
+    """Independent SQL for spatial and spatio-temporal predicates (no clipping formula)."""
+
+    seg = settings.segments
+    cols = seg.columns
+    window = window_of(predicate) if "min_x" in predicate else None
+    if predicate["kind"] == "spatial":
+        return f"ST_Intersects({seg.geometry_expression}, {envelope_sql(settings, window)})"
+    if predicate["kind"] != "spatio_temporal":
+        return predicate_sql(settings, predicate)
+    lower, upper = predicate.get("lower"), predicate.get("upper")
+    duration = f"EXTRACT(EPOCH FROM ({cols['te']} - {cols['ts']}))::float8"
+
+    def fraction(bound: str, clamp: str, default: str) -> str:
+        if bound is None:
+            return default
+        ratio = f"EXTRACT(EPOCH FROM ({ts_sql(bound)} - {cols['ts']}))::float8 / {duration}"
+        return f"(CASE WHEN {cols['te']} = {cols['ts']} THEN 0.0::float8 ELSE {clamp}({default}, {ratio}) END)"
+
+    ua = fraction(lower, "GREATEST", "0.0::float8")
+    ub = fraction(upper, "LEAST", "1.0::float8")
+
+    def point(u: str) -> str:
+        return (
+            f"ST_MakePoint({cols['sx']} + {u} * ({cols['ex']} - {cols['sx']}), "
+            f"{cols['sy']} + {u} * ({cols['ey']} - {cols['sy']}))"
+        )
+
+    parts = [f"{seg.geometry_expression} && {envelope_sql(settings, window)}"]
+    if upper is not None:
+        parts.append(f"{cols['ts']} <= {ts_sql(upper)}")
+    if lower is not None:
+        parts.append(f"{cols['te']} >= {ts_sql(lower)}")
+    parts.append(f"ST_Intersects(ST_MakeLine({point(ua)}, {point(ub)}), {_plain_envelope(window)})")
+    return " AND ".join(parts)
+
+
+def postgis_sql(settings: Settings, record: Dict[str, Any]) -> str:
+    source, _ = from_clause(settings, record["tables"])
+    where = " AND ".join(f"({postgis_predicate_sql(settings, p)})" for p in record["predicates"])
+    if record["category"]["relation"] == "single":
+        select = "SELECT COUNT(*)"
+    else:
+        select = f"SELECT COUNT(DISTINCT {settings.entity_expression})"
+    return f"{select}\n{source}\nWHERE {where};"
+
+
 def exists_sql(settings: Settings, record: Dict[str, Any]) -> str:
     """Second formulation of the distinct-trip label: semi-join instead of DISTINCT."""
 
@@ -217,6 +280,9 @@ def verify_record(settings: Settings, fetcher: Optional[Fetcher], session, recor
     if record["category"]["relation"] == "multi":
         result["exists_count"] = int(session.scalar(exists_sql(settings, record)))
         result["exists_ok"] = result["exists_count"] == record["cardinality"]
+    if any(p["kind"] in SPATIAL_KINDS for p in record["predicates"]):
+        result["postgis_count"] = int(session.scalar(postgis_sql(settings, record)))
+        result["postgis_ok"] = result["postgis_count"] == record["cardinality"]
     if record["category"]["dimension"] != "standard" and fetcher is not None:
         data, evaluated, note = fetcher.fetch(record)
         result["numpy_note"] = note
@@ -263,6 +329,7 @@ def stratified_sample(rows: List[Dict[str, Any]], per_category: int, seed: int):
 def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     numpy_checked = [r for r in results if "numpy_ok" in r]
     exists_checked = [r for r in results if "exists_ok" in r]
+    postgis_checked = [r for r in results if "postgis_ok" in r]
     st = [r for r in results if "decoupled_count" in r]
     ratios = sorted(r["decoupled_count"] / r["label"] for r in st)
     return {
@@ -271,6 +338,8 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "numpy_mismatches": [r["query_id"] for r in numpy_checked if not r["numpy_ok"]],
         "exists_checked": len(exists_checked),
         "exists_mismatches": [r["query_id"] for r in exists_checked if not r["exists_ok"]],
+        "postgis_checked": len(postgis_checked),
+        "postgis_mismatches": [r["query_id"] for r in postgis_checked if not r["postgis_ok"]],
         "numpy_skipped": sum(1 for r in results if r.get("numpy_note") not in (None, "ok")),
         "st_intersects_disagreements": sum(r.get("st_intersects_disagreements", 0) for r in results),
         "decoupled_overcount": {
@@ -332,7 +401,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     report = {"summary": summarize(results), "results": results}
     write_json_atomic(Path(args.report), report)
     print(json.dumps(report["summary"], indent=2))
-    failed = report["summary"]["numpy_mismatches"] or report["summary"]["exists_mismatches"]
+    summary = report["summary"]
+    failed = summary["numpy_mismatches"] or summary["exists_mismatches"] or summary["postgis_mismatches"]
     return 1 if failed else 0
 
 

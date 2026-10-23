@@ -87,6 +87,25 @@ class SamplerTests(unittest.TestCase):
         for q in (0.25, 0.5, 0.75):
             self.assertAlmostEqual(positions[int(q * len(positions))], q, delta=0.04)
 
+    def test_spatial_widths_are_log_uniform(self):
+        domain = self.settings.attr("segments", "segment_geom")["domain"]
+        extent = {"x": domain["max_x"] - domain["min_x"], "y": domain["max_y"] - domain["min_y"]}
+        positions = {"x": [], "y": []}
+        for key in ("spatial.range.single", "spatio_temporal.range.single"):
+            category = Category.parse(key)
+            for index in range(1500):
+                predicate = self.wide.candidate(category, index, 0)["predicates"][0]
+                for axis in ("x", "y"):
+                    width = predicate[f"width_{axis}_meters"]
+                    self.assertGreaterEqual(width, 10 - 1e-9)
+                    self.assertLessEqual(width, extent[axis] + 1e-6)
+                    self.assertLessEqual(predicate[f"max_{axis}"] - predicate[f"min_{axis}"], width + 1e-6)
+                    positions[axis].append((math.log(width) - math.log(10)) / (math.log(extent[axis]) - math.log(10)))
+        for axis, values in positions.items():
+            values.sort()
+            for q in (0.25, 0.5, 0.75):
+                self.assertAlmostEqual(values[int(q * len(values))], q, delta=0.04, msg=axis)
+
     def test_joint_centers_make_spatio_temporal_queries_positive(self):
         for key in ("spatio_temporal.range.single", "spatio_temporal.unbounded.single"):
             category = Category.parse(key)

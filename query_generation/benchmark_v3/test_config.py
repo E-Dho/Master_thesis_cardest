@@ -35,6 +35,18 @@ class ConfigTests(unittest.TestCase):
             plain = load_settings(self.write(tmp, domain_overrides={}))
         self.assertNotEqual(plain.sha256, load_settings(CONFIG).sha256)
 
+    def test_measured_numeric_domains(self):
+        settings = load_settings(CONFIG)
+        self.assertEqual(settings.attr("segments", "segment_idx")["domain"], {"min": 0, "max": 82})
+        self.assertEqual(settings.attr("trips", "num_of_segments")["domain"], {"min": 1, "max": 83})
+        self.assertEqual(settings.attr("agents", "age")["domain"], {"min": 18.0, "max": 60.0})
+
+    def test_width_settings_are_validated(self):
+        for change in ({"spatial_width": {"distribution": "log_uniform", "min_meters": 0}},
+                       {"spatial_width": {"distribution": "uniform", "min_meters": 10}}):
+            with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ConfigError, msg=change):
+                load_settings(self.write(tmp, **change))
+
     def test_invalid_overrides_are_rejected(self):
         bad = [
             {"agents.height": {"min": 1, "max": 2}},

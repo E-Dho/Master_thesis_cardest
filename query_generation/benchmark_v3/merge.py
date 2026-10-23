@@ -200,9 +200,15 @@ def build_summary(settings: Settings, rows, rejected_by_category) -> Dict[str, A
         for row in rows for p in row["predicates"]
         if p["kind"] in TEMPORAL_KINDS and (p.get("width_seconds") or p.get("temporal_width_seconds"))
     ]
+    spatial_widths = [
+        p[f"width_{axis}_meters"]
+        for row in rows for p in row["predicates"] for axis in ("x", "y")
+        if p.get(f"width_{axis}_meters")
+    ]
     return {
         "semantics_version": SEMANTICS_VERSION,
         "rows": len(rows),
+        "spatial_width_meters": _quantiles(spatial_widths),
         "grid": settings.grid,
         "config_sha256": settings.sha256,
         "pools_sha256": rows[0]["pools_sha256"] if rows else None,

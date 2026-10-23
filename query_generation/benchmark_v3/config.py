@@ -118,6 +118,10 @@ class Settings:
         return float(self.v3["temporal_width"]["min_seconds"])
 
     @property
+    def spatial_min_width(self) -> float:
+        return float(self.v3["spatial_width"]["min_meters"])
+
+    @property
     def addon_distribution(self) -> Tuple[List[int], List[float]]:
         addons = self.v3["attribute_addons"]
         return [int(v) for v in addons["counts"]], [float(v) for v in addons["probabilities"]]
@@ -232,6 +236,11 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("attribute_addons counts and probabilities must align and sum to 1")
     if settings.temporal_min_seconds <= 0:
         raise ConfigError("temporal_width.min_seconds must be positive")
+    if settings.spatial_min_width <= 0:
+        raise ConfigError("spatial_width.min_meters must be positive")
+    for key in ("temporal_width", "spatial_width"):
+        if settings.v3[key].get("distribution") != "log_uniform":
+            raise ConfigError(f"{key}.distribution must be log_uniform")
     if not 0.0 <= settings.center_live_probability <= 1.0:
         raise ConfigError("center_live_probability must be in [0, 1]")
 

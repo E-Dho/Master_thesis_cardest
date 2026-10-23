@@ -2,7 +2,7 @@
   "name": "pol_exact_st_v3",
   "semantics_version": "pol_exact_st_v3",
   "base_config": "../pol_query_config.json",
-  "domain_overrides_source": "cluster check job 22321118 (2026-10-21), segments.extent; trips.trip_time equals the segment span",
+  "domain_overrides_source": "cluster check job 22321118 (segments.extent) and pilot pools job 22325198 (data_domains of every ordered attribute); trips.trip_time equals the segment span",
   "domain_overrides": {
     "segments.segment_geom": {
       "min_x": 739732.900565014,
@@ -17,6 +17,26 @@
     "trips.trip_time": {
       "min": "2019-07-01 05:25:00",
       "max": "2020-06-30 00:05:00"
+    },
+    "agents.age": {
+      "min": 18.0,
+      "max": 60.0
+    },
+    "agents.joviality": {
+      "min": 0.00012764266766163157,
+      "max": 0.9999897405352417
+    },
+    "agents.family_size": {
+      "min": 1,
+      "max": 3
+    },
+    "segments.segment_idx": {
+      "min": 0,
+      "max": 82
+    },
+    "trips.num_of_segments": {
+      "min": 1,
+      "max": 83
     }
   },
   "grid": {
@@ -27,6 +47,10 @@
   "temporal_width": {
     "distribution": "log_uniform",
     "min_seconds": 60
+  },
+  "spatial_width": {
+    "distribution": "log_uniform",
+    "min_meters": 10
   },
   "attribute_addons": {
     "applies_to": "multi_non_standard",
