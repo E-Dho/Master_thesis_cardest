@@ -1,0 +1,15 @@
+extends: learned_common.yaml.example
+experiment:
+  method_id: distjoin
+  variant_id: published_imdb_dynamic_sampler
+  display_name: DistJoin published IMDB
+source:
+  url: https://github.com/GIS-PuppetMaster/DistJoin.git
+  revision: 09908b91e9a42f29e2168a47831319d3236da022
+adapter:
+  type: distjoin
+  recipe:
+    sampler: upstream_dynamic_sampler
+    anpm: upstream_distjoin
+    join_mode: equality
+

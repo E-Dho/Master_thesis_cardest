@@ -162,12 +162,14 @@ def _manual_constructor_debug(
     import numpy as np
 
     from model.src.data.full_join_sampler import _pushd, _resolve_neurocard_package
+    from model.src.data.neurocard_schema import configured_neurocard_use_cols
 
     dataset = config["dataset"]
     neurocard_path = _resolve_neurocard_package(dataset.get("neurocard_path"))
     csv_directory = Path(dataset["csv_directory"]).resolve()
     sampler_batch_size = int(dataset.get("sampler_batch_size", dataset.get("sample_batch_size", 16384)))
     seed = int(dataset.get("sampler_seed", config.get("training", {}).get("seed", 0)))
+    use_cols = configured_neurocard_use_cols(dataset)
     if str(neurocard_path) not in sys.path:
         sys.path.insert(0, str(neurocard_path))
 
@@ -206,7 +208,7 @@ def _manual_constructor_debug(
             loaded = datasets.LoadImdb(
                 table,
                 data_dir=str(csv_directory) + "/",
-                use_cols=cfg["use_cols"],
+                use_cols=use_cols,
                 try_load_parsed=True,
             )
             loaded_tables.append(loaded)

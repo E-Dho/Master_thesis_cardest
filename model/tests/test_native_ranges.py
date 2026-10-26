@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from model.src.evaluation.metrics import q_error, q_error_floor_one
-from model.scripts.evaluate_job_light_queries import RawPredicate, build_normalized_token
+from model.scripts.evaluate_job_light_queries import (
+    RawPredicate,
+    build_normalized_token,
+    eval_query_native,
+)
 from model.src.predicates.operators import PredicateOp, PredicateToken
 from model.src.predicates.sets import ColumnPredicateSet
 from model.src.predicates.vocabulary import PredicateVocabularies
@@ -123,6 +127,27 @@ class NativeRangeNormalizationTest(unittest.TestCase):
             ],
         )
         self.assertEqual(ranged.token, PredicateToken.range(20, 50))
+
+    def test_evaluator_skips_all_values_range_before_predicate_set_validation(self) -> None:
+        metadata = ModelMetadata(
+            columns=(
+                ColumnMetadata("x", ColumnKind.DATA, (1, 2)),
+                ColumnMetadata("y", ColumnKind.DATA, (1, 2)),
+            ),
+            full_join_cardinality=4,
+        )
+        result = eval_query_native(
+            None,
+            None,
+            None,
+            metadata,
+            set(),
+            [
+                RawPredicate("x", ">=", 1, "x>=1"),
+                RawPredicate("y", "=", 99, "y=99"),
+            ],
+        )
+        self.assertEqual(result[0], "zero_due_to_missing_domain")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -10,10 +13,52 @@ from model.src.data.full_join_sampler import (
     SyntheticFullJoinSampleSource,
     canonicalize_fanout_value,
 )
+from model.src.data.neurocard_schema import (
+    configured_neurocard_use_cols,
+    scoped_neurocard_prepare_cache_bypass,
+    validate_neurocard_manifest_projection,
+)
+from model.src.data.sample_sources import sample_source_from_config
 from model.src.predicates.vocabulary import PredicateVocabularies
 
 
 class SamplerMetadataTest(unittest.TestCase):
+    def test_preparation_cache_bypass_is_scoped_and_restores_rebuild(self) -> None:
+        original_prepare_calls = []
+        cache_hits = iter((True, False))
+        prepare_utils = SimpleNamespace(
+            check_required_files=lambda _spec: next(cache_hits),
+            prepare=lambda spec: original_prepare_calls.append(spec),
+        )
+        factorized_sampler = SimpleNamespace(prepare_utils=prepare_utils)
+        spec_a = object()
+        spec_b = object()
+        original_prepare = prepare_utils.prepare
+
+        with scoped_neurocard_prepare_cache_bypass(factorized_sampler, spec_a) as cache_hit:
+            self.assertTrue(cache_hit)
+            factorized_sampler.prepare_utils.prepare(spec_a)
+        self.assertEqual(original_prepare_calls, [])
+        self.assertIs(factorized_sampler.prepare_utils.prepare, original_prepare)
+
+        with scoped_neurocard_prepare_cache_bypass(factorized_sampler, spec_b) as cache_hit:
+            self.assertFalse(cache_hit)
+            factorized_sampler.prepare_utils.prepare(spec_b)
+        self.assertEqual(original_prepare_calls, [spec_b])
+
+    def test_preparation_cache_bypass_restores_prepare_after_exception(self) -> None:
+        original_prepare = lambda _spec: None
+        prepare_utils = SimpleNamespace(
+            check_required_files=lambda _spec: True,
+            prepare=original_prepare,
+        )
+        factorized_sampler = SimpleNamespace(prepare_utils=prepare_utils)
+
+        with self.assertRaisesRegex(RuntimeError, "constructor failed"):
+            with scoped_neurocard_prepare_cache_bypass(factorized_sampler, object()):
+                raise RuntimeError("constructor failed")
+        self.assertIs(factorized_sampler.prepare_utils.prepare, original_prepare)
+
     def test_metadata_records_separate_input_and_output_bins(self) -> None:
         source = SyntheticFullJoinSampleSource()
         vocabularies = PredicateVocabularies.from_metadata(source.metadata)
@@ -57,6 +102,8 @@ class SamplerMetadataTest(unittest.TestCase):
             "model/configs/job_light_duet_binary_native_anpm_20k_patience_3000.yaml",
             "model/configs/pol_50m_traj_dedup_single_anchor.yaml",
             "model/configs/pol_traj_dedup_importance_rare_smoke.yaml",
+            "model/configs/job_light_ranges_duet_binary_native_anpm_rare_auxiliary_smoke.yaml",
+            "model/configs/job_light_ranges_duet_binary_native_anpm_40k_rare_auxiliary.yaml",
         ):
             validate_config(load_simple_yaml(path))
 
@@ -101,6 +148,98 @@ class SamplerMetadataTest(unittest.TestCase):
         config["predicate_generation"]["equality_probability"] = 0.4
         with self.assertRaises(ValueError):
             validate_config(config)
+
+    def test_neurocard_column_projection_defaults_and_content_schema(self) -> None:
+        self.assertEqual(configured_neurocard_use_cols({}), "simple")
+        self.assertEqual(
+            configured_neurocard_use_cols({"use_cols": "content"}),
+            "content",
+        )
+        self.assertIsNone(configured_neurocard_use_cols({"use_cols": None}))
+        for mode in ("simple", "content", "multi", "full"):
+            self.assertEqual(configured_neurocard_use_cols({"use_cols": mode}), mode)
+        with self.assertRaisesRegex(ValueError, "dataset.use_cols"):
+            configured_neurocard_use_cols({"use_cols": "job_light_ranges"})
+
+        config = load_simple_yaml("model/configs/job_light_duet_binary_native_anpm_smoke.yaml")
+        config["dataset"]["use_cols"] = "content"
+        validate_config(config)
+        config["dataset"]["use_cols"] = "invalid"
+        with self.assertRaisesRegex(ValueError, "dataset.use_cols"):
+            validate_config(config)
+
+    def test_manifest_projection_mismatch_fails_before_sampler_startup(self) -> None:
+        validate_neurocard_manifest_projection(
+            {"neurocard_use_cols": "content"},
+            "content",
+        )
+        with self.assertRaisesRegex(ValueError, "projection does not match"):
+            validate_neurocard_manifest_projection(
+                {"neurocard_use_cols": "simple"},
+                "content",
+            )
+        with self.assertRaisesRegex(ValueError, "predates projection tracking"):
+            validate_neurocard_manifest_projection({}, "content")
+        validate_neurocard_manifest_projection({}, "simple")
+
+    def test_live_sampler_receives_configured_content_projection(self) -> None:
+        config = {
+            "dataset": {
+                "type": "neurocard_full_join",
+                "sampling_mode": "live",
+                "prepared_directory": "prepared",
+                "csv_directory": "csv",
+                "use_cols": "content",
+                "sampler_batch_size": 4096,
+                "sampler_seed": 7,
+            },
+            "factorization": {"enabled": False},
+            "rare_support": {"enabled": False},
+            "importance_sampling": {"enabled": False},
+        }
+        sentinel = object()
+        with patch(
+            "model.src.data.sample_sources.LiveNeuroCardFullJoinSampleSource",
+            return_value=sentinel,
+        ) as constructor:
+            self.assertIs(sample_source_from_config(config), sentinel)
+        constructor.assert_called_once_with(
+            Path("prepared"),
+            csv_directory=Path("csv"),
+            neurocard_path=None,
+            sampler_batch_size=4096,
+            seed=7,
+            startup_callback=None,
+            use_cols="content",
+        )
+
+    def test_fixture_sampler_receives_configured_content_projection(self) -> None:
+        config = {
+            "dataset": {
+                "type": "neurocard_full_join",
+                "sampling_mode": "fixture",
+                "prepared_directory": "prepared",
+                "use_cols": "content",
+            },
+            "factorization": {"enabled": False},
+            "rare_support": {"enabled": False},
+            "importance_sampling": {"enabled": False},
+        }
+        sentinel = object()
+        with patch(
+            "model.src.data.sample_sources.NeuroCardFullJoinSampleSource",
+            return_value=sentinel,
+        ) as constructor:
+            self.assertIs(sample_source_from_config(config), sentinel)
+        constructor.assert_called_once_with(
+            Path("prepared"),
+            sampling_mode="fixture",
+            trajectory_ids_path=None,
+            segment_ids_path=None,
+            trajectory_index_path=None,
+            preload_trajectory_index=False,
+            use_cols="content",
+        )
 
 
 if __name__ == "__main__":

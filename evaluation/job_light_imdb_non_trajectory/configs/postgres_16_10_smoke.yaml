@@ -1,0 +1,11 @@
+extends: postgres_16_10.yaml
+experiment:
+  variant_id: pg16_10_smoke_fixture
+  display_name: PostgreSQL 16.10 two-query smoke fixture
+artifacts:
+  pgdata: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/pgdata
+adapter:
+  dsn: dbname=imdb_joblight_smoke host=/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/socket port=55433
+  manifest_path: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/manifest.json
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin/python3.11 evaluation/job_light_imdb_non_trajectory/scripts/postgres_admin.py initialize --pg-bin /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin --pgdata /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/pgdata --socket-dir /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/socket --port 55433 --database imdb_joblight_smoke --manifest /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/manifest.json --csv-directory /work_beegfs/sunip956/master_thesis_trajectories/datasets/job --schema /work_beegfs/sunip956/master_thesis_trajectories/datasets/job/schematext.sql --indexes evaluation/job_light_imdb_non_trajectory/scripts/postgres_indexes.sql --row-limit 2
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin/python3.11 evaluation/job_light_imdb_non_trajectory/scripts/postgres_admin.py analyze --pg-bin /work_beegfs/sunip956/master_thesis_trajectories/envs/mobilitydb/bin --pgdata /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/pgdata --socket-dir /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/socket --port 55433 --database imdb_joblight_smoke --manifest /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/postgres_smoke/manifest.json

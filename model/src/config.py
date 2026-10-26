@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from model.src.data.neurocard_schema import configured_neurocard_use_cols
 from model.src.model.anpm import ANPMConfig
 from model.src.model.factorization import FactorizationConfig
 
@@ -106,6 +107,8 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("this milestone requires inference.progressive_sampling=false")
     model = config.get("model", {})
     dataset = config.get("dataset", {})
+    if dataset.get("type") == "neurocard_full_join":
+        configured_neurocard_use_cols(dataset)
     sampling_mode = str(dataset.get("sampling_mode", "fixture"))
     if sampling_mode not in {"fixture", "live", "materialized_large_sample"}:
         raise ValueError(

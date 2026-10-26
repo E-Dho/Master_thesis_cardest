@@ -1,0 +1,7 @@
+extends: foj_sampling_7m.yaml
+experiment:
+  variant_id: n10000
+  display_name: Unbiased FOJ sampling N=10,000
+adapter:
+  sample_size: 10000
+

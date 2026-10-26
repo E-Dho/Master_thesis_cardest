@@ -48,6 +48,7 @@ def sample_source_from_config(
                 ),
                 seed=int(dataset.get("sampler_seed", config.get("training", {}).get("seed", 0))),
                 startup_callback=startup_callback,
+                use_cols=dataset.get("use_cols", "simple"),
             )
         else:
             source = NeuroCardFullJoinSampleSource(
@@ -57,6 +58,7 @@ def sample_source_from_config(
                 segment_ids_path=dataset.get("segment_ids_path"),
                 trajectory_index_path=dataset.get("trajectory_index_path"),
                 preload_trajectory_index=bool(dataset.get("preload_trajectory_index", False)),
+                use_cols=dataset.get("use_cols", "simple"),
             )
     elif dataset_type == "pol_trajectory_full_join":
         if str(dataset.get("sampling_mode", "fixture")) == "live":

@@ -1,0 +1,20 @@
+extends: learned_common.yaml.example
+experiment:
+  method_id: mscn
+  variant_id: mscn_job_light_ranges_adapted
+  display_name: MSCN JOB-light-ranges adapted
+source:
+  url: https://github.com/andreaskipf/learnedcardinalities.git
+  revision: 50073283eacdea300d1dcd815c720f64e3d2d400
+adapter:
+  type: mscn
+  recipe:
+    training_queries: 100000
+    epochs: 100
+    sample_bits: 1000
+    batch_size: 1024
+    hidden_size: 256
+    operators: [=, <, >, <=, >=]
+    string_encoding: complete_domain_rank
+    test_disjoint: true
+
