@@ -164,8 +164,20 @@ def _check_row(row: Mapping[str, Any], position: int) -> None:
         raise WorkloadError(f"{where}: {row['category']['relation']} query with label {label_kind}")
 
 
+_EPOCH = datetime(1970, 1, 1)
+
+
 def _seconds(text: str) -> float:
-    return datetime.fromisoformat(str(text)).timestamp()
+    """Seconds since 1970-01-01 of a stored naive timestamp, without any time zone.
+
+    v3 timestamps are ``timestamp without time zone`` values compared as stored
+    (SEMANTICS.md section 1). ``datetime.timestamp()`` would interpret them in
+    the machine's local zone and add or drop an hour across a DST change.
+    """
+    value = datetime.fromisoformat(str(text))
+    if value.tzinfo is not None:
+        raise WorkloadError(f"v3 timestamps are naive; got {text!r}")
+    return (value - _EPOCH).total_seconds()
 
 
 class Domains:

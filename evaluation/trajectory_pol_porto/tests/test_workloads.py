@@ -128,6 +128,32 @@ class FeatureTest(unittest.TestCase):
             # clipped to the domain, so never longer than the bounds say
             self.assertLessEqual(record.features["interval_seconds"], expected + 1e-6)
 
+    def test_interval_length_ignores_the_machine_time_zone(self) -> None:
+        import os
+        import time
+
+        row = copy.deepcopy(next(r for r in benchmark_rows()
+                                 if r["category"]["key"] == "temporal.range.multi"))
+        predicate = next(p for p in row["predicates"] if p["kind"] == "temporal")
+        # across the 2020-03-29 DST change in Europe/Berlin
+        predicate["lower"], predicate["upper"] = "2020-03-28 12:00:00", "2020-03-30 12:00:00"
+        previous = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Europe/Berlin"
+            time.tzset()
+            from evaluation.trajectory_pol_porto.traj_eval.workloads import query_features
+
+            with_domains = query_features(row, self.domains)
+            without = query_features(row, None)
+        finally:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+        self.assertEqual(with_domains["interval_seconds"], 48 * 3600.0)
+        self.assertEqual(without["interval_seconds"], 48 * 3600.0)
+
     def test_statistics_and_query_index(self) -> None:
         stats = workload_statistics(self.records)
         self.assertEqual(stats["query_count"], 8 * SINGLE + 8 * MULTI)
