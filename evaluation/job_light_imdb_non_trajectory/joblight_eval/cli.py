@@ -1,124 +1,22 @@
+"""JOB-light evaluation CLI (the shared ``evaluation.eval_core.cli``).
+
+Usage is unchanged: ``python -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli ...``.
+"""
+
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
+from evaluation.eval_core.cli import build_parser as _build_parser
+from evaluation.eval_core.cli import main as _main
 
-from .config import load_experiment_config
-from .report import aggregate_runs, compare_aggregates, discover_latest_complete_runs
-from .runner import initialize_staged_run, run_seed, run_stage
+DESCRIPTION = "JOB-light baseline evaluation pipeline"
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="JOB-light baseline evaluation pipeline")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    run = subparsers.add_parser("run", help="prepare, build, evaluate, and summarize")
-    run.add_argument("--config", required=True, type=Path)
-    run.add_argument("--seed", action="append", type=int)
-    run.add_argument("--run-id")
-
-    for name in ("prepare", "smoke", "build", "evaluate", "summarize"):
-        stage = subparsers.add_parser(name, help=f"run only the {name} stage")
-        stage.add_argument("--config", required=True, type=Path)
-        stage.add_argument("--seed", required=True, type=int)
-        stage.add_argument("--run-directory", type=Path)
-        stage.add_argument("--run-id")
-
-    timing = subparsers.add_parser(
-        "time", help="profile-controlled timing of an evaluated run (no rebuild)"
-    )
-    timing.add_argument("--config", required=True, type=Path)
-    timing.add_argument("--seed", required=True, type=int)
-    timing.add_argument("--run-directory", required=True, type=Path)
-    timing.add_argument("--profile", required=True)
-    timing.add_argument(
-        "--allow-config-drift", action="append", default=[],
-        help="dotted config path that may differ from the accuracy run (repeatable)",
-    )
-    timing.add_argument(
-        "--allow-estimate-drift", action="store_true",
-        help="record but do not fail on estimate differences to the accuracy run",
-    )
-
-    aggregate = subparsers.add_parser("aggregate", help="aggregate complete seed runs")
-    aggregate.add_argument("--config", required=True, type=Path)
-    aggregate.add_argument("--run-directory", action="append", type=Path)
-    aggregate.add_argument("--output", type=Path)
-    aggregate.add_argument(
-        "--allow-hardware-mismatch", action="store_true",
-        help="aggregate seeds timed on different hardware (flagged in the report)",
-    )
-    compare = subparsers.add_parser("compare", help="compare method/variant aggregates")
-    compare.add_argument("--aggregate-json", action="append", required=True, type=Path)
-    compare.add_argument("--output", required=True, type=Path)
-    compare.add_argument(
-        "--allow-hardware-mismatch", action="store_true",
-        help="write the comparison although methods were timed on different "
-        "hardware; affected tables are marked NOT COMPARABLE",
-    )
-    return parser
+def build_parser():
+    return _build_parser(DESCRIPTION)
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if args.command == "compare":
-        compare_aggregates(
-            args.aggregate_json, args.output,
-            allow_hardware_mismatch=args.allow_hardware_mismatch,
-        )
-        print(args.output)
-        return 0
-    config = load_experiment_config(args.config)
-    if args.command == "run":
-        seeds = tuple(args.seed or config.seeds)
-        unknown = set(seeds) - set(config.seeds)
-        if unknown:
-            raise ValueError(f"seeds are not declared by config: {sorted(unknown)}")
-        paths = [run_seed(config, seed, run_id=args.run_id) for seed in seeds]
-        for path in paths:
-            print(path)
-        return 0
-
-    if args.command == "time":
-        if args.seed not in config.seeds:
-            raise ValueError(f"seed {args.seed} is not declared by config")
-        from .timing import run_timing_stage
-
-        print(
-            run_timing_stage(
-                config,
-                args.seed,
-                args.run_directory,
-                args.profile,
-                allow_config_drift=args.allow_config_drift,
-                allow_estimate_drift=args.allow_estimate_drift,
-            )
-        )
-        return 0
-
-    if args.command in {"prepare", "smoke", "build", "evaluate", "summarize"}:
-        if args.seed not in config.seeds:
-            raise ValueError(f"seed {args.seed} is not declared by config")
-        if args.command == "prepare" and args.run_directory is None:
-            run_directory = initialize_staged_run(config, args.seed, args.run_id)
-        elif args.run_directory is not None:
-            run_directory = args.run_directory
-        else:
-            raise ValueError(f"{args.command} requires --run-directory")
-        run_stage(config, args.seed, run_directory, args.command)
-        print(run_directory)
-        return 0
-
-    base = (
-        config.results_root
-        / config.experiment_id
-        / config.method_id
-        / config.variant_id
-    )
-    paths = args.run_directory or discover_latest_complete_runs(base, config.seeds)
-    output = args.output or base / "aggregate"
-    aggregate_runs(paths, output, allow_hardware_mismatch=args.allow_hardware_mismatch)
-    print(output)
-    return 0
+    return _main(argv, description=DESCRIPTION)
 
 
 if __name__ == "__main__":

@@ -226,6 +226,9 @@ def aggregate_runs(
             else None
         )
         aggregate["workloads"][workload_id] = workload_result
+        extension = _aggregate_extension(summaries, workload_id)
+        if extension is not None:
+            workload_result["extension"] = extension
         for profile, result in workload_result["standardized_timing"].items():
             status = hardware_status(result)
             if result.get("available") and status != "consistent":
@@ -293,6 +296,7 @@ def aggregate_runs(
     (output_directory / "comparison.md").write_text(
         _markdown_table(aggregate), encoding="utf-8"
     )
+    _write_extension_tables(output_directory, [aggregate], "Stratified accuracy")
     return aggregate
 
 
@@ -381,7 +385,54 @@ def compare_aggregates(
     (output_directory / "comparison.md").write_text(
         _multi_method_markdown(rows, mismatches), encoding="utf-8"
     )
+    _write_extension_tables(output_directory, aggregates, "Stratified accuracy comparison")
     return comparison
+
+
+def _aggregate_extension(summaries: list[dict[str, Any]], workload_id: str) -> dict[str, Any] | None:
+    """Seed aggregate of a format's ``extension`` summary block, if it has one."""
+    extensions = [summary["workloads"][workload_id].get("extension") for summary in summaries]
+    if all(extension is None for extension in extensions):
+        return None
+    if any(extension is None for extension in extensions):
+        raise ValueError(f"only some seed summaries carry an extension block for {workload_id}")
+    schemas = {extension.get("schema") for extension in extensions}
+    if len(schemas) != 1:
+        raise ValueError(f"seed summaries mix extension schemas {sorted(map(str, schemas))}")
+    from .plugins import summary_extension_handler
+
+    return summary_extension_handler(schemas.pop()).aggregate(extensions)
+
+
+def _write_extension_tables(
+    output_directory: Path, aggregates: list[dict[str, Any]], title: str
+) -> None:
+    """``<schema>.csv`` / ``.md`` for aggregated extension blocks (nothing if none)."""
+    from .plugins import summary_extension_handler
+
+    by_schema: dict[str, list[tuple[dict[str, Any], str, dict[str, Any]]]] = {}
+    for aggregate in aggregates:
+        identity = {
+            key: aggregate.get(key)
+            for key in ("experiment_id", "method_id", "variant_id", "display_name", "protocol")
+        }
+        for workload_id, workload in sorted(aggregate["workloads"].items()):
+            extension = workload.get("extension")
+            if extension is not None:
+                by_schema.setdefault(extension["schema"], []).append(
+                    (identity, workload_id, extension)
+                )
+    for schema, entries in sorted(by_schema.items()):
+        handler = summary_extension_handler(schema)
+        rows = [
+            row
+            for identity, workload_id, extension in entries
+            for row in handler.rows(identity, workload_id, extension)
+        ]
+        _write_csv(output_directory / f"{schema}.csv", rows)
+        (output_directory / f"{schema}.md").write_text(
+            handler.markdown(title, entries), encoding="utf-8"
+        )
 
 
 HARDWARE_STATUS_LABELS = {"undeclared": "UNDECLARED", "mixed": "MIXED across seeds"}

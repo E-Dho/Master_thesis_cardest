@@ -40,6 +40,8 @@ class WorkloadConfig:
     queries_jsonl: Path | None = None
     #: row selection inside the workload file, as sorted ``(key, value)`` pairs
     select: tuple[tuple[str, Any], ...] = ()
+    #: further format-specific settings, as sorted ``(key, value)`` pairs
+    options: tuple[tuple[str, Any], ...] = ()
 
     @property
     def queries_file(self) -> Path:

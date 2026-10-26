@@ -20,7 +20,8 @@ model = [
 
 [project.scripts]
 joblight-eval = "evaluation.job_light_imdb_non_trajectory.joblight_eval.cli:main"
+traj-eval = "evaluation.trajectory_pol_porto.traj_eval.cli:main"
 
 [tool.pytest.ini_options]
-testpaths = ["query_generation", "model/tests", "evaluation/eval_core/tests", "evaluation/job_light_imdb_non_trajectory/tests"]
+testpaths = ["query_generation", "model/tests", "evaluation/eval_core/tests", "evaluation/job_light_imdb_non_trajectory/tests", "evaluation/trajectory_pol_porto/tests"]
 python_files = ["test_*.py"]

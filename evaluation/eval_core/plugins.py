@@ -12,6 +12,11 @@ that exposes three module-level names:
 ``IN_PROCESS_TIMING_ADAPTERS``
     adapter types that measure latency in-process and therefore need no
     ``adapter.timing_commands``.
+``SUMMARY_EXTENSIONS`` (optional)
+    ``{schema: handler}`` for the ``extension`` block a workload format may add
+    to ``summary.json``; the handler aggregates it across seeds
+    (``aggregate``), turns it into table rows (``rows``) and Markdown
+    (``markdown``).
 
 Plugins are imported lazily on first use, so importing the core never pulls in
 a pipeline (and the IMDB pipeline keeps working without the trajectory one).
@@ -89,3 +94,11 @@ def in_process_timing_adapters() -> frozenset[str]:
     for module in _plugins():
         names.update(getattr(module, "IN_PROCESS_TIMING_ADAPTERS", ()))
     return frozenset(names)
+
+
+def summary_extension_handler(schema: str) -> Any:
+    handlers = _merged("SUMMARY_EXTENSIONS")
+    try:
+        return handlers[schema]
+    except KeyError as exc:
+        raise ValueError(f"no plugin handles summary extension schema {schema!r}") from exc
