@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from .records import FilterPredicate, JoinPredicate, QueryRecord, TableRef
+
+if TYPE_CHECKING:  # the legacy DeepDB (Python 3.8) bridges import this module
+    from evaluation.eval_core.config import WorkloadConfig
 
 
 _JOIN_RE = re.compile(r"^\s*([^\s=<>!]+)\s*(=|<=|>=|<|>)\s*([^\s=<>!]+)\s*$")
@@ -279,3 +282,70 @@ def _looks_like_identifier(value: str) -> bool:
     return not text.startswith("'") and bool(
         re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*", text)
     )
+
+
+class JobLightCsvFormat:
+    """``tables#joins#filters#truth`` CSV workloads (JOB-light, JOB-light-ranges).
+
+    Reproduces the pre-extraction behaviour of the evaluation core exactly:
+    same required keys, same line-count check, same metadata keys, and the
+    ``{queries_csv}``/``{queries_sql}`` placeholders for external commands.
+    """
+
+    name = "joblight_csv"
+
+    def parse_config(self, workload_id, value, resolve_path) -> WorkloadConfig:
+        from evaluation.eval_core.config import WorkloadConfig
+
+        return WorkloadConfig(
+            workload_id=workload_id,
+            queries_csv=resolve_path(value.get("queries_csv")),
+            queries_sql=(
+                None if value.get("queries_sql") in (None, "") else resolve_path(value["queries_sql"])
+            ),
+            expected_query_count=(
+                None
+                if value.get("expected_query_count") in (None, "")
+                else int(value["expected_query_count"])
+            ),
+        )
+
+    def validate(self, workload: WorkloadConfig) -> None:
+        if not workload.queries_csv.exists():
+            raise FileNotFoundError(workload.queries_csv)
+        if workload.expected_query_count is not None:
+            observed = sum(
+                bool(line.strip())
+                for line in workload.queries_csv.read_text(encoding="utf-8").splitlines()
+            )
+            if observed != workload.expected_query_count:
+                raise ValueError(
+                    f"{workload.workload_id} expected {workload.expected_query_count} "
+                    f"queries, observed {observed}"
+                )
+
+    def load(self, workload: WorkloadConfig) -> list[QueryRecord]:
+        return load_workload(workload.queries_csv, workload.workload_id)
+
+    def metadata(self, workload: WorkloadConfig, queries) -> dict[str, Any]:
+        return {
+            "queries_csv": str(workload.queries_csv),
+            "queries_csv_sha256": sha256_file(workload.queries_csv),
+            "queries_sql": str(workload.queries_sql) if workload.queries_sql else None,
+            "queries_sql_sha256": (
+                sha256_file(workload.queries_sql) if workload.queries_sql else None
+            ),
+            **workload_statistics(list(queries)),
+        }
+
+    def placeholders(self, workload: WorkloadConfig) -> dict[str, str]:
+        return {
+            "queries_csv": str(workload.queries_csv),
+            "queries_sql": str(workload.queries_sql or ""),
+        }
+
+    def summary_extension(self, workload, queries, predictions):
+        return None
+
+
+JOBLIGHT_CSV_FORMAT = JobLightCsvFormat()

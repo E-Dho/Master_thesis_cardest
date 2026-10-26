@@ -30,6 +30,18 @@ The FOJ adapter requires the immutable upstream NeuroCard sampler cache by
 default. Missing JCT or primary-key index files fail immediately instead of
 silently starting Ray-based cache construction inside an evaluation job.
 
+## Code layout
+
+The dataset-agnostic parts of this pipeline (config loading, run directories,
+metrics, timing profiles and guard, aggregation and comparison, the adapter
+base classes and the subprocess adapter) live in `evaluation/eval_core/` and
+are shared with the trajectory pipeline. The old module paths under
+`joblight_eval/` (`config`, `runner`, `report`, `metrics`, `timing`,
+`timing_guard`, ...) are aliases of those modules, so commands, configs,
+imports and patches keep working unchanged. This pipeline contributes its
+adapters and the `joblight_csv` workload format through
+`joblight_eval/plugin.py` (see `evaluation/eval_core/plugins.py`).
+
 ## Running the pipeline
 
 Every YAML config supplies a stable `experiment_id`, `method_id`, `variant_id`,
@@ -413,7 +425,7 @@ apart between processes before this change.
    `timing_only_config_updates` in the run manifest.
 3. The runner exports the profile's thread-limit environment before the
    measuring process starts. The measuring process (bridge, eval runner, or the
-   in-process PostgreSQL/FOJ adapter) loads `joblight_eval/timing_guard.py`,
+   in-process PostgreSQL/FOJ adapter) loads `evaluation/eval_core/timing_guard.py`,
    re-applies the limits (threadpoolctl, PyTorch intra/inter-op), and verifies
    before and after the timed region. Hard checks: thread-limit variables,
    threadpoolctl BLAS pools, PyTorch threads, CPU affinity in physical cores,

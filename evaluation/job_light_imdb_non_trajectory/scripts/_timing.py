@@ -2,7 +2,7 @@
 
 Bridges run in isolated interpreters (DeepDB's Python 3.8 stack, the
 PyTorch environments) where the evaluation package is not necessarily
-importable; ``joblight_eval/timing_guard.py`` depends only on the standard
+importable; ``evaluation/eval_core/timing_guard.py`` depends only on the standard
 library, so it is loaded directly from its file.
 """
 
@@ -19,7 +19,7 @@ MODULE_NAME = "joblight_timing_guard"
 def load_timing_guard():
     if MODULE_NAME in sys.modules:
         return sys.modules[MODULE_NAME]
-    path = Path(__file__).resolve().parents[1] / "joblight_eval" / "timing_guard.py"
+    path = Path(__file__).resolve().parents[2] / "eval_core" / "timing_guard.py"
     spec = importlib.util.spec_from_file_location(MODULE_NAME, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

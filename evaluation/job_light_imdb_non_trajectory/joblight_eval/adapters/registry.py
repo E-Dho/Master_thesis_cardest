@@ -16,17 +16,20 @@ from .postgres import PostgresAdapter
 from ..config import ExperimentConfig
 
 
+#: IMDB-specific adapter types; the generic ``external`` adapter comes from the core.
+ADAPTERS: dict[str, type[Adapter]] = {
+    "postgres": PostgresAdapter,
+    "foj_sampling": FojSamplingAdapter,
+    "mscn": MscnAdapter,
+    "deepdb": DeepDbAdapter,
+    "neurocard": NeuroCardAdapter,
+    "distjoin": DistJoinAdapter,
+    "own_model": OwnModelAdapter,
+}
+
+
 def create_adapter(config: ExperimentConfig, seed: int, run_directory: Path) -> Adapter:
-    adapters: dict[str, type[Adapter]] = {
-        "postgres": PostgresAdapter,
-        "foj_sampling": FojSamplingAdapter,
-        "external": ExternalCommandAdapter,
-        "mscn": MscnAdapter,
-        "deepdb": DeepDbAdapter,
-        "neurocard": NeuroCardAdapter,
-        "distjoin": DistJoinAdapter,
-        "own_model": OwnModelAdapter,
-    }
+    adapters: dict[str, type[Adapter]] = {"external": ExternalCommandAdapter, **ADAPTERS}
     try:
         adapter_type = adapters[config.adapter_type]
     except KeyError as exc:
