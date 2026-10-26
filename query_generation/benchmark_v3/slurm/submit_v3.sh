@@ -3,6 +3,7 @@
 #   PILOT=1 ./submit_v3.sh        10 queries per category
 #   SKIP_POOLS=1 ./submit_v3.sh   resume generation after a deadline stop
 #   STAGE=check ./submit_v3.sh    only the Phase 1 cluster check
+#   STAGE=verify ./submit_v3.sh   only (re)run the verification of a merged run
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
@@ -13,6 +14,11 @@ submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }
 
 if [ "${STAGE:-all}" = "check" ]; then
   echo "cluster_check_job=$(submit --export="$export_vars" "$SCRIPT_DIR/run_v3_cluster_check.sbatch")"
+  exit 0
+fi
+
+if [ "${STAGE:-all}" = "verify" ]; then
+  echo "verify_job=$(submit --export="$export_vars" "$SCRIPT_DIR/run_v3_verify.sbatch")"
   exit 0
 fi
 

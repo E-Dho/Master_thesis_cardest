@@ -79,9 +79,19 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    Finished categories return immediately; the others resume after their
    last durable row without repeating any label query.
 
+   Verification checks 25 queries per category (400 in total), writes each
+   result to `verify_report.json.results.jsonl` immediately and stops cleanly
+   before its 24 h limit (exit 75). To continue or repeat only the
+   verification of a merged run:
+
+   ```bash
+   REPO_ROOT=$PWD STAGE=verify query_generation/benchmark_v3/slurm/submit_v3.sh
+   ```
+
 Outputs in `$MOBILITYDB_ROOT/query_runs/<RUN_LABEL>/`: `pools.json`,
 `categories/<category>.{accepted,rejected}.jsonl` and `.summary.json`,
-`benchmark.jsonl`, `benchmark_summary.json`, `verify_report.json`.
+`benchmark.jsonl`, `benchmark_summary.json`, `verify_report.json` and
+`verify_report.json.results.jsonl`.
 
 ## Locally
 

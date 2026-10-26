@@ -17,8 +17,10 @@ unavailable.
 
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from query_generation.benchmark_v3 import synthetic
 from query_generation.benchmark_v3.backends import SqlBackend
@@ -28,7 +30,7 @@ from query_generation.benchmark_v3.generate import generate_category
 from query_generation.benchmark_v3.merge import merge
 from query_generation.benchmark_v3.numpy_backend import NumpyBackend
 from query_generation.benchmark_v3.sampler import Sampler
-from query_generation.benchmark_v3.verify import Fetcher, verify_record, summarize
+from query_generation.benchmark_v3.verify import Fetcher, run_verification, stratified_sample, summarize, verify_record
 
 try:
     import duckdb
@@ -134,6 +136,63 @@ class DuckDbEndToEnd(unittest.TestCase):
                 positive += expected > 0
         self.assertEqual(checked, 8 * 40)
         self.assertGreater(positive, 200)
+
+    def _merged_rows(self):
+        if not hasattr(type(self), "_rows_cache"):
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp)
+                for category in self.settings.categories():
+                    generate_category(self.settings, self.pools, category, base_seed=5,
+                                      count_fn=self.sql.count, output_dir=out,
+                                      progress_interval=0, log=lambda m: None)
+                type(self)._rows_cache = merge(self.settings, out)["rows"]
+        return self._rows_cache
+
+    def test_sample_is_interleaved_and_exact_per_category(self):
+        rows = self._merged_rows()
+        sample = stratified_sample(rows, per_category=3, seed=1)
+        self.assertEqual(len(sample), 16 * 3)
+        first_round = [row["category"]["key"] for row in sample[:16]]
+        self.assertEqual(len(set(first_round)), 16, "every category appears once per round")
+        self.assertEqual(sample, stratified_sample(list(reversed(rows)), per_category=3, seed=1))
+
+    def test_resume_deadline_and_binding(self):
+        rows = self._merged_rows()
+        binding = {"benchmark_sha256": "x", "per_category": 2, "seed": 1}
+        quiet = dict(log=lambda m: None, per_category=2, seed=1, max_rows=10**7)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.jsonl"
+            results, finished = run_verification(self.settings, self.session, rows, results_path=path,
+                                                 binding=binding, deadline=time.time() - 1, **quiet)
+            self.assertEqual((results, finished), ([], False))
+            full, finished = run_verification(self.settings, self.session, rows, results_path=path,
+                                              binding=binding, **quiet)
+            self.assertTrue(finished)
+            self.assertEqual(len(full), 32)
+            # drop the last durable result and resume: only that query is verified again
+            lines = path.read_text().splitlines()
+            path.write_text("\n".join(lines[:-1]) + "\n")
+            calls = []
+            with mock.patch("query_generation.benchmark_v3.verify.verify_record",
+                            side_effect=lambda *a: calls.append(a[3]["query_id"]) or verify_record(*a)):
+                resumed, finished = run_verification(self.settings, self.session, rows, results_path=path,
+                                                     binding=binding, **quiet)
+            self.assertTrue(finished)
+            self.assertEqual(calls, [full[-1]["query_id"]])
+            self.assertEqual([r["query_id"] for r in resumed], [r["query_id"] for r in full])
+            with self.assertRaises(SystemExit):
+                run_verification(self.settings, self.session, rows, results_path=path,
+                                 binding=dict(binding, seed=2), **quiet)
+
+    def test_row_limit_skips_numpy_but_not_postgis(self):
+        rows = [r for r in self._merged_rows() if r["category"]["dimension"] in ("spatial", "spatio_temporal")]
+        fetcher = Fetcher(self.settings, self.session, max_rows=1)
+        results = [verify_record(self.settings, fetcher, self.session, row) for row in rows]
+        summary = summarize(results)
+        self.assertEqual(summary["postgis_checked"], len(rows))
+        self.assertEqual(summary["postgis_mismatches"], [])
+        self.assertGreater(summary["numpy_skipped"], 0)
+        self.assertTrue(all("postgis_seconds" in r for r in results))
 
     def test_data_domains_and_violations(self):
         domains = data_domains(self.settings, self.session)

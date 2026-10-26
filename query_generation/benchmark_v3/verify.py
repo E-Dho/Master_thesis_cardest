@@ -6,7 +6,14 @@ the candidate rows with prefilters that are implied by the predicates (so they
 cannot drop a true match), evaluates the predicates with the numpy reference
 (``exact.py``), and demands exact agreement with the stored label. Multi
 queries are also recounted with a second SQL formulation (``EXISTS`` instead
-of ``COUNT(DISTINCT ...)``). Diagnostics per query:
+of ``COUNT(DISTINCT ...)``). The sample is ``--per-category`` seeded queries per category, interleaved
+across categories. Every result is appended to a JSONL file as soon as it is
+computed, so an interrupted job resumes without repeating work; with
+``--deadline-seconds`` the job stops cleanly (exit 75). The numpy recount is
+only done when the implied prefilter yields at most ``--max-rows`` rows
+(default 250,000); wider queries are covered by the in-database recounts.
+
+Diagnostics per query:
 
 Every sampled spatial or spatio-temporal query is additionally recounted in
 the database with an independent formulation (``postgis_sql``): PostGIS
@@ -14,6 +21,13 @@ the database with an independent formulation (``postgis_sql``): PostGIS
 the segment is first cut to the query interval by linear interpolation and the
 resulting sub-segment is tested with ``ST_Intersects``. This covers the wide
 queries whose candidate rows are too many for the numpy recount.
+
+The sample is ``--per-category`` seeded queries per category, interleaved
+across categories. Every result is appended to a JSONL file as soon as it is
+computed, so an interrupted job resumes without repeating work; with
+``--deadline-seconds`` the job stops cleanly (exit 75). The numpy recount is
+only done when the implied prefilter yields at most ``--max-rows`` rows
+(default 250,000); wider queries are covered by the in-database recounts.
 
 Diagnostics per query:
 
@@ -27,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import random
 import sys
@@ -37,7 +52,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from query_generation.generate_pol_segment_coupled_benchmark import write_json_atomic
+from query_generation.generate_pol_segment_coupled_benchmark import (
+    append_jsonl,
+    load_jsonl_recover_trailing_write,
+    write_json_atomic,
+)
 
 from . import exact
 from .numpy_backend import JOIN_CONDITION, NumpyBackend
@@ -45,6 +64,7 @@ from .config import Settings, load_settings
 from .query_model import envelope_sql, from_clause, predicate_sql, ts_sql, window_of
 
 SPATIAL_KINDS = {"spatial", "spatio_temporal"}
+EXIT_DEADLINE = 75
 
 
 def _epoch_us(expression: str) -> str:
@@ -96,7 +116,7 @@ class Fetcher:
         self.join_columns = _join_columns(settings)
         self._agents: Optional[Dict[str, np.ndarray]] = None
 
-    def _select(self, table_id: str, extra: List[Tuple[str, str]], where: str, params=None):
+    def _select(self, table_id: str, extra: List[Tuple[str, str]], where: str, params=None, limit: Optional[int] = None):
         table = self.settings.table(table_id)
         alias = table["alias"]
         columns = [(col, f"{alias}.{col}") for col in sorted(self.join_columns[table_id])]
@@ -104,12 +124,13 @@ class Fetcher:
         sql = (
             f"SELECT {', '.join(expr for _, expr in columns)} FROM {table['name']} {alias}"
             + (f" WHERE {where}" if where else "")
+            + (f" LIMIT {int(limit)}" if limit is not None else "")
         )
         return _to_arrays([name for name, _ in columns], self.session.rows(sql, params))
 
-    def _count(self, table_id: str, where: str) -> int:
-        table = self.settings.table(table_id)
-        return int(self.session.scalar(f"SELECT count(*) FROM {table['name']} {table['alias']} WHERE {where}"))
+    @staticmethod
+    def _size(columns: Dict[str, np.ndarray]) -> int:
+        return len(next(iter(columns.values()))) if columns else 0
 
     def fetch(self, record: Dict[str, Any]) -> Tuple[Optional[Dict[str, Dict[str, np.ndarray]]], List[str], str]:
         """Returns (data, tables to evaluate, note); data is None when skipped."""
@@ -137,9 +158,6 @@ class Fetcher:
             if not prefilter:
                 return None, evaluated, "no implied segment prefilter"
             where = " AND ".join(prefilter)
-            candidates = self._count(seg.table, where)
-            if candidates > self.max_rows:
-                return None, evaluated, f"{candidates} candidate segments exceed --max-rows"
             extra = [(key, seg.columns[key]) for key in ("sx", "sy", "ex", "ey")]
             extra += [("ts", _epoch_us(seg.columns["ts"])), ("te", _epoch_us(seg.columns["te"]))]
             extra += [(f"{seg.temporal_attribute}.start", _epoch_us(seg.columns["ts"])),
@@ -147,7 +165,10 @@ class Fetcher:
             for number, p in enumerate(p for p in seg_predicates if p["kind"] in SPATIAL_KINDS):
                 window = (p["min_x"], p["min_y"], p["max_x"], p["max_y"])
                 extra.append((f"__st_intersects_{number}", f"ST_Intersects({seg.geometry_expression}, {envelope_sql(settings, window)})"))
-            data[seg.table] = self._select(seg.table, extra, where)
+            # LIMIT max_rows + 1 tells "too many" apart without a separate COUNT scan.
+            data[seg.table] = self._select(seg.table, extra, where, limit=self.max_rows + 1)
+            if self._size(data[seg.table]) > self.max_rows:
+                return None, evaluated, f"more than {self.max_rows} candidate segments"
 
         entity = settings.entity_table
         if entity in tables:
@@ -166,10 +187,9 @@ class Fetcher:
                 if temporal[0].get("lower") is not None:
                     prefilter.append(f"{attr['end_expression']} >= {ts_sql(temporal[0]['lower'])}")
                 where = " AND ".join(prefilter)
-                candidates = self._count(entity, where)
-                if candidates > self.max_rows:
-                    return None, evaluated, f"{candidates} candidate trips exceed --max-rows"
-                data[entity] = self._select(entity, [], where)
+                data[entity] = self._select(entity, [], where, limit=self.max_rows + 1)
+                if self._size(data[entity]) > self.max_rows:
+                    return None, evaluated, f"more than {self.max_rows} candidate trips"
 
         for table_id in tables:
             if table_id in data or table_id not in evaluated:
@@ -278,12 +298,17 @@ def verify_record(settings: Settings, fetcher: Optional[Fetcher], session, recor
     }
     started = time.perf_counter()
     if record["category"]["relation"] == "multi":
+        step = time.perf_counter()
         result["exists_count"] = int(session.scalar(exists_sql(settings, record)))
         result["exists_ok"] = result["exists_count"] == record["cardinality"]
+        result["exists_seconds"] = time.perf_counter() - step
     if any(p["kind"] in SPATIAL_KINDS for p in record["predicates"]):
+        step = time.perf_counter()
         result["postgis_count"] = int(session.scalar(postgis_sql(settings, record)))
         result["postgis_ok"] = result["postgis_count"] == record["cardinality"]
+        result["postgis_seconds"] = time.perf_counter() - step
     if record["category"]["dimension"] != "standard" and fetcher is not None:
+        step = time.perf_counter()
         data, evaluated, note = fetcher.fetch(record)
         result["numpy_note"] = note
         if data is not None:
@@ -308,22 +333,73 @@ def verify_record(settings: Settings, fetcher: Optional[Fetcher], session, recor
                     if p["kind"] == "spatio_temporal":
                         p["kind"] = "spatio_temporal_decoupled"
                 result["decoupled_count"] = backend.count(decoupled)
+        result["numpy_seconds"] = time.perf_counter() - step
     result["seconds"] = time.perf_counter() - started
     return result
 
 
-def stratified_sample(rows: List[Dict[str, Any]], per_category: int, seed: int):
+def stratified_sample(rows: List[Dict[str, Any]], per_category: int, seed: int) -> List[Dict[str, Any]]:
+    """``per_category`` seeded rows per category, interleaved across categories.
+
+    Interleaving means an interrupted run still covers every category evenly.
+    """
+
     by_category: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_category[row["category"]["key"]].append(row)
-    sample = []
+    picked = []
     for key in sorted(by_category):
-        items = list(by_category[key])
+        items = sorted(by_category[key], key=lambda row: row["query_id"])
         random.Random(f"verify:{seed}:{key}").shuffle(items)
-        sample.append((key, items))
-    # Shuffled candidates per category; the caller stops after per_category
-    # verified rows (or 4 x per_category tries, when many exceed --max-rows).
-    return sample
+        picked.append(items[:per_category])
+    order = []
+    for position in range(max((len(items) for items in picked), default=0)):
+        order.extend(items[position] for items in picked if position < len(items))
+    return order
+
+
+def run_verification(
+    settings: Settings,
+    session,
+    rows: List[Dict[str, Any]],
+    *,
+    results_path: Path,
+    binding: Dict[str, Any],
+    per_category: int,
+    seed: int,
+    max_rows: int,
+    deadline: Optional[float] = None,
+    log=lambda message: print(message, flush=True),
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Verify the sample, appending every result durably; resumes from ``results_path``."""
+
+    stored = load_jsonl_recover_trailing_write(results_path)
+    if stored:
+        header = stored[0].get("binding")
+        if header != binding:
+            raise SystemExit(f"{results_path} belongs to a different verification run; use a new --results path")
+        results = stored[1:]
+    else:
+        append_jsonl(results_path, {"binding": binding})
+        results = []
+    done = {result["query_id"] for result in results}
+    sample = stratified_sample(rows, per_category, seed)
+    fetcher = Fetcher(settings, session, max_rows)
+    for number, record in enumerate(sample, start=1):
+        if record["query_id"] in done:
+            continue
+        if deadline is not None and time.time() >= deadline:
+            log(f"deadline reached after {len(results)}/{len(sample)} queries; resubmit to resume")
+            return results, False
+        result = verify_record(settings, fetcher, session, record)
+        append_jsonl(results_path, result)
+        results.append(result)
+        failed = [name for name in ("numpy_ok", "exists_ok", "postgis_ok") if result.get(name) is False]
+        log(
+            f"{len(results)}/{len(sample)} {record['query_id']} {record['category']['key']}: "
+            f"{'MISMATCH ' + ','.join(failed) if failed else 'ok'} ({result['seconds']:.0f} s)"
+        )
+    return results, True
 
 
 def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -356,9 +432,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True)
     parser.add_argument("--benchmark", required=True)
     parser.add_argument("--report", required=True)
+    parser.add_argument("--results", help="durable per-query results (default: <report>.results.jsonl)")
     parser.add_argument("--per-category", type=int, default=25)
-    parser.add_argument("--max-rows", type=int, default=2_000_000)
+    parser.add_argument("--max-rows", type=int, default=250_000,
+                        help="numpy recount only when the implied prefilter yields at most this many rows")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--deadline-seconds", type=float, help="stop cleanly after this many seconds (exit 75)")
     parser.add_argument("--single-count", type=int)
     parser.add_argument("--multi-count", type=int)
     parser.add_argument("--host")
@@ -373,9 +452,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = build_parser().parse_args(argv)
     settings = load_settings(Path(args.config), single_count=args.single_count, multi_count=args.multi_count)
-    with open(args.benchmark, encoding="utf-8") as handle:
+    benchmark = Path(args.benchmark)
+    with benchmark.open(encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
-    results: List[Dict[str, Any]] = []
+    report_path = Path(args.report)
+    results_path = Path(args.results) if args.results else Path(str(report_path) + ".results.jsonl")
+    binding = {
+        "benchmark_sha256": hashlib.sha256(benchmark.read_bytes()).hexdigest(),
+        "per_category": args.per_category,
+        "seed": args.seed,
+    }
+    deadline = time.time() + args.deadline_seconds if args.deadline_seconds else None
     with SqlSession(args.host, args.port, args.dbname, args.user) as session:
         entity = settings.table(settings.entity_table)
         seg = settings.table(settings.segments.table)
@@ -387,23 +474,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         if orphan_trips:
             print(f"{orphan_trips} trips have no segments; numpy recount assumptions do not hold", file=sys.stderr)
             return 2
-        fetcher = Fetcher(settings, session, args.max_rows)
-        for key, candidates in stratified_sample(rows, args.per_category, args.seed):
-            checked = 0
-            for tries, record in enumerate(candidates):
-                if checked >= args.per_category or tries >= 4 * args.per_category:
-                    break
-                result = verify_record(settings, fetcher, session, record)
-                results.append(result)
-                if result.get("numpy_note") in (None, "ok"):
-                    checked += 1
-            print(f"{key}: verified {checked}", flush=True)
-    report = {"summary": summarize(results), "results": results}
-    write_json_atomic(Path(args.report), report)
-    print(json.dumps(report["summary"], indent=2))
-    summary = report["summary"]
-    failed = summary["numpy_mismatches"] or summary["exists_mismatches"] or summary["postgis_mismatches"]
-    return 1 if failed else 0
+        results, finished = run_verification(
+            settings, session, rows,
+            results_path=results_path, binding=binding,
+            per_category=args.per_category, seed=args.seed, max_rows=args.max_rows,
+            deadline=deadline,
+        )
+    summary = summarize(results)
+    summary["finished"] = finished
+    write_json_atomic(report_path, {"binding": binding, "summary": summary, "results": results})
+    print(json.dumps(summary, indent=2))
+    if summary["numpy_mismatches"] or summary["exists_mismatches"] or summary["postgis_mismatches"]:
+        return 1
+    return 0 if finished else EXIT_DEADLINE
 
 
 if __name__ == "__main__":
