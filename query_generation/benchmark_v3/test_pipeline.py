@@ -143,6 +143,36 @@ class PipelineTests(unittest.TestCase):
             generate_category(settings, self.pools, Category.parse("spatial.range.multi"), base_seed=9,
                               count_fn=lambda record: 0, output_dir=Path(tmp), **QUIET)
 
+    def test_validation_run_excludes_test_queries(self):
+        from query_generation.benchmark_v3.generate import load_excluded_hashes
+
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            test_dir, validation_dir = Path(a), Path(b)
+            self.run_all(test_dir)
+            benchmark = test_dir / "benchmark.jsonl"
+            rows = merge(self.settings, test_dir)["rows"]
+            benchmark.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            hashes, sources = load_excluded_hashes([benchmark])
+            self.assertEqual(len(hashes), len(rows))
+            # The same seed would reproduce the test queries; exclusion must force new ones.
+            for category in self.settings.categories():
+                summary = generate_category(self.settings, self.pools, category, base_seed=9,
+                                            count_fn=self.backend.count, output_dir=validation_dir,
+                                            excluded_hashes=hashes, excluded_sources=sources, **QUIET)
+                self.assertTrue(summary["finished"])
+                self.assertGreater(summary["rejected"].get("excluded", 0), 0, category.key)
+            result = merge(self.settings, validation_dir, [benchmark])
+            self.assertEqual(result["summary"]["excluded_overlap"], 0)
+            self.assertFalse({r["predicate_hash"] for r in result["rows"]} & hashes)
+            self.assertEqual(result["summary"]["excluded_benchmarks"][0]["rows"], len(rows))
+            # the gate fires when a benchmark is merged against itself
+            with self.assertRaises(GateError):
+                merge(self.settings, test_dir, [benchmark])
+            # resuming with a different exclusion list is refused
+            with self.assertRaises(SystemExit):
+                generate_category(self.settings, self.pools, Category.parse("temporal.range.single"),
+                                  base_seed=9, count_fn=self.backend.count, output_dir=validation_dir, **QUIET)
+
     def test_merge_gates_catch_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)

@@ -26,7 +26,7 @@ trap 'stop_postgres' EXIT
 set +e
 python -m query_generation.benchmark_v3.generate \
   --config "$V3_CONFIG" --pools "$POOLS_JSON" --category "$CATEGORY" \
-  --output-dir "$CATEGORY_DIR" --base-seed "$SEED" "${GRID_ARGS[@]}" \
+  --output-dir "$CATEGORY_DIR" --base-seed "$SEED" "${GRID_ARGS[@]}" "${EXCLUDE_ARGS[@]}" \
   --deadline-seconds "$DEADLINE_SECONDS" --progress-interval 10 "${DB_ARGS[@]}"
 status=$?
 set -e

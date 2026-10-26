@@ -16,5 +16,5 @@ mkdir -p "$RUN_DIR"
 cd "$REPO_ROOT"
 # Pure Python; does not need the database.
 python -m query_generation.benchmark_v3.merge \
-  --config "$V3_CONFIG" --run-dir "$CATEGORY_DIR" "${GRID_ARGS[@]}" \
+  --config "$V3_CONFIG" --run-dir "$CATEGORY_DIR" "${GRID_ARGS[@]}" "${EXCLUDE_ARGS[@]}" \
   --output "$RUN_DIR/benchmark.jsonl" --summary "$RUN_DIR/benchmark_summary.json"

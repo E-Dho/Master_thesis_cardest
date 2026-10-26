@@ -88,6 +88,23 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    REPO_ROOT=$PWD STAGE=verify query_generation/benchmark_v3/slurm/submit_v3.sh
    ```
 
+4. **Validation workload** (8 x 75 single + 8 x 225 multi = 2,400 queries,
+   seed 20261026, none of them in the test benchmark):
+
+   ```bash
+   REPO_ROOT=$PWD VALIDATION=1 query_generation/benchmark_v3/slurm/submit_v3.sh
+   ```
+
+   Every candidate whose predicate hash occurs in the test benchmark is
+   rejected (reason `excluded`), and the merge refuses any overlap. Its
+   verification checks 10 queries per category.
+
+All jobs that start PostgreSQL are submitted under the job name
+`pol_mobilitydb` with `--dependency=singleton`, so Slurm runs them one at a
+time (they share one data directory, and each stops PostgreSQL when it
+ends). For a database job submitted under another name, add
+`AFTER_JOB=<job id>`.
+
 Outputs in `$MOBILITYDB_ROOT/query_runs/<RUN_LABEL>/`: `pools.json`,
 `categories/<category>.{accepted,rejected}.jsonl` and `.summary.json`,
 `benchmark.jsonl`, `benchmark_summary.json`, `verify_report.json` and

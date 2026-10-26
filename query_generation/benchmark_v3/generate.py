@@ -14,12 +14,13 @@ Exit codes: 0 finished, 75 stopped at the deadline (resubmit to resume).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from query_generation.generate_pol_segment_coupled_benchmark import (
     append_jsonl,
@@ -51,8 +52,29 @@ def run_paths(output_dir: Path, category: Category) -> Dict[str, Path]:
     }
 
 
-def binding(settings: Settings, pools: Pools, category: Category, base_seed: int) -> Dict[str, Any]:
+def load_excluded_hashes(paths) -> Tuple[set, List[Dict[str, Any]]]:
+    """Predicate hashes of other benchmarks (e.g. the test set) that must not reappear."""
+
+    hashes: set = set()
+    sources = []
+    for path in paths or []:
+        path = Path(path)
+        payload = path.read_bytes()
+        rows = [json.loads(line) for line in payload.splitlines() if line.strip()]
+        hashes.update(row["predicate_hash"] for row in rows)
+        sources.append({"path": str(path), "sha256": hashlib.sha256(payload).hexdigest(), "rows": len(rows)})
+    return hashes, sources
+
+
+def binding(
+    settings: Settings,
+    pools: Pools,
+    category: Category,
+    base_seed: int,
+    excluded_sources: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     return {
+        "excluded_sha256": sorted(source["sha256"] for source in excluded_sources or []),
         "state_version": STATE_VERSION,
         "semantics_version": SEMANTICS_VERSION,
         "config_sha256": settings.sha256,
@@ -90,6 +112,8 @@ def generate_category(
     progress_interval: int = 10,
     is_timeout: Callable[[BaseException], bool] = lambda error: False,
     log: Callable[[str], None] = lambda message: print(message, flush=True),
+    excluded_hashes: Optional[set] = None,
+    excluded_sources: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     paths = run_paths(output_dir, category)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -97,7 +121,7 @@ def generate_category(
     rejected = load_jsonl_recover_trailing_write(paths["rejected"])
     check_or_write_state(
         paths["state"],
-        binding(settings, pools, category, base_seed),
+        binding(settings, pools, category, base_seed, excluded_sources),
         has_rows=bool(accepted or rejected),
     )
 
@@ -114,6 +138,9 @@ def generate_category(
         if replay["predicate_hash"] != row["predicate_hash"] or replay["sql"] != row["sql"]:
             raise SystemExit(f"{paths['accepted']}: slot {row['slot_id']} does not replay")
         hashes.add(row["predicate_hash"])
+    excluded = set(excluded_hashes or ())
+    if hashes & excluded:
+        raise SystemExit(f"{paths['accepted']} contains queries of an excluded benchmark")
     if len(accepted) > target:
         raise SystemExit(f"{paths['accepted']} holds more rows than the grid allows")
 
@@ -138,6 +165,8 @@ def generate_category(
             record = sampler.candidate(category, index, attempt)
             if record["predicate_hash"] in hashes:
                 rejection = rejection_row(record, "duplicate", None, 0.0)
+            elif record["predicate_hash"] in excluded:
+                rejection = rejection_row(record, "excluded", None, 0.0)
             else:
                 started = time.perf_counter()
                 try:
@@ -163,6 +192,7 @@ def generate_category(
             log(f"{category.key}: {done}/{target} accepted, {len(rejected)} rejected")
 
     summary = summarize(settings, category, accepted, rejected, base_seed, resumed, finished=True)
+    summary["excluded_benchmarks"] = excluded_sources or []
     write_json_atomic(paths["summary"], summary)
     return summary
 
@@ -228,6 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-seed", type=int, required=True)
     parser.add_argument("--single-count", type=int, help="override the grid (pilot runs)")
     parser.add_argument("--multi-count", type=int, help="override the grid (pilot runs)")
+    parser.add_argument("--exclude-hashes", action="append", default=[],
+                        help="benchmark.jsonl whose queries must not reappear (repeatable)")
     parser.add_argument("--statement-timeout-ms", type=int, default=0, help="0 disables the timeout")
     parser.add_argument("--deadline-seconds", type=float, help="stop cleanly after this many seconds")
     parser.add_argument("--progress-interval", type=int, default=10)
@@ -246,6 +278,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     pools = Pools.load(Path(args.pools))
     category = Category.parse(args.category)
     deadline = time.time() + args.deadline_seconds if args.deadline_seconds else None
+    excluded_hashes, excluded_sources = load_excluded_hashes(args.exclude_hashes)
     with SqlSession(args.host, args.port, args.dbname, args.user, args.statement_timeout_ms) as session:
         backend = SqlBackend(session)
         summary = generate_category(
@@ -258,6 +291,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             deadline=deadline,
             progress_interval=args.progress_interval,
             is_timeout=SqlSession.is_timeout,
+            excluded_hashes=excluded_hashes,
+            excluded_sources=excluded_sources,
         )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["finished"] else EXIT_DEADLINE

@@ -20,7 +20,7 @@ from query_generation.generate_pol_segment_coupled_benchmark import write_json_a
 
 from . import SEMANTICS_VERSION
 from .config import Settings, load_settings
-from .generate import run_paths
+from .generate import load_excluded_hashes, run_paths
 from .query_model import label_kind, label_sql, predicate_hash, predicate_sql
 from .sampler import quotas
 
@@ -113,7 +113,7 @@ def check_row(settings: Settings, row: Dict[str, Any]) -> List[str]:
     return problems
 
 
-def merge(settings: Settings, run_dir: Path) -> Dict[str, Any]:
+def merge(settings: Settings, run_dir: Path, exclude_paths=()) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     rejected_by_category: Dict[str, Counter] = {}
     problems: List[str] = []
@@ -153,6 +153,10 @@ def merge(settings: Settings, run_dir: Path) -> Dict[str, Any]:
     seeds = {row["slot"]["base_seed"] for row in rows}
     if len(seeds) > 1:
         problems.append(f"rows use different base seeds: {sorted(seeds)}")
+    excluded_hashes, excluded_sources = load_excluded_hashes(exclude_paths)
+    overlap = sorted({row["predicate_hash"] for row in rows} & excluded_hashes)
+    if overlap:
+        problems.append(f"{len(overlap)} queries also occur in an excluded benchmark")
     duplicates = [h for h, n in Counter(row["predicate_hash"] for row in rows).items() if n > 1]
     if duplicates:
         problems.append(f"{len(duplicates)} duplicate queries across the benchmark")
@@ -163,7 +167,10 @@ def merge(settings: Settings, run_dir: Path) -> Dict[str, Any]:
 
     for number, row in enumerate(rows, start=1):
         row["query_id"] = f"q{number:08d}"
-    return {"rows": rows, "summary": build_summary(settings, rows, rejected_by_category)}
+    summary = build_summary(settings, rows, rejected_by_category)
+    summary["excluded_benchmarks"] = excluded_sources
+    summary["excluded_overlap"] = len(overlap)
+    return {"rows": rows, "summary": summary}
 
 
 def _quantiles(values: List[float]) -> Optional[Dict[str, float]]:
@@ -226,6 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--summary", required=True)
+    parser.add_argument("--exclude-hashes", action="append", default=[],
+                        help="benchmark.jsonl that must not share any query with this one (repeatable)")
     parser.add_argument("--single-count", type=int)
     parser.add_argument("--multi-count", type=int)
     return parser
@@ -235,7 +244,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     settings = load_settings(Path(args.config), single_count=args.single_count, multi_count=args.multi_count)
     try:
-        result = merge(settings, Path(args.run_dir))
+        result = merge(settings, Path(args.run_dir), args.exclude_hashes)
     except GateError as error:
         print(f"merge refused:\n{error}", file=sys.stderr)
         return 1
