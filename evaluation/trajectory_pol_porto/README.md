@@ -14,7 +14,7 @@ different. The plan behind it is the project doc
 | Phase | Content | State |
 |---|---|---|
 | P1 | Shared core, v3 workload format, features, strata, coverage | done |
-| P2 | Shared data snapshot + label-reproduction gate | next |
+| P2 | Shared data snapshot + label-reproduction gate | implemented; cluster run pending |
 | P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | open |
 | P4–P9 | MobilityDB, DeepDB-MBR, CASE+/TraHist (+ temporal), own model, RIS / MSCN, Porto | open |
 
@@ -104,6 +104,39 @@ Every trajectory workload in `summary.json` gets `extension`
 interval bounds are averaged too). It writes `trajectory_summary_v1.csv` and
 `.md` next to `comparison.*`; `compare` writes the cross-method version. The
 core's own tables are unchanged.
+
+## Shared data snapshot (P2)
+
+`traj_eval/snapshot.py` exports the benchmark database once into numpy arrays:
+`tables/<table>/<column>.npy`, exactly the arrays the v3 `NumpyBackend` reads
+(times as int64 microseconds of the stored naive timestamps; segments as
+`sx, sy, ex, ey, ts, te`), ordered by primary key, plus `derived/trips/` with a
+CSR index (`trip_id`, `offset`, `segment_count`) and per-trip bounding boxes
+(`xmin..ymax`, `tmin_us`, `tmax_us`). The export runs in one read-only
+repeatable-read transaction, streams fixed-width tables with binary `COPY`
+(about 2 minutes for 50M segments), checks that segments are sorted per trip,
+that every trip has segments and that `num_of_segments` matches, and writes a
+manifest with database identity, SQL, NULL counts and a SHA-256 per array. It
+writes into `<dir>.partial` and renames at the end, so a failed export never
+leaves a half snapshot behind. `load_snapshot(dir)` memory-maps the arrays;
+`snapshot verify --snapshot DIR` re-checks every checksum.
+
+`traj_eval/snapshot_gate.py` recounts every benchmark label on the snapshot
+with `NumpyBackend` (sharded, resumable, fsynced per query) and `merge` writes
+`gate/<workload>_report.json`; it fails on any mismatch, gap or duplicate.
+About 3.5 s per query at POL scale, i.e. 8 h serial for the test workload.
+
+On the cluster (from a checkout of this branch):
+
+```bash
+REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_snapshot.sh
+```
+
+The export starts PostgreSQL and is therefore submitted under the shared job
+name `pol_mobilitydb` with `--dependency=singleton`, like every v3 database job
+(`AFTER_JOB=<id>` additionally waits for a job of another name). The gate
+arrays (test: 16 shards, validation: 8) need no database and start after the
+export succeeded. Output: `$THESIS_WORK_ROOT/traj_snapshots/pol_v3/`.
 
 ## Memory budget
 
