@@ -184,6 +184,32 @@ class DuckDbEndToEnd(unittest.TestCase):
                 run_verification(self.settings, self.session, rows, results_path=path,
                                  binding=dict(binding, seed=2), **quiet)
 
+    def test_timed_out_check_is_reported_not_fatal(self):
+        class QueryCanceled(Exception):
+            pass
+
+        class SlowPostgis(DuckSession):
+            def scalar(self, sql, params=None):
+                if "matching_trips" in sql or "ST_MakeLine" in sql or sql.startswith("SELECT COUNT(*)\nFROM pol.segments") and "ST_Intersects" in sql:
+                    raise QueryCanceled("canceling statement due to statement timeout")
+                return super().scalar(sql, params)
+
+        session = SlowPostgis(self.session.con)
+        rows = [r for r in self._merged_rows() if r["category"]["dimension"] in ("spatial", "spatio_temporal")]
+        fetcher = Fetcher(self.settings, session, max_rows=10**7)
+        is_timeout = lambda error: type(error).__name__ == "QueryCanceled"
+        results = [verify_record(self.settings, fetcher, session, row, is_timeout) for row in rows]
+        summary = summarize(results)
+        self.assertEqual(len(summary["timeouts"]["postgis"]), len(rows))
+        self.assertEqual(summary["postgis_checked"], 0)
+        self.assertEqual(summary["numpy_mismatches"], [])
+        self.assertGreater(summary["numpy_checked"], 0, "other checks still run")
+        multi = [r for r in results if "exists_ok" in r]
+        self.assertTrue(multi and all(r["exists_ok"] for r in multi))
+        # without a timeout predicate the error propagates
+        with self.assertRaises(QueryCanceled):
+            verify_record(self.settings, fetcher, session, rows[0])
+
     def test_row_limit_skips_numpy_but_not_postgis(self):
         rows = [r for r in self._merged_rows() if r["category"]["dimension"] in ("spatial", "spatio_temporal")]
         fetcher = Fetcher(self.settings, self.session, max_rows=1)

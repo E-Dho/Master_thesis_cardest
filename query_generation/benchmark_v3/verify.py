@@ -259,13 +259,38 @@ def postgis_predicate_sql(settings: Settings, predicate: Dict[str, Any]) -> str:
 
 
 def postgis_sql(settings: Settings, record: Dict[str, Any]) -> str:
-    source, _ = from_clause(settings, record["tables"])
-    where = " AND ".join(f"({postgis_predicate_sql(settings, p)})" for p in record["predicates"])
+    """Count with the independent predicate formulation.
+
+    For multi queries the matching trips are computed first from the segments
+    alone, in a MATERIALIZED CTE, and only then joined with the other tables.
+    The planner cannot estimate predicates on constructed geometries; in the
+    full run (job 22384196) a plain join with selective agent add-ons ran for
+    about 20 hours. Fixing the evaluation order keeps the plan independent of
+    those estimates. Only the plan changes, not the count.
+    """
+
+    seg = settings.segments
+    predicates = record["predicates"]
     if record["category"]["relation"] == "single":
-        select = "SELECT COUNT(*)"
-    else:
-        select = f"SELECT COUNT(DISTINCT {settings.entity_expression})"
-    return f"{select}\n{source}\nWHERE {where};"
+        source, _ = from_clause(settings, record["tables"])
+        where = " AND ".join(f"({postgis_predicate_sql(settings, p)})" for p in predicates)
+        return f"SELECT COUNT(*)\n{source}\nWHERE {where};"
+    seg_predicates = [p for p in predicates if p["table"] == seg.table]
+    if seg.table not in record["tables"] or not seg_predicates:
+        source, _ = from_clause(settings, record["tables"])
+        where = " AND ".join(f"({postgis_predicate_sql(settings, p)})" for p in predicates) or "TRUE"
+        return f"SELECT COUNT(DISTINCT {settings.entity_expression})\n{source}\nWHERE {where};"
+    seg_table = settings.table(seg.table)
+    inner = " AND ".join(f"({postgis_predicate_sql(settings, p)})" for p in seg_predicates)
+    outer_tables = [t for t in record["tables"] if t != seg.table]
+    source, _ = from_clause(settings, outer_tables)
+    outer = [f"({postgis_predicate_sql(settings, p)})" for p in predicates if p["table"] != seg.table]
+    outer.insert(0, f"{settings.entity_expression} IN (SELECT trip_id FROM matching_trips)")
+    return (
+        f"WITH matching_trips AS MATERIALIZED (\n"
+        f"  SELECT DISTINCT {seg.trip_key} AS trip_id FROM {seg_table['name']} {seg_table['alias']} WHERE {inner}\n)\n"
+        f"SELECT COUNT(DISTINCT {settings.entity_expression})\n{source}\nWHERE {' AND '.join(outer)};"
+    )
 
 
 def exists_sql(settings: Settings, record: Dict[str, Any]) -> str:
@@ -290,7 +315,32 @@ def exists_sql(settings: Settings, record: Dict[str, Any]) -> str:
     return f"SELECT COUNT(*)\n{source}\nWHERE {where};"
 
 
-def verify_record(settings: Settings, fetcher: Optional[Fetcher], session, record: Dict[str, Any]) -> Dict[str, Any]:
+def _timed_check(result: Dict[str, Any], name: str, run, is_timeout) -> Optional[Any]:
+    """Run one check; a statement timeout marks it unverified instead of failing the job."""
+
+    step = time.perf_counter()
+    try:
+        return run()
+    except Exception as error:  # noqa: BLE001 - only timeouts are tolerated
+        if not is_timeout(error):
+            raise
+        result[f"{name}_timeout"] = True
+        return None
+    finally:
+        result[f"{name}_seconds"] = time.perf_counter() - step
+
+
+def _never_timeout(error: BaseException) -> bool:
+    return False
+
+
+def verify_record(
+    settings: Settings,
+    fetcher: Optional[Fetcher],
+    session,
+    record: Dict[str, Any],
+    is_timeout=_never_timeout,
+) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "query_id": record["query_id"],
         "category": record["category"]["key"],
@@ -298,18 +348,19 @@ def verify_record(settings: Settings, fetcher: Optional[Fetcher], session, recor
     }
     started = time.perf_counter()
     if record["category"]["relation"] == "multi":
-        step = time.perf_counter()
-        result["exists_count"] = int(session.scalar(exists_sql(settings, record)))
-        result["exists_ok"] = result["exists_count"] == record["cardinality"]
-        result["exists_seconds"] = time.perf_counter() - step
+        count = _timed_check(result, "exists", lambda: int(session.scalar(exists_sql(settings, record))), is_timeout)
+        if count is not None:
+            result["exists_count"] = count
+            result["exists_ok"] = count == record["cardinality"]
     if any(p["kind"] in SPATIAL_KINDS for p in record["predicates"]):
-        step = time.perf_counter()
-        result["postgis_count"] = int(session.scalar(postgis_sql(settings, record)))
-        result["postgis_ok"] = result["postgis_count"] == record["cardinality"]
-        result["postgis_seconds"] = time.perf_counter() - step
+        count = _timed_check(result, "postgis", lambda: int(session.scalar(postgis_sql(settings, record))), is_timeout)
+        if count is not None:
+            result["postgis_count"] = count
+            result["postgis_ok"] = count == record["cardinality"]
     if record["category"]["dimension"] != "standard" and fetcher is not None:
         step = time.perf_counter()
-        data, evaluated, note = fetcher.fetch(record)
+        fetched = _timed_check(result, "fetch", lambda: fetcher.fetch(record), is_timeout)
+        data, evaluated, note = fetched if fetched is not None else (None, record["tables"], "fetch timed out")
         result["numpy_note"] = note
         if data is not None:
             local = dict(record, tables=evaluated)
@@ -370,6 +421,7 @@ def run_verification(
     max_rows: int,
     deadline: Optional[float] = None,
     log=lambda message: print(message, flush=True),
+    is_timeout=_never_timeout,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """Verify the sample, appending every result durably; resumes from ``results_path``."""
 
@@ -391,14 +443,15 @@ def run_verification(
         if deadline is not None and time.time() >= deadline:
             log(f"deadline reached after {len(results)}/{len(sample)} queries; resubmit to resume")
             return results, False
-        result = verify_record(settings, fetcher, session, record)
+        result = verify_record(settings, fetcher, session, record, is_timeout)
         append_jsonl(results_path, result)
         results.append(result)
         failed = [name for name in ("numpy_ok", "exists_ok", "postgis_ok") if result.get(name) is False]
-        log(
-            f"{len(results)}/{len(sample)} {record['query_id']} {record['category']['key']}: "
-            f"{'MISMATCH ' + ','.join(failed) if failed else 'ok'} ({result['seconds']:.0f} s)"
-        )
+        timed_out = [name for name in ("exists", "postgis", "fetch") if result.get(f"{name}_timeout")]
+        status = "MISMATCH " + ",".join(failed) if failed else "ok"
+        if timed_out:
+            status += " (timeout: " + ",".join(timed_out) + ")"
+        log(f"{len(results)}/{len(sample)} {record['query_id']} {record['category']['key']}: {status} ({result['seconds']:.0f} s)")
     return results, True
 
 
@@ -416,6 +469,10 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "exists_mismatches": [r["query_id"] for r in exists_checked if not r["exists_ok"]],
         "postgis_checked": len(postgis_checked),
         "postgis_mismatches": [r["query_id"] for r in postgis_checked if not r["postgis_ok"]],
+        "timeouts": {
+            name: [r["query_id"] for r in results if r.get(f"{name}_timeout")]
+            for name in ("exists", "postgis", "fetch")
+        },
         "numpy_skipped": sum(1 for r in results if r.get("numpy_note") not in (None, "ok")),
         "st_intersects_disagreements": sum(r.get("st_intersects_disagreements", 0) for r in results),
         "decoupled_overcount": {
@@ -438,6 +495,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="numpy recount only when the implied prefilter yields at most this many rows")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--deadline-seconds", type=float, help="stop cleanly after this many seconds (exit 75)")
+    parser.add_argument("--check-timeout-seconds", type=int, default=1800,
+                        help="statement timeout per check; a timed-out check is reported as unverified")
     parser.add_argument("--single-count", type=int)
     parser.add_argument("--multi-count", type=int)
     parser.add_argument("--host")
@@ -463,7 +522,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "seed": args.seed,
     }
     deadline = time.time() + args.deadline_seconds if args.deadline_seconds else None
-    with SqlSession(args.host, args.port, args.dbname, args.user) as session:
+    with SqlSession(args.host, args.port, args.dbname, args.user, args.check_timeout_seconds * 1000) as session:
         entity = settings.table(settings.entity_table)
         seg = settings.table(settings.segments.table)
         orphan_trips = int(session.scalar(
@@ -479,6 +538,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             results_path=results_path, binding=binding,
             per_category=args.per_category, seed=args.seed, max_rows=args.max_rows,
             deadline=deadline,
+            is_timeout=SqlSession.is_timeout,
         )
     summary = summarize(results)
     summary["finished"] = finished
