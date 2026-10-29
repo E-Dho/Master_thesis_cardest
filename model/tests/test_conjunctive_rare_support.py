@@ -3450,6 +3450,20 @@ class LiveSamplerUseColsTest(unittest.TestCase):
         cfg = {"use_cols": "simple"}
         self.assertEqual(self.source(None).table_use_cols(cfg), "simple")
 
+    def test_manifest_projection_is_authoritative_for_live_sampling(self):
+        self.assertEqual(
+            LiveNeuroCardFullJoinSampleSource.resolve_use_cols(
+                requested="content", manifest_value="content"
+            ),
+            "content",
+        )
+
+    def test_manifest_projection_mismatch_fails_before_sampler_startup(self):
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            LiveNeuroCardFullJoinSampleSource.resolve_use_cols(
+                requested="content", manifest_value="simple"
+            )
+
     def test_an_unknown_value_is_refused_at_construction(self):
         # Before the manifest and CSV checks, so a typo fails immediately
         # rather than after minutes of loading.

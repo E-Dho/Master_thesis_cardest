@@ -409,8 +409,11 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
             raise ValueError(
                 "dataset.use_cols must be one of simple, content, multi, full, or null"
             )
-        self.use_cols = use_cols
         super().__init__(prepared_directory, sampling_mode="live")
+        self.use_cols = self.resolve_use_cols(
+            requested=use_cols,
+            manifest_value=self.manifest.get("neurocard_use_cols"),
+        )
         self.csv_directory = Path(csv_directory).resolve()
         if not self.csv_directory.exists():
             raise FileNotFoundError(f"missing JOB-light CSV directory {self.csv_directory}")
@@ -486,6 +489,30 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
 
         return cfg["use_cols"] if self.use_cols is None else self.use_cols
 
+    @staticmethod
+    def resolve_use_cols(*, requested: str | None, manifest_value: Any) -> str | None:
+        """Resolve the projection from the prepared schema contract.
+
+        A live sampler encodes every sampled dataframe against the prepared
+        metadata.  A manifest that records its NeuroCard projection therefore
+        takes precedence over a stale parsed-table cache, and a disagreement
+        with the run configuration must fail before Ray or training starts.
+        """
+
+        if manifest_value is None:
+            return requested
+        if manifest_value not in {"simple", "content", "multi", "full"}:
+            raise ValueError(
+                "prepared manifest neurocard_use_cols must be one of simple, "
+                "content, multi, or full"
+            )
+        if requested is not None and requested != manifest_value:
+            raise ValueError(
+                "dataset.use_cols does not match prepared manifest "
+                f"neurocard_use_cols: {requested!r} != {manifest_value!r}"
+            )
+        return str(manifest_value)
+
     def _load_neurocard_sampler(self) -> None:
         neurocard_path = str(self.neurocard_path)
         if neurocard_path not in sys.path:
@@ -507,6 +534,11 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                     "join_tables": list(getattr(spec, "join_tables", ())),
                 },
             )
+            effective_use_cols = self.table_use_cols(cfg)
+            print(
+                "live_neurocard_projection="
+                f"{effective_use_cols} parsed_table_cache_reused=false"
+            )
             if prepare_utils.check_required_files(spec):
                 self._startup_event(
                     "prepare_cache_hit",
@@ -519,8 +551,12 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 datasets.LoadImdb(
                     table,
                     data_dir=str(self.csv_directory) + "/",
-                    use_cols=self.table_use_cols(cfg),
-                    try_load_parsed=True,
+                    use_cols=effective_use_cols,
+                    # Parsed-table caches are managed by upstream NeuroCard
+                    # and predate this projection-aware live path.  Build
+                    # from CSV once per process so the dataframe cannot be a
+                    # stale simple-schema object under a content manifest.
+                    try_load_parsed=False,
                 )
                 for table in spec.join_tables
             ]
@@ -529,7 +565,7 @@ class LiveNeuroCardFullJoinSampleSource(NeuroCardFullJoinSampleSource):
                 {
                     "table_count": len(tables),
                     "tables": list(getattr(spec, "join_tables", ())),
-                    "use_cols": self.table_use_cols(cfg),
+                    "use_cols": effective_use_cols,
                 },
             )
             self._startup_event(
