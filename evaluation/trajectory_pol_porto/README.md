@@ -15,10 +15,10 @@ different. The plan behind it is the project doc
 |---|---|---|
 | P1 | Shared core, v3 workload format, features, strata, coverage | done |
 | P2 | Shared data snapshot + label-reproduction gate | implemented; cluster run pending |
-| P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | open |
+| P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | implemented; runs after P2 |
 | P4–P9 | MobilityDB, DeepDB-MBR, CASE+/TraHist (+ temporal), own model, RIS / MSCN, Porto | open |
 
-`traj_eval/plugin.py` registers adapters as they are implemented; there are none yet.
+`traj_eval/plugin.py` registers the adapters: `traj_exact_mbr` and `traj_sampling` (P3).
 
 ## Workloads
 
@@ -138,11 +138,54 @@ name `pol_mobilitydb` with `--dependency=singleton`, like every v3 database job
 arrays (test: 16 shards, validation: 8) need no database and start after the
 export succeeded. Output: `$THESIS_WORK_ROOT/traj_snapshots/pol_v3/`.
 
+## P3 estimators
+
+Both are in-process adapters (`traj_eval/adapters/`) built from the P2
+snapshot: `build` writes the model to `<run>/model/model.npz` (its size is the
+reported `serialized_bytes`), and `evaluate` answers queries one at a time.
+`time` runs the same loop under the core's timing guard.
+
+- **Exact-MBR** (`traj_exact_mbr`, one seed; deterministic). One box per
+  trajectory (`derived/trips`). Trip and agent predicates are evaluated
+  exactly with the v3 predicate code; the segment window and interval become
+  box overlap, with space and time tested separately. It is never below the
+  truth (tested), and exact when a query has no segment condition. It is the
+  representation error of every one-box-per-trajectory method, without any
+  model error, so it is reported next to DeepDB-MBR. Unsupported: single-table
+  queries, and attribute predicates on segment rows (`segment_idx`).
+- **Trajectory sampling** (`traj_sampling`, three seeds). A seeded simple
+  random sample of whole trips (with their segments and agents), evaluated
+  exactly with `NumpyBackend` and scaled by N/n. This is unbiased (tested over
+  300 seeds), and with n = N it reproduces every label (tested). Zero
+  estimates stay 0. Size via exactly one of `sample_trips`, `sample_fraction`,
+  `budget_bytes`. Unsupported: single-table agent queries.
+
+Configs: `configs/pol_v3/` (`_base.yaml`, `exact_mbr.yaml`,
+`traj_sampling_n{1000,10000,100000,1000000}.yaml`). On the cluster, after P2:
+
+```bash
+REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_p3.sh
+```
+
+It submits one array job per config (one task per seed, `geo-mlp`
+environment, no database) and an aggregate-and-compare job writing
+`results/traj_phase1_pol_v3/p3_comparison/` (the core tables plus
+`trajectory_summary_v1.{csv,md}`). Accuracy runs time a single pass; reported
+latency comes from `cli time` under `cpu_1core`, which still needs the
+trajectory timing launcher (see Timing).
+
+The stratified Markdown table shows smoothed Q-errors and the zero-estimate
+count next to the raw ones, because one zero estimate makes the raw Q-error
+huge (1e-12 guard), which hides everything else for sampling methods.
+
 ## Memory budget
 
 One level: 1× the own model's inference-only serialized size per dataset
-(decided 2026-10-26). Adapters will receive it as `budget_bytes` and report
-`serialized_bytes`.
+(decided 2026-10-26). Every adapter reports `serialized_bytes`, and
+`artifact_metadata` adds `budget_bytes` and `within_budget` when the config
+sets `adapter.budget_bytes`. The sampling ladder runs without a budget; a
+`traj_sampling` config with `budget_bytes` follows once the own model's POL v3
+checkpoint size is known.
 
 ## Timing
 

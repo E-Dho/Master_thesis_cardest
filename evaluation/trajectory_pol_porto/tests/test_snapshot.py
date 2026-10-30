@@ -26,7 +26,7 @@ from query_generation.benchmark_v3.numpy_backend import NumpyBackend
 from evaluation.trajectory_pol_porto.traj_eval import snapshot as snap
 from evaluation.trajectory_pol_porto.traj_eval.snapshot_gate import merge, run_shard
 
-from ._fixture import MULTI, SINGLE, V3_CONFIG, benchmark_rows, write_benchmark
+from ._fixture import MULTI, SINGLE, V3_CONFIG, benchmark_rows, write_benchmark, write_synthetic_snapshot
 
 SETTINGS = load_settings(V3_CONFIG, single_count=SINGLE, multi_count=MULTI)
 PG = os.environ.get("TRAJ_EVAL_TEST_PG")
@@ -119,32 +119,12 @@ class SpecTest(unittest.TestCase):
 
 # --- snapshot from synthetic arrays (no server) -------------------------------
 
-def _write_snapshot_from_arrays(root: Path, data) -> Path:
-    tables = {}
-    for table, arrays in data.items():
-        columns = {}
-        for name, array in arrays.items():
-            if table == "segments" and name.startswith("segment_time."):
-                continue
-            path = root / "tables" / table / f"{name}.npy"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(path, np.asarray(array))
-            columns[name] = {}
-        tables[table] = {"columns": columns}
-    snap.derive_trips(SETTINGS, root)
-    manifest = {"snapshot_version": snap.SNAPSHOT_VERSION, "config_sha256": load_settings(V3_CONFIG).sha256,
-                "tables": tables, "aliases": {"segments": {"segment_time.start": "ts", "segment_time.end": "te"}},
-                "files": {}}
-    (root / "manifest.json").write_text(json.dumps(manifest))
-    return root
-
-
 class GateTest(unittest.TestCase):
     def test_sharded_gate_passes_resumes_and_catches_a_wrong_label(self) -> None:
         data, _ = synthetic.build(SETTINGS)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            snapshot = _write_snapshot_from_arrays(root / "snap", data)
+            snapshot = write_synthetic_snapshot(root / "snap", data)
             benchmark = write_benchmark(root / "benchmark.jsonl")
             for shard in range(3):
                 self.assertEqual(run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", shard, 3, log=lambda m: None), 0)
@@ -169,7 +149,7 @@ class GateTest(unittest.TestCase):
         data, _ = synthetic.build(SETTINGS)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            snapshot = _write_snapshot_from_arrays(root / "snap", data)
+            snapshot = write_synthetic_snapshot(root / "snap", data)
             benchmark = write_benchmark(root / "benchmark.jsonl")
             run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", 0, 2, log=lambda m: None)
             report = merge(benchmark, root / "gate", root / "report.json")

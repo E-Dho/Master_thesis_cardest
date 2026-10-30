@@ -128,10 +128,12 @@ def _bootstrap(values: np.ndarray, seed_text: str) -> Dict[str, Optional[List[fl
 def _stratum(name: str, items: Sequence[Tuple[Any, Any]], seed_text: str) -> Dict[str, Any]:
     statuses = {"ok_exact": 0, "ok_approx": 0, "unsupported": 0, "failed": 0}
     raw, smooth, log_ratio = [], [], []
+    zero_estimates = 0
     for record, prediction in items:
         if prediction.status == "ok" and prediction.estimated_cardinality is not None:
             statuses["ok_approx" if is_approximate(prediction) else "ok_exact"] += 1
             estimate = float(prediction.estimated_cardinality)
+            zero_estimates += estimate == 0.0
             truth = record.true_cardinality
             raw.append(raw_q_error(estimate, truth))
             smooth.append(smoothed_q_error(estimate, truth))
@@ -148,6 +150,7 @@ def _stratum(name: str, items: Sequence[Tuple[Any, Any]], seed_text: str) -> Dic
         "scored_count": scored,
         **{f"{key}_count": value for key, value in statuses.items()},
         "coverage_fraction": scored / n if n else None,
+        "zero_estimate_count": zero_estimates,
         "raw_q_error": _percentiles(raw_array),
         "raw_q_error_ci": _bootstrap(raw_array, f"{seed_text}|{name}"),
         "smoothed_q_error": _percentiles(np.asarray(smooth, dtype=float)),
@@ -232,10 +235,13 @@ MARKDOWN_COLUMNS = (
     ("n", "query_count"),
     ("coverage", "coverage_fraction"),
     ("approx", "ok_approx_count"),
+    ("zero est.", "zero_estimate_count"),
     ("raw p50", "raw_q_error.p50"),
     ("raw p90", "raw_q_error.p90"),
-    ("raw p99", "raw_q_error.p99"),
-    ("raw max", "raw_q_error.max"),
+    ("smoothed p50", "smoothed_q_error.p50"),
+    ("smoothed p90", "smoothed_q_error.p90"),
+    ("smoothed p99", "smoothed_q_error.p99"),
+    ("smoothed max", "smoothed_q_error.max"),
     ("log10 ratio p50", "log10_ratio.p50"),
     ("overestimated", "overestimate_fraction"),
 )
@@ -287,7 +293,9 @@ class TrajectorySummaryExtension:
         lines = [f"# {title}", "",
                  "Q-error over scored (`ok`) queries; values are mean +/- sample std across seeds. "
                  "`log10 ratio` > 0 means overestimation. Coverage counts `ok` (exact and approximate) "
-                 "estimates; `approx` is the mean number of approximate ones.", ""]
+                 "estimates; `approx` is the mean number of approximate ones. A zero estimate makes the raw "
+                 "Q-error huge (1e-12 guard), so sampling methods are best read in the smoothed columns; "
+                 "`zero est.` counts them. The CSV holds every metric, including p95 and the bootstrap intervals.", ""]
         header = ["Method", "Variant", "Workload", "Stratum"] + [label for label, _ in MARKDOWN_COLUMNS]
         lines.append("| " + " | ".join(header) + " |")
         lines.append("| " + " | ".join("---" for _ in header) + " |")

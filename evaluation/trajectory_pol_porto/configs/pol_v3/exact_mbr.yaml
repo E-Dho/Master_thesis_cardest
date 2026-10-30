@@ -1,0 +1,12 @@
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_pol_v3
+  method_id: exact_mbr
+  variant_id: trajectory_boxes
+  display_name: Exact-MBR (one box per trajectory)
+  protocol: adapted
+  adaptation: Project-defined companion of the MBR baselines - exact count of trajectories whose (x, y, t) bounding box overlaps the query; trip and agent predicates exact; single-table queries and segment-level attribute predicates unsupported.
+  seeds: [0]
+adapter:
+  type: traj_exact_mbr
+  benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json

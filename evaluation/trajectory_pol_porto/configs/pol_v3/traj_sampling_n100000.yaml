@@ -1,0 +1,13 @@
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_pol_v3
+  method_id: traj_sampling
+  variant_id: n100000
+  display_name: Trajectory sampling n=100,000 trips
+  protocol: adapted
+  adaptation: Project-implemented baseline - seeded simple random sample of whole trips evaluated exactly with the v3 reference predicates and scaled by N/n; single-table agent queries unsupported.
+  seeds: [0, 1, 2]
+adapter:
+  type: traj_sampling
+  benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json
+  sample_trips: 100000
