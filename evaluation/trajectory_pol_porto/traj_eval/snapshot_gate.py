@@ -12,6 +12,14 @@ resumes where it stopped (exit 75 at ``--deadline-seconds``). ``merge`` checks
 that every query was recounted exactly once and writes the report; it exits 1
 on any mismatch or gap.
 
+A results directory is bound to its inputs: the first shard writes
+``binding.json`` (SHA-256 of the snapshot manifest and of the benchmark, the
+v3 config hash, the shard count), created atomically so parallel shards cannot
+race. Every later shard, every resume and ``merge`` refuse a directory bound to
+other inputs, and every result line carries its query's ``predicate_hash``, so
+a result can never be credited to another query. Use a new results directory
+for new inputs.
+
     python -m evaluation.trajectory_pol_porto.traj_eval.snapshot_gate run \\
         --snapshot DIR --config pol_v3_config.json --benchmark benchmark.jsonl \\
         --results-dir DIR/gate/test --shard 0 --shards 16
@@ -33,6 +41,47 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 EXIT_DEADLINE = 75
+GATE_VERSION = 1
+BINDING_FILE = "binding.json"
+
+
+class BindingError(ValueError):
+    """A results directory holds results of other inputs."""
+
+
+def gate_binding(snapshot: Path, benchmark: Path, config_sha256: str, shards: int) -> Dict[str, Any]:
+    return {
+        "gate_version": GATE_VERSION,
+        "snapshot_manifest_sha256": _sha256(Path(snapshot) / "manifest.json"),
+        "benchmark_sha256": _sha256(Path(benchmark)),
+        "config_sha256": config_sha256,
+        "shards": int(shards),
+    }
+
+
+def bind_results_dir(results_dir: Path, binding: Dict[str, Any]) -> None:
+    """Create ``binding.json`` atomically, or check that it matches."""
+
+    results_dir.mkdir(parents=True, exist_ok=True)
+    path = results_dir / BINDING_FILE
+    if not path.exists():
+        if any(results_dir.glob("shard_*_of_*.jsonl")):
+            raise BindingError(f"{results_dir} holds shard results without {BINDING_FILE}; use a new results directory")
+        temporary = results_dir / f".{BINDING_FILE}.{os.getpid()}"
+        temporary.write_text(json.dumps(binding, indent=2, sort_keys=True), encoding="utf-8")
+        try:
+            os.link(temporary, path)  # atomic; fails if another shard was first
+        except FileExistsError:
+            pass
+        finally:
+            temporary.unlink()
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    differing = sorted(key for key in set(stored) | set(binding) if stored.get(key) != binding.get(key))
+    if differing:
+        raise BindingError(
+            f"{results_dir} was produced for other inputs (differs in {differing}); "
+            "use a new results directory"
+        )
 
 
 def _rows(path: Path) -> List[Dict[str, Any]]:
@@ -82,9 +131,13 @@ def run_shard(snapshot: Path, config: Path, benchmark: Path, results_dir: Path, 
     data = load_snapshot(snapshot, expected_config_sha256=settings.sha256)
     backend = NumpyBackend(settings, data)
     rows = [row for position, row in enumerate(_rows(benchmark)) if position % shards == shard]
-    results_dir.mkdir(parents=True, exist_ok=True)
+    bind_results_dir(results_dir, gate_binding(snapshot, benchmark, settings.sha256, shards))
     path = _shard_path(results_dir, shard, shards)
     done = _done(path)
+    hashes = {row["query_id"]: row["predicate_hash"] for row in rows}
+    foreign = [qid for qid, item in done.items() if hashes.get(qid) != item.get("predicate_hash")]
+    if foreign:
+        raise BindingError(f"{path} holds results for other queries (e.g. {foreign[:3]})")
     # rewrite the file without a possibly torn last line before appending
     with path.open("w", encoding="utf-8") as handle:
         for item in done.values():
@@ -102,6 +155,7 @@ def run_shard(snapshot: Path, config: Path, benchmark: Path, results_dir: Path, 
             counted = int(backend.count(row))
             item = {
                 "query_id": row["query_id"],
+                "predicate_hash": row["predicate_hash"],
                 "category": row["category"]["key"],
                 "label_kind": row["label_kind"],
                 "expected": int(row["cardinality"]),
@@ -119,15 +173,23 @@ def run_shard(snapshot: Path, config: Path, benchmark: Path, results_dir: Path, 
     return 0
 
 
-def merge(benchmark: Path, results_dir: Path, report: Path, snapshot: Optional[Path] = None) -> Dict[str, Any]:
+def merge(benchmark: Path, results_dir: Path, report: Path, snapshot: Path) -> Dict[str, Any]:
+    binding_path = results_dir / BINDING_FILE
+    if not binding_path.exists():
+        raise BindingError(f"{results_dir} has no {BINDING_FILE}")
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    for key, value in (("benchmark_sha256", _sha256(benchmark)),
+                       ("snapshot_manifest_sha256", _sha256(Path(snapshot) / "manifest.json"))):
+        if binding.get(key) != value:
+            raise BindingError(f"{results_dir} was produced for another {key.split('_')[0]} ({key} differs)")
     rows = _rows(benchmark)
     expected = {row["query_id"]: row for row in rows}
     found: Dict[str, Dict[str, Any]] = {}
     duplicates = []
     files = sorted(results_dir.glob("shard_*_of_*.jsonl"))
-    shard_counts = {path.name.split("_of_")[1] for path in files}
-    if len(shard_counts) > 1:
-        raise ValueError(f"results of different shard counts in {results_dir}: {sorted(shard_counts)}")
+    shard_counts = {int(path.stem.split("_of_")[1]) for path in files}
+    if shard_counts - {int(binding["shards"])}:
+        raise BindingError(f"shard files {sorted(shard_counts)} do not match the bound shard count {binding['shards']}")
     for path in files:
         for query_id, item in _done(path).items():
             if query_id in found:
@@ -136,16 +198,20 @@ def merge(benchmark: Path, results_dir: Path, report: Path, snapshot: Optional[P
     missing = sorted(set(expected) - set(found))
     unexpected = sorted(set(found) - set(expected))
     mismatches = [item for item in found.values() if not item["match"]]
+    foreign = sorted(qid for qid, item in found.items()
+                     if qid in expected and item.get("predicate_hash") != expected[qid]["predicate_hash"])
     label_changed = [qid for qid, item in found.items()
                      if qid in expected and item["expected"] != expected[qid]["cardinality"]]
     seconds = sorted(item["seconds"] for item in found.values())
     by_category = Counter(item["category"] for item in found.values())
     result = {
-        "passed": not (missing or unexpected or mismatches or duplicates or label_changed),
+        "passed": not (missing or unexpected or mismatches or duplicates or label_changed or foreign),
+        "binding": binding,
+        "predicate_hash_mismatches": foreign[:200],
         "benchmark": str(benchmark),
         "benchmark_sha256": _sha256(benchmark),
-        "snapshot": str(snapshot) if snapshot else None,
-        "snapshot_manifest_sha256": _sha256(snapshot / "manifest.json") if snapshot else None,
+        "snapshot": str(snapshot),
+        "snapshot_manifest_sha256": binding["snapshot_manifest_sha256"],
         "queries": len(expected),
         "recounted": len(found),
         "mismatch_count": len(mismatches),
@@ -181,7 +247,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     combine.add_argument("--benchmark", required=True, type=Path)
     combine.add_argument("--results-dir", required=True, type=Path)
     combine.add_argument("--report", required=True, type=Path)
-    combine.add_argument("--snapshot", type=Path)
+    combine.add_argument("--snapshot", required=True, type=Path)
     args = parser.parse_args(argv)
     log = lambda message: print(message, flush=True)
     if args.command == "run":

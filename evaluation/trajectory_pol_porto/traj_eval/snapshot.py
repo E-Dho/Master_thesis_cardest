@@ -30,9 +30,12 @@ NULLs: a nullable integer or numeric column is stored as float64 with NaN; a
 nullable nominal column stores :data:`NULL_TEXT`. Both never satisfy a v3
 predicate, exactly like SQL NULL. The manifest records NULL counts.
 
-The export streams fixed-width numeric tables (the 50M-row segments table)
-with ``COPY ... (FORMAT binary)`` decoded directly into memory-mapped arrays;
-tables with text columns or NULLs go through a server-side cursor.
+The export first counts NULLs per column in SQL. Tables without text columns
+or NULLs (the 50M-row segments table) are streamed with ``COPY ... (FORMAT
+binary)`` and decoded directly into memory-mapped arrays; all others go
+through a server-side cursor. Should a NULL still reach the binary decoder, it
+is recognised at the first irregular row and the table falls back to the
+cursor.
 
 CLI::
 
@@ -198,13 +201,24 @@ def _copy_binary(connection, sql: str, specs: List[ColumnSpec], rows: int, root:
         complete = len(data) // row_dtype.itemsize
         if complete:
             block = np.frombuffer(data, dtype=row_dtype, count=complete)
-            # The 2-byte trailer is shorter than a row, so it is never part of a
-            # decoded block; a wrong field count means corrupt input.
-            if np.any(block["fields"] != fields):
-                raise ValueError(f"{table_id}: unexpected field count in binary COPY")
+            # A NULL (length -1, no value bytes) or a value of another width
+            # shortens its row, so every later row of the block is misaligned
+            # and its field count is garbage. Only the first irregular row is
+            # read at a correct offset: classify that one. (The 2-byte trailer
+            # is shorter than a row and never part of a decoded block.)
+            regular = block["fields"] == fields
             for i in range(fields):
-                if np.any(block[f"l{i}"] != 8):
-                    raise _NeedsCursor(f"{table_id}.{specs[i].name} has NULLs or a non-8-byte value")
+                regular &= block[f"l{i}"] == 8
+            if not regular.all():
+                first = int(np.argmin(regular))
+                row = block[first]
+                lengths = [int(row[f"l{i}"]) for i in range(fields)]
+                if int(row["fields"]) == fields and any(length != 8 for length in lengths):
+                    column = specs[next(i for i, length in enumerate(lengths) if length != 8)].name
+                    kind = "a NULL" if -1 in lengths else "a value that is not 8 bytes wide"
+                    raise _NeedsCursor(f"{table_id}.{column} has {kind} (row {state['written'] + first})")
+                raise ValueError(f"{table_id}: unexpected field count in binary COPY "
+                                 f"(row {state['written'] + first})")
             written = state["written"]
             if written + complete > rows:
                 raise ValueError(f"{table_id}: more rows than counted ({rows})")
@@ -225,12 +239,39 @@ def _copy_binary(connection, sql: str, specs: List[ColumnSpec], rows: int, root:
                     pending, pending_bytes = [], 0
     consume(state["carry"] + b"".join(pending))
     if state["carry"] != b"\xff\xff":
-        raise ValueError(f"{table_id}: expected the COPY trailer, got {state['carry'][:16]!r}")
+        _classify_tail(state["carry"], specs, table_id, state["written"])
     if state["written"] != rows:
         raise ValueError(f"{table_id}: exported {state['written']} rows, counted {rows}")
     for target in targets:
         target.flush()
     del targets
+
+
+def _classify_tail(tail: bytes, specs: List[ColumnSpec], table_id: str, written: int) -> None:
+    """Explain bytes left before the trailer; always raises.
+
+    A row shortened by a NULL in the last rows is never long enough to be
+    decoded as a fixed-width row, so it stays here: parse it field by field.
+    """
+    position, row = 0, written
+    while position + 2 <= len(tail):
+        (count,) = struct.unpack_from(">h", tail, position)
+        position += 2
+        if count == -1:
+            break
+        if count != len(specs):
+            break
+        for index in range(count):
+            if position + 4 > len(tail):
+                break
+            (length,) = struct.unpack_from(">i", tail, position)
+            position += 4
+            if length != 8:
+                kind = "a NULL" if length == -1 else "a value that is not 8 bytes wide"
+                raise _NeedsCursor(f"{table_id}.{specs[index].name} has {kind} (row {row})")
+            position += 8
+        row += 1
+    raise ValueError(f"{table_id}: expected the COPY trailer, got {tail[:16]!r}")
 
 
 def _fetch_with_cursor(connection, sql: str, specs: List[ColumnSpec], rows: int, root: Path,
@@ -268,6 +309,17 @@ def _fetch_with_cursor(connection, sql: str, specs: List[ColumnSpec], rows: int,
         path.parent.mkdir(parents=True, exist_ok=True)
         np.save(path, array, allow_pickle=False)
     return nulls
+
+
+def _null_counts(connection, settings: Any, table_id: str, specs: List[ColumnSpec]) -> Dict[str, int]:
+    """NULLs per exported column, counted by the server before choosing the export path."""
+
+    table = settings.base["tables"][table_id]
+    counts = ", ".join(f"count(*) FILTER (WHERE ({spec.sql}) IS NULL)" for spec in specs)
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {counts} FROM {table['name']} {table['alias']}")
+        row = cursor.fetchone()
+    return {spec.name: int(value) for spec, value in zip(specs, row)}
 
 
 def _sha256(path: Path) -> str:
@@ -390,9 +442,9 @@ def export_snapshot(
             sql = export_sql(settings, table_id, columns)
             rows = int(_scalar(connection, f"SELECT COUNT(*) FROM {table['name']}"))
             table_started = time.time()
+            nulls = _null_counts(connection, settings, table_id, columns)
             method = "binary_copy"
-            nulls: Dict[str, int] = {spec.name: 0 for spec in columns}
-            if any(spec.kind == "text" for spec in columns):
+            if any(spec.kind == "text" for spec in columns) or any(nulls.values()):
                 method = "cursor"
                 nulls = _fetch_with_cursor(connection, sql, columns, rows, partial, table_id)
             else:

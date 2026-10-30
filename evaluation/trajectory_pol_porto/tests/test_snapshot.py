@@ -91,6 +91,29 @@ class BinaryCopyTest(unittest.TestCase):
                 self.assertTrue(np.array_equal(np.load(Path(tmp) / "tables/t/a.npy"), ints))
                 self.assertTrue(np.array_equal(np.load(Path(tmp) / "tables/t/b.npy"), floats))
 
+    def test_null_mid_stream_falls_back_instead_of_reading_misaligned_rows(self) -> None:
+        # Regression: a NULL shortens its row by 8 bytes, so all later rows of
+        # the block are misaligned; the decoder used to check field counts over
+        # the whole block first and aborted with "unexpected field count".
+        specs = [snap.ColumnSpec(name, "", kind) for name, kind in
+                 (("a", "int64"), ("b", "float64"), ("c", "int64"))]
+        values = [("int64", list(range(500))), ("float64", [i / 7 for i in range(500)]),
+                  ("int64", list(range(1000, 1500)))]
+        for row in (0, 37, 250, 499):
+            payload = _binary_copy(values, null_at=(row, 1))
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(snap._NeedsCursor, rf"t\.b has a NULL \(row {row}\)"):
+                    snap._copy_binary(_FakeConnection(payload, row), "x", specs, 500, Path(tmp), "t")
+
+    def test_wrong_field_count_is_reported_as_corrupt(self) -> None:
+        specs = [snap.ColumnSpec("a", "", "int64"), snap.ColumnSpec("b", "", "int64")]
+        payload = bytearray(_binary_copy([("int64", [1, 2, 3]), ("int64", [4, 5, 6])]))
+        row_size = 2 + 2 * 12
+        struct.pack_into(">h", payload, 19 + row_size, 3)  # second row claims three fields
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, r"unexpected field count in binary COPY \(row 1\)"):
+                snap._copy_binary(_FakeConnection(bytes(payload)), "x", specs, 3, Path(tmp), "t")
+
     def test_null_switches_to_the_cursor_path_and_row_count_is_checked(self) -> None:
         specs = [snap.ColumnSpec("a", "", "int64")]
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,8 +153,9 @@ class GateTest(unittest.TestCase):
                 self.assertEqual(run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", shard, 3, log=lambda m: None), 0)
             # running a shard again recounts nothing and adds no duplicates
             run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", 1, 3, log=lambda m: None)
-            report = merge(benchmark, root / "gate", root / "report.json")
+            report = merge(benchmark, root / "gate", root / "report.json", snapshot)
             self.assertTrue(report["passed"], report)
+            self.assertEqual(report["binding"]["shards"], 3)
             self.assertEqual(report["recounted"], 8 * SINGLE + 8 * MULTI)
             rows = [json.loads(line) for line in benchmark.read_text().splitlines()]
             rows[5]["cardinality"] += 1
@@ -141,7 +165,7 @@ class GateTest(unittest.TestCase):
             tampered = write_benchmark(root / "tampered.jsonl", rows)
             for shard in range(3):
                 run_shard(snapshot, V3_CONFIG, tampered, root / "gate2", shard, 3, log=lambda m: None)
-            report = merge(tampered, root / "gate2", root / "report2.json")
+            report = merge(tampered, root / "gate2", root / "report2.json", snapshot)
             self.assertFalse(report["passed"])
             self.assertEqual([m["query_id"] for m in report["mismatches"]], [rows[5]["query_id"]])
 
@@ -152,9 +176,57 @@ class GateTest(unittest.TestCase):
             snapshot = write_synthetic_snapshot(root / "snap", data)
             benchmark = write_benchmark(root / "benchmark.jsonl")
             run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", 0, 2, log=lambda m: None)
-            report = merge(benchmark, root / "gate", root / "report.json")
+            report = merge(benchmark, root / "gate", root / "report.json", snapshot)
             self.assertFalse(report["passed"])
             self.assertGreater(report["missing_count"], 0)
+
+    def test_results_are_bound_to_their_inputs(self) -> None:
+        from evaluation.trajectory_pol_porto.traj_eval.snapshot_gate import BindingError, bind_results_dir, gate_binding
+
+        data, _ = synthetic.build(SETTINGS)
+        quiet = lambda m: None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = write_synthetic_snapshot(root / "snap", data)
+            benchmark = write_benchmark(root / "benchmark.jsonl")
+            run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", 0, 2, log=quiet)
+            # another benchmark, another shard count, another snapshot: refused
+            rows = [json.loads(line) for line in benchmark.read_text().splitlines()]
+            other = write_benchmark(root / "other.jsonl", rows[:-1])
+            with self.assertRaisesRegex(BindingError, "benchmark_sha256"):
+                run_shard(snapshot, V3_CONFIG, other, root / "gate", 1, 2, log=quiet)
+            with self.assertRaisesRegex(BindingError, "shards"):
+                run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", 0, 3, log=quiet)
+            manifest = json.loads((snapshot / "manifest.json").read_text())
+            manifest["note"] = "re-exported"
+            snapshot2 = root / "snap2"
+            import shutil
+            shutil.copytree(snapshot, snapshot2)
+            (snapshot2 / "manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(BindingError, "snapshot_manifest_sha256"):
+                run_shard(snapshot2, V3_CONFIG, benchmark, root / "gate", 1, 2, log=quiet)
+            # the same inputs resume fine, and merge refuses other inputs
+            run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", 1, 2, log=quiet)
+            self.assertTrue(merge(benchmark, root / "gate", root / "r.json", snapshot)["passed"])
+            with self.assertRaisesRegex(BindingError, "benchmark"):
+                merge(other, root / "gate", root / "r.json", snapshot)
+            with self.assertRaisesRegex(BindingError, "snapshot"):
+                merge(benchmark, root / "gate", root / "r.json", snapshot2)
+            # a result line of another query is refused on resume
+            shard = root / "gate" / "shard_000_of_002.jsonl"
+            lines = shard.read_text().splitlines()
+            first = json.loads(lines[0])
+            first["predicate_hash"] = "0" * 64
+            shard.write_text("\n".join([json.dumps(first)] + lines[1:]) + "\n")
+            with self.assertRaisesRegex(BindingError, "other queries"):
+                run_shard(snapshot, V3_CONFIG, benchmark, root / "gate", 0, 2, log=quiet)
+            self.assertFalse(merge(benchmark, root / "gate", root / "r.json", snapshot)["passed"])
+            # results without a binding (older code) are refused, not reused
+            legacy = root / "legacy"
+            legacy.mkdir()
+            (legacy / "shard_000_of_002.jsonl").write_text(lines[1] + "\n")
+            with self.assertRaisesRegex(BindingError, "without binding.json"):
+                bind_results_dir(legacy, gate_binding(snapshot, benchmark, "x", 2))
 
 
 # --- the real export against PostgreSQL ---------------------------------------
@@ -252,6 +324,21 @@ class PostgresExportTest(unittest.TestCase):
             array[0] += 1.0
             np.save(copy / "tables/segments/sx.npy", array)
             self.assertEqual(snap.verify_snapshot(copy), ["checksum mismatch tables/segments/sx.npy"])
+
+    def test_null_counts_come_from_the_server(self) -> None:
+        from types import SimpleNamespace
+
+        with self.psycopg.connect(f"{PG} dbname={self.dbname}") as connection:
+            connection.execute("CREATE TABLE public.nulltest (k bigint, v double precision)")
+            connection.execute("INSERT INTO public.nulltest SELECT g, CASE WHEN g % 97 = 0 THEN NULL ELSE g END FROM generate_series(1, 1000) g")
+            settings = SimpleNamespace(base={"tables": {"t": {"name": "public.nulltest", "alias": "n"}}})
+            specs = [snap.ColumnSpec("k", "n.k::bigint", "int64"), snap.ColumnSpec("v", "n.v::float8", "float64")]
+            self.assertEqual(snap._null_counts(connection, settings, "t", specs), {"k": 0, "v": 10})
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(snap._NeedsCursor, r"t\.v has a NULL \(row 96\)"):
+                    snap._copy_binary(connection, "SELECT n.k::bigint, n.v::float8 FROM public.nulltest n ORDER BY n.k",
+                                      specs, 1000, Path(tmp), "t")
+            connection.rollback()
 
     def test_existing_snapshot_is_not_overwritten_without_force(self) -> None:
         with self.assertRaises(FileExistsError):
