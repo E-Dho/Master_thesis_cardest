@@ -9,7 +9,7 @@ experiment:
   experiment_id: traj_phase1_pol_v3
   method_id: mobilitydb
   variant_id: trip_stbox
-  display_name: MobilityDB planner (trip stbox)
+  display_name: MobilityDB stbox estimator (approx., trip boxes)
   adaptation: EXPLAIN row estimate on trips only, segment windows/intervals rewritten to trip_tgeom && stbox; one box per trajectory, reported as approx:trip_stbox; single queries and segment attribute predicates unsupported.
   protocol: adapted
   seeds: [0]

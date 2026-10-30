@@ -9,7 +9,7 @@ experiment:
   experiment_id: traj_phase1_pol_v3
   method_id: mobilitydb
   variant_id: v3_sql
-  display_name: MobilityDB/PostgreSQL planner (label SQL)
+  display_name: PostgreSQL planner (label SQL)
   adaptation: EXPLAIN row estimate of the benchmark's own label SQL (Liang-Barsky segment test); multi queries planned as GROUP BY trip_id, single queries as SELECT 1.
   protocol: adapted
   seeds: [0]
