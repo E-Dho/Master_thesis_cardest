@@ -211,6 +211,7 @@ class InProcessTrajectoryAdapter(Adapter):
         repetitions = max(1, int(self.config.timing.get("repetitions", 1)))
         predictions: List[PredictionRecord] = []
         latencies: List[LatencyRecord] = []
+        rejections: Dict[str, Dict[str, Any]] = {}
         if session is not None:
             session.verify("pre_timing")
         measured = session.measure(f"{self.config.adapter_type}_workloads") if session is not None else nullcontext()
@@ -221,15 +222,21 @@ class InProcessTrajectoryAdapter(Adapter):
                     for record in records:
                         self._estimate(model, record)
                 first: Dict[int, Estimate] = {}
+                rejected_ms: List[float] = []
                 for repetition in range(repetitions):
                     for record in records:
                         start = time.perf_counter()
                         result = self._estimate(model, record)
                         elapsed = (time.perf_counter() - start) * 1000.0
-                        latencies.append(LatencyRecord(
-                            workload.workload_id, record.query_id, repetition, elapsed,
-                            scope=self.latency_scope, device="cpu", profile=profile,
-                        ))
+                        # Only answered queries are inference: the time to reject
+                        # an unsupported (or failed) query is reported separately.
+                        if result[0] == "ok":
+                            latencies.append(LatencyRecord(
+                                workload.workload_id, record.query_id, repetition, elapsed,
+                                scope=self.latency_scope, device="cpu", profile=profile,
+                            ))
+                        else:
+                            rejected_ms.append(elapsed)
                         if repetition == 0:
                             first[record.query_id] = result
                         elif result != first[record.query_id]:
@@ -237,6 +244,12 @@ class InProcessTrajectoryAdapter(Adapter):
                                 f"{self.config.adapter_type} estimate changed between repetitions "
                                 f"for query {record.query_id}"
                             )
+                rejections[workload.workload_id] = {
+                    "rejected_queries": sum(result[0] != "ok" for result in first.values()),
+                    "timed_rejections": len(rejected_ms),
+                    "mean_ms": float(np.mean(rejected_ms)) if rejected_ms else None,
+                    "note": "not part of the inference latency",
+                }
                 for record in records:
                     status, estimate, diagnostic = first[record.query_id]
                     predictions.append(PredictionRecord(
@@ -244,7 +257,8 @@ class InProcessTrajectoryAdapter(Adapter):
                         None if estimate is None else float(estimate), diagnostic=diagnostic,
                     ))
         return AdapterEvaluation(tuple(predictions), tuple(latencies),
-                                 detail={"model_meta": self._meta_without_arrays()})
+                                 detail={"model_meta": self._meta_without_arrays(),
+                                         "rejections": rejections})
 
     def _meta_without_arrays(self) -> Dict[str, Any]:
         path = self.model_directory / MODEL_META

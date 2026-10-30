@@ -16,6 +16,13 @@ This is the representation error of every one-box-per-trajectory method
 Because a segment that matches lies inside its trajectory's box, the result
 is never below the true count for supported queries (tested).
 
+When a query has a segment window or interval, the answer is to the box
+question, not the exact one, so it carries the diagnostic
+``approx:trajectory_box_overlap`` (status ``ok``): the coverage block counts
+it as approximate and ``all:exact_only`` leaves it out, as for the own
+model's MBR surrogate. Queries with only trip and agent predicates are
+answered exactly and carry no diagnostic.
+
 Unsupported (status ``unsupported``):
 
 - single-table queries (row-count labels; not a trajectory-level question);
@@ -35,6 +42,8 @@ import numpy as np
 from .base import Estimate, InProcessTrajectoryAdapter
 
 SEGMENT_SPACE_TIME = ("spatial", "spatio_temporal", "temporal")
+#: diagnostic of an estimate that answers the box question instead of the exact one
+APPROX_DIAGNOSTIC = "approx:trajectory_box_overlap"
 
 
 def _bound_us(value: Optional[str]) -> Optional[int]:
@@ -105,6 +114,7 @@ class ExactMbrModel:
         if record.relation != "multi":
             return "unsupported", None, "single-table query (Exact-MBR answers distinct-trip queries only)"
         mask = np.ones(self.trip_count, dtype=bool)
+        surrogate = False
         for predicate in record.predicates:
             if predicate["table"] != self.segments.table:
                 mask &= self.backend.predicate_mask(predicate)
@@ -114,6 +124,7 @@ class ExactMbrModel:
                 return "unsupported", None, f"segment-level attribute predicate on {predicate['attribute']}"
             if kind == "temporal" and predicate["attribute"] != self.segments.temporal_attribute:
                 return "unsupported", None, f"segment temporal attribute {predicate['attribute']}"
+            surrogate = True
             if kind in ("spatial", "spatio_temporal"):
                 mask &= self.box["xmin"] <= float(predicate["max_x"])
                 mask &= self.box["xmax"] >= float(predicate["min_x"])
@@ -125,7 +136,7 @@ class ExactMbrModel:
                     mask &= self.box["tmin_us"] <= upper
                 if lower is not None:
                     mask &= self.box["tmax_us"] >= lower
-        return "ok", float(np.count_nonzero(mask)), ""
+        return "ok", float(np.count_nonzero(mask)), APPROX_DIAGNOSTIC if surrogate else ""
 
 
 class ExactMbrAdapter(InProcessTrajectoryAdapter):

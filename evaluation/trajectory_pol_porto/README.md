@@ -113,8 +113,9 @@ core's own tables are unchanged.
 `sx, sy, ex, ey, ts, te`), ordered by primary key, plus `derived/trips/` with a
 CSR index (`trip_id`, `offset`, `segment_count`) and per-trip bounding boxes
 (`xmin..ymax`, `tmin_us`, `tmax_us`). The export runs in one read-only
-repeatable-read transaction, streams fixed-width tables with binary `COPY`
-(about 2 minutes for 50M segments), checks that segments are sorted per trip,
+repeatable-read transaction, counts NULLs per column in SQL first, streams
+tables without text columns or NULLs with binary `COPY` (about 2 minutes for
+50M segments) and the others through a cursor, checks that segments are sorted per trip,
 that every trip has segments and that `num_of_segments` matches, and writes a
 manifest with database identity, SQL, NULL counts and a SHA-256 per array. It
 writes into `<dir>.partial` and renames at the end, so a failed export never
@@ -123,7 +124,11 @@ leaves a half snapshot behind. `load_snapshot(dir)` memory-maps the arrays;
 
 `traj_eval/snapshot_gate.py` recounts every benchmark label on the snapshot
 with `NumpyBackend` (sharded, resumable, fsynced per query) and `merge` writes
-`gate/<workload>_report.json`; it fails on any mismatch, gap or duplicate.
+`gate/<workload>_report.json`; it fails on any mismatch, gap or duplicate. A
+results directory is bound to its inputs (`binding.json`: snapshot manifest,
+benchmark and config hashes, shard count), and every result line carries its
+query's `predicate_hash`; resumes and `merge` refuse anything else, so rerun
+with new inputs into a new results directory.
 About 3.5 s per query at POL scale, i.e. 8 h serial for the test workload.
 
 On the cluster (from a checkout of this branch):
@@ -151,8 +156,12 @@ reported `serialized_bytes`), and `evaluate` answers queries one at a time.
   box overlap, with space and time tested separately. It is never below the
   truth (tested), and exact when a query has no segment condition. It is the
   representation error of every one-box-per-trajectory method, without any
-  model error, so it is reported next to DeepDB-MBR. Unsupported: single-table
-  queries, and attribute predicates on segment rows (`segment_idx`).
+  model error, so it is reported next to DeepDB-MBR. Answers that rely on box
+  overlap (any segment window or interval) are marked
+  `approx:trajectory_box_overlap`, as the convention for surrogate answers
+  requires; `all:exact_only` therefore covers its exact answers only.
+  Unsupported: single-table queries, and attribute predicates on segment rows
+  (`segment_idx`).
 - **Trajectory sampling** (`traj_sampling`, three seeds). A seeded simple
   random sample of whole trips (with their segments and agents), evaluated
   exactly with `NumpyBackend` and scaled by N/n. This is unbiased (tested over
@@ -173,6 +182,12 @@ environment, no database) and an aggregate-and-compare job writing
 `trajectory_summary_v1.{csv,md}`). Accuracy runs time a single pass; reported
 latency comes from `cli time` under `cpu_1core`, which still needs the
 trajectory timing launcher (see Timing).
+
+Latency is recorded for answered queries only. The time to reject an
+unsupported query is reported separately (`evaluation_detail.rejections` in
+`summary.json`), and a workload a method cannot answer at all has null
+inference metrics instead of rejection timings. Subprocess bridges must follow
+the same rule: latency rows only for queries with status `ok`.
 
 The stratified Markdown table shows smoothed Q-errors and the zero-estimate
 count next to the raw ones, because one zero estimate makes the raw Q-error

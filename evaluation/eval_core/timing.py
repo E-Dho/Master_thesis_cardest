@@ -309,7 +309,8 @@ def run_timing_stage(
         workloads: dict[str, Any] = {}
         for workload in config.workloads:
             records = [record for record in outcome.latencies if record.workload == workload.workload_id]
-            if not records:
+            answered = any(p.status == "ok" for p in outcome.predictions if p.workload == workload.workload_id)
+            if not records and answered:
                 failures.append(f"{workload.workload_id}: no latency observations")
             workloads[workload.workload_id] = {
                 "inference": summarize_latency(records),

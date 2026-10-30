@@ -390,6 +390,10 @@ def _validate_complete_run(run_directory: Path, summary: dict[str, Any]) -> None
         profiles = workload.get("inference_by_device", {})
         primary = profiles.get(primary_device, workload.get("inference", {}))
         if int(primary.get("observation_count", 0)) <= 0:
+            if int(accuracy["scored_query_count"]) == 0:
+                # Nothing was answered (every query unsupported or failed):
+                # there is no inference latency, and the metrics stay null.
+                continue
             raise ValueError(f"{workload_id} has no primary-device latency observations")
         for name in (
             "mean_ms", "p50_ms", "p95_ms", "p99_ms",

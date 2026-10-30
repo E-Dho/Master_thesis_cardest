@@ -105,13 +105,71 @@ class ExactMbrTest(_Root):
             self.assertGreaterEqual(prediction.estimated_cardinality, record.true_cardinality, record.query_id)
             if not segment:
                 self.assertEqual(prediction.estimated_cardinality, record.true_cardinality, record.query_id)
+                self.assertEqual(prediction.diagnostic, "", record.query_id)
                 exact += 1
+            else:
+                # the box answers a surrogate question: an approximation by the pipeline's convention
+                self.assertEqual(prediction.diagnostic, "approx:trajectory_box_overlap", record.query_id)
             above += prediction.estimated_cardinality > record.true_cardinality
         self.assertGreater(exact, 0)
         self.assertGreater(above, 0, "the box representation should overcount somewhere")
+        coverage = json.loads((run / "summary.json").read_text())["workloads"]["pol_v3_multi"]["extension"]["coverage"]
+        self.assertEqual(coverage["ok_exact_count"], exact)
+        self.assertGreater(coverage["ok_approx_count"], 0)
         metadata = json.loads((run / "build_metrics.json").read_text())["artifacts"]
         self.assertGreater(metadata["serialized_bytes"], 0)
         self.assertEqual(metadata["trip_count"], 240)
+
+
+class LatencyTest(_Root):
+    def test_only_answered_queries_are_timed_and_rejections_are_separate(self) -> None:
+        from evaluation.eval_core.artifacts import read_latencies
+
+        config, run, predictions, records = self.run_method("exact_mbr", "traj_exact_mbr", "latency")
+        latencies = read_latencies(run / "latency.csv")
+        repetitions = int(config.timing["repetitions"])
+        answered = {(p.workload, p.query_id) for p in predictions.values() if p.status == "ok"}
+        timed = [(l.workload, l.query_id) for l in latencies]
+        self.assertEqual(set(timed), answered)
+        self.assertEqual(len(timed), len(answered) * repetitions)
+        summary = json.loads((run / "summary.json").read_text())
+        single = summary["workloads"]["pol_v3_single"]
+        self.assertEqual(single["inference"]["observation_count"], 0)
+        self.assertIsNone(single["inference"]["mean_ms"])
+        rejections = summary["evaluation_detail"]["rejections"]
+        self.assertEqual(rejections["pol_v3_single"]["rejected_queries"], 8 * SINGLE)
+        self.assertEqual(rejections["pol_v3_single"]["timed_rejections"], 8 * SINGLE * repetitions)
+        unsupported_multi = sum(p.status == "unsupported" for (w, _), p in predictions.items() if w == "pol_v3_multi")
+        self.assertEqual(rejections["pol_v3_multi"]["rejected_queries"], unsupported_multi)
+
+    def test_answered_queries_without_latency_still_fail_validation(self) -> None:
+        from unittest.mock import patch
+
+        from evaluation.eval_core.adapters.base import AdapterEvaluation, StageMetrics
+        from evaluation.eval_core.records import PredictionRecord
+
+        config = load_experiment_config(_config(self.root, "exact_mbr", "traj_exact_mbr", "nolatency"))
+
+        class Untimed:
+            def __init__(self, *args):
+                pass
+
+            def prepare(self):
+                return StageMetrics()
+
+            smoke = build = lambda self, *args, **kwargs: StageMetrics()
+
+            def evaluate(self, workloads):
+                rows = [PredictionRecord(w.workload_id, r.query_id, "ok", r.true_cardinality, 1.0)
+                        for w in workloads for r in load_queries(w)]
+                return AdapterEvaluation(tuple(rows), ())
+
+            def artifact_metadata(self):
+                return {}
+
+        with patch("evaluation.eval_core.runner.create_adapter", Untimed):
+            with self.assertRaisesRegex(ValueError, "no primary-device latency observations"):
+                run_seed(config, 0, run_id="untimed")
 
 
 class SamplingTest(_Root):
