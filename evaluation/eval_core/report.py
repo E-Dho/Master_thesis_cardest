@@ -899,8 +899,13 @@ def _multi_method_markdown(
     rows: list[dict[str, Any]], mismatches: dict[str, dict[str, list[str]]] | None = None
 ) -> str:
     mismatches = mismatches or {}
+    experiments = sorted({str(row["experiment_id"]) for row in rows})
+    if all(str(row["workload"]).startswith("job_light") for row in rows):
+        title = "JOB-light method comparison"  # unchanged for the IMDB pipeline
+    else:
+        title = f"Method comparison ({', '.join(experiments)})"
     lines = [
-        "# JOB-light method comparison",
+        f"# {title}",
         "",
         "Values are mean +/- sample standard deviation across seed-level summaries.",
         "",

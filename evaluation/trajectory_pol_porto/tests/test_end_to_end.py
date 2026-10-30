@@ -93,6 +93,8 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual({row["method_id"] for row in rows}, {"fake_a", "fake_b"})
             self.assertEqual({row["workload"] for row in rows}, {"pol_v3_multi", "pol_v3_single"})
             markdown = (root / "compare" / "trajectory_summary_v1.md").read_text()
+            self.assertTrue((root / "compare" / "comparison.md").read_text().startswith(
+                "# Method comparison (traj_"), "trajectory comparisons must not be titled JOB-light")
             self.assertIn("category:spatio_temporal.range.multi", markdown)
 
     def test_query_index_cli_maps_ids_back_to_the_benchmark(self) -> None:
