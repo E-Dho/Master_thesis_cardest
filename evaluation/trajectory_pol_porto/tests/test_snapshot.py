@@ -229,6 +229,88 @@ class GateTest(unittest.TestCase):
                 bind_results_dir(legacy, gate_binding(snapshot, benchmark, "x", 2))
 
 
+
+def _bind_worker(args):
+    directory, binding, shared_pid = args
+    from unittest.mock import patch
+
+    from evaluation.trajectory_pol_porto.traj_eval.snapshot_gate import BindingError, bind_results_dir
+
+    try:
+        if shared_pid:  # array tasks on different nodes can share a PID
+            with patch("os.getpid", return_value=4242):
+                bind_results_dir(Path(directory), binding)
+        else:
+            bind_results_dir(Path(directory), binding)
+        return "ok"
+    except BindingError:
+        return "refused"
+    except Exception as exc:  # any other failure is a bug
+        return f"error: {type(exc).__name__}: {exc}"
+
+
+class BindingConcurrencyTest(unittest.TestCase):
+    BINDING = {"gate_version": 1, "snapshot_manifest_sha256": "a", "benchmark_sha256": "b",
+               "config_sha256": "c", "shards": 4}
+
+    def test_a_stale_view_of_a_fresh_binding_is_not_mistaken_for_legacy_results(self) -> None:
+        # Regression: a shard that checked for binding.json just before another
+        # shard linked it, and then saw that shard's result file, refused a
+        # correctly bound directory.
+        from unittest.mock import patch
+
+        from evaluation.trajectory_pol_porto.traj_eval.snapshot_gate import bind_results_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bind_results_dir(root, self.BINDING)
+            (root / "shard_000_of_004.jsonl").write_text("")
+            real_exists = Path.exists
+            calls = {"n": 0}
+
+            def stale_once(path):
+                if path.name == "binding.json" and calls["n"] == 0:
+                    calls["n"] += 1
+                    return False
+                return real_exists(path)
+
+            with patch.object(Path, "exists", stale_once):
+                bind_results_dir(root, self.BINDING)
+            self.assertEqual(calls["n"], 1)
+
+    def test_parallel_shards_agree_on_one_binding_and_leave_no_temporary_files(self) -> None:
+        import multiprocessing
+
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as tmp:
+            same = [(tmp + "/same", dict(self.BINDING), False) for _ in range(16)]
+            mixed = [(tmp + "/mixed", {**self.BINDING, "shards": 4 + (i % 2)}, False) for i in range(16)]
+            with context.Pool(8) as pool:
+                self.assertEqual(pool.map(_bind_worker, same), ["ok"] * 16)
+                outcomes = pool.map(_bind_worker, mixed)
+            winner = json.loads((Path(tmp) / "mixed" / "binding.json").read_text())["shards"]
+            expected = ["ok" if 4 + (i % 2) == winner else "refused" for i in range(16)]
+            self.assertEqual(outcomes, expected)
+            for directory in ("same", "mixed"):
+                self.assertEqual(sorted(p.name for p in (Path(tmp) / directory).iterdir()), ["binding.json"])
+
+    def test_processes_sharing_a_pid_do_not_collide(self) -> None:
+        # Regression: the temporary file was named after the PID, so tasks on
+        # different nodes with the same PID overwrote and deleted each other's file.
+        import multiprocessing
+
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = [(f"{tmp}/run{r}", {**self.BINDING, "shards": 4 + (i % 2)}, True)
+                    for r in range(20) for i in range(8)]
+            with context.Pool(8) as pool:
+                outcomes = pool.map(_bind_worker, jobs, chunksize=1)
+            errors = [o for o in outcomes if o not in ("ok", "refused")]
+            self.assertEqual(errors, [])
+            for r in range(20):
+                self.assertEqual(sorted(p.name for p in Path(f"{tmp}/run{r}").iterdir()), ["binding.json"])
+
+
 # --- the real export against PostgreSQL ---------------------------------------
 
 SCHEMA = """

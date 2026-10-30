@@ -187,7 +187,9 @@ Latency is recorded for answered queries only. The time to reject an
 unsupported query is reported separately (`evaluation_detail.rejections` in
 `summary.json`), and a workload a method cannot answer at all has null
 inference metrics instead of rejection timings. Subprocess bridges must follow
-the same rule: latency rows only for queries with status `ok`.
+the same rule: latency rows only for queries with status `ok`. The `time` stage
+first checks that its predictions cover every query of each workload exactly
+once; only a fully covered workload without answers may have no latency.
 
 The stratified Markdown table shows smoothed Q-errors and the zero-estimate
 count next to the raw ones, because one zero estimate makes the raw Q-error

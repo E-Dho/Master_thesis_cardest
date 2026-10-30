@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -65,16 +66,26 @@ def bind_results_dir(results_dir: Path, binding: Dict[str, Any]) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
     path = results_dir / BINDING_FILE
     if not path.exists():
-        if any(results_dir.glob("shard_*_of_*.jsonl")):
+        # A shard links the binding before it creates its result file, so
+        # result files prove a legacy directory only if the binding is still
+        # absent after they were seen; otherwise another shard was just first.
+        if any(results_dir.glob("shard_*_of_*.jsonl")) and not path.exists():
             raise BindingError(f"{results_dir} holds shard results without {BINDING_FILE}; use a new results directory")
-        temporary = results_dir / f".{BINDING_FILE}.{os.getpid()}"
-        temporary.write_text(json.dumps(binding, indent=2, sort_keys=True), encoding="utf-8")
+    if not path.exists():
+        # mkstemp names are unique on every node (array tasks on different
+        # nodes can share a PID on the shared file system).
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{BINDING_FILE}.", dir=results_dir)
         try:
-            os.link(temporary, path)  # atomic; fails if another shard was first
-        except FileExistsError:
-            pass
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(binding, indent=2, sort_keys=True))
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, path)  # atomic; fails if another shard was first
+            except FileExistsError:
+                pass
         finally:
-            temporary.unlink()
+            os.unlink(temporary)
     stored = json.loads(path.read_text(encoding="utf-8"))
     differing = sorted(key for key in set(stored) | set(binding) if stored.get(key) != binding.get(key))
     if differing:

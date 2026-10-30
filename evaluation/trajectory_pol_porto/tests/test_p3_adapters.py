@@ -285,3 +285,44 @@ class ShippedConfigTest(_Root):
             run = run_seed(config, config.seeds[0], run_id="shipped")
             summary = json.loads((run / "summary.json").read_text())
             self.assertIn("extension", summary["workloads"]["pol_v3_multi"], path.name)
+
+
+class TimingCoverageTest(_Root):
+    """The timing stage judges latency only after the predictions cover the workload."""
+
+    def setUp(self) -> None:
+        from evaluation.eval_core.records import LatencyRecord, PredictionRecord
+
+        self.Latency, self.Prediction = LatencyRecord, PredictionRecord
+        config = load_experiment_config(_config(self.root, "exact_mbr", "traj_exact_mbr", "cov"))
+        self.workload = next(w for w in config.workloads if w.workload_id == "pol_v3_single")
+        self.ids = [r.query_id for r in load_queries(self.workload)]
+
+    def predictions(self, status, ids=None):
+        return [self.Prediction("pol_v3_single", i, status, 1, 1.0 if status == "ok" else None)
+                for i in (self.ids if ids is None else ids)]
+
+    def latencies(self, ids):
+        return [self.Latency("pol_v3_single", i, 0, 1.0) for i in ids]
+
+    def failures(self, predictions, latencies):
+        from evaluation.eval_core.timing import latency_coverage_failures
+
+        return latency_coverage_failures([self.workload], predictions, latencies)
+
+    def test_fully_unsupported_workload_may_have_no_latency(self) -> None:
+        self.assertEqual(self.failures(self.predictions("unsupported"), []), [])
+
+    def test_missing_predictions_are_not_exempted(self) -> None:
+        # Regression: an empty or partial timing run used to pass as "nothing answered".
+        self.assertRegex(self.failures([], [])[0], "do not cover the workload")
+        partial = self.predictions("unsupported", self.ids[:-1])
+        self.assertRegex(self.failures(partial, [])[0], rf"missing \[{self.ids[-1]}\]")
+        doubled = self.predictions("unsupported") + self.predictions("unsupported", self.ids[:1])
+        self.assertRegex(self.failures(doubled, [])[0], rf"duplicates \[{self.ids[0]}\]")
+
+    def test_answers_need_latency_and_rejections_must_not_have_it(self) -> None:
+        self.assertRegex(self.failures(self.predictions("ok"), [])[0], "no latency observations")
+        self.assertEqual(self.failures(self.predictions("ok"), self.latencies(self.ids)), [])
+        self.assertRegex(self.failures(self.predictions("unsupported"), self.latencies(self.ids[:1]))[0],
+                         "although no query was answered")

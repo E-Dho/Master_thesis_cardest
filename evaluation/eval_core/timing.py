@@ -23,6 +23,7 @@ import hashlib
 import json
 import math
 import os
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -306,12 +307,10 @@ def run_timing_stage(
         predictions = tuple(attach_q_errors(record) for record in outcome.predictions)
         write_predictions(directory / "predictions.csv", predictions)
         write_latencies(directory / "latency.csv", outcome.latencies)
+        failures.extend(latency_coverage_failures(config.workloads, outcome.predictions, outcome.latencies))
         workloads: dict[str, Any] = {}
         for workload in config.workloads:
             records = [record for record in outcome.latencies if record.workload == workload.workload_id]
-            answered = any(p.status == "ok" for p in outcome.predictions if p.workload == workload.workload_id)
-            if not records and answered:
-                failures.append(f"{workload.workload_id}: no latency observations")
             workloads[workload.workload_id] = {
                 "inference": summarize_latency(records),
                 "model_core": summarize_model_core(records),
@@ -358,6 +357,40 @@ def run_timing_stage(
     if failures:
         raise TimingProtocolError(f"timing run {directory} failed: " + "; ".join(failures))
     return directory
+
+
+def latency_coverage_failures(workloads, predictions, latencies) -> list[str]:
+    """Problems with a timing run's predictions and latencies, per workload.
+
+    The predictions must cover every query of the workload exactly once
+    before anything else is judged. Only then may a workload without answered
+    queries (every query unsupported or failed) go without latency
+    observations; a workload with answers must have them, and one without
+    answers must not carry any (rejections are not inference).
+    """
+    from .workload_formats import load_queries
+
+    failures: list[str] = []
+    for workload in workloads:
+        expected = {query.query_id for query in load_queries(workload)}
+        ids = [p.query_id for p in predictions if p.workload == workload.workload_id]
+        if len(ids) != len(set(ids)) or set(ids) != expected:
+            missing = sorted(expected - set(ids))
+            extra = sorted(set(ids) - expected)
+            duplicates = sorted(i for i, n in Counter(ids).items() if n > 1)
+            failures.append(
+                f"{workload.workload_id}: timing predictions do not cover the workload "
+                f"(missing {missing[:5]}{'...' if len(missing) > 5 else ''}, extra {extra[:5]}, "
+                f"duplicates {duplicates[:5]})"
+            )
+            continue
+        answered = any(p.status == "ok" for p in predictions if p.workload == workload.workload_id)
+        timed = any(record.workload == workload.workload_id for record in latencies)
+        if answered and not timed:
+            failures.append(f"{workload.workload_id}: no latency observations")
+        elif timed and not answered:
+            failures.append(f"{workload.workload_id}: latency observations although no query was answered")
+    return failures
 
 
 def latest_reportable_timing(run_directory: Path, profile: str) -> Path | None:
