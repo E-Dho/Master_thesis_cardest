@@ -32,6 +32,9 @@ timing:
   # under the cpu_1core profile (timing keys do not change the accuracy hash)
   warmup_passes: 0
   repetitions: 1
+  # passes of the `time` stage (cpu_1core / cpu_postgres_2core launcher runs)
+  timing_warmup_passes: 1
+  timing_repetitions: 3
   sequential_single_query: true
   includes_predicate_encoding: true
   includes_workload_parsing: false

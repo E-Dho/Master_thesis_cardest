@@ -255,7 +255,8 @@ in the `mobilitydb` environment; then an aggregate-and-compare job writes
 
 Tests: rendering, plan parsing and config checks run everywhere; with
 `TRAJ_EVAL_TEST_PG` (PostgreSQL + PostGIS, no MobilityDB needed) the
-`v3_sql` variant runs end to end and a changed `pg_stats` must stop a run.
+`v3_sql` variant runs end to end, its `cpu_postgres_2core` time stage runs on
+one pinned client core, and a changed `pg_stats` must stop a run.
 
 ## Memory budget
 
@@ -268,14 +269,40 @@ checkpoint size is known.
 
 ## Timing
 
-The standardized profiles of the core apply (`cpu_1core` for the in-process
-estimators, `cpu_postgres_2core` for the planner, as for PostgreSQL on IMDB).
-Two things still point at the IMDB pipeline and have to be switched for
-trajectory timing runs (P3/P4):
+The standardized profiles of the core apply: `cpu_1core` for the in-process
+estimators (P3), `cpu_postgres_2core` for the planner (P4, as for PostgreSQL
+on IMDB). Accuracy runs time one unguarded pass (`timing.warmup_passes: 0`,
+`repetitions: 1`); reported latency comes only from the `time` stage, which
+uses `timing.timing_warmup_passes` (1) and `timing.timing_repetitions` (3)
+from `_base.yaml`. Timing keys never change estimates or the accuracy hash,
+and the `time` stage checks that its estimates equal the accuracy run's.
 
-- `scripts/timing_launch.py` starts the JOB-light CLI;
-- the hardware-class file defaults to the IMDB one (override with
-  `JOBLIGHT_TIMING_HARDWARE_SPEC`).
+The jobs use the shared launcher
+(`../job_light_imdb_non_trajectory/scripts/timing_launch.py --cli-module
+evaluation.trajectory_pol_porto.traj_eval.cli`) and this pipeline's hardware
+classes (`configs/timing_hardware.json`, exported as
+`JOBLIGHT_TIMING_HARDWARE_SPEC`). On the cluster:
+
+```bash
+REPO_ROOT=$PWD AFTER_JOB=<P4 accuracy job> evaluation/trajectory_pol_porto/slurm/submit_timing.sh
+```
+
+- `timing_cpu_1core.sbatch`: one plan with every P3 config and seed
+  (`traj_eval/timing_plan.py` picks the latest complete accuracy run of each,
+  as `aggregate` does), all on one node, so one CPU model for the whole
+  table. About 19 h, almost all of it the 1M-trip sample (≈ 0.66 s per query
+  × 8,000 queries × 4 passes × 3 seeds).
+- `timing_cpu_postgres_2core.sbatch`: the three planner configs. The launcher
+  starts the POL server inside the step, pinned to the second core
+  (autovacuum off), and pins the client to the first; it runs under the
+  database job name `pol_mobilitydb` with `--dependency=singleton` and
+  `afterok` on `AFTER_JOB`. Minutes.
+- Then an aggregate-and-compare job writes
+  `results/traj_phase1_pol_v3/timed_comparison/`.
+
+Plans are written when each job starts, so the jobs can be submitted before
+their accuracy runs exist. The timing Python is `geo-mlp` (threadpoolctl)
+with the IMDB timing package directory on `PYTHONPATH` (psycopg).
 
 ## Tests
 

@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Hardware classes of the trajectory (POL/Porto) timing profiles; same schema",
+    "and rules as evaluation/job_light_imdb_non_trajectory/configs/timing_hardware.json.",
+    "The trajectory timing jobs export JOBLIGHT_TIMING_HARDWARE_SPEC=<this file>.",
+    "'allocated' binds a CPU profile to the exact CPU model of the node Slurm selects",
+    "for one timing job; every entry of one plan runs on that node."
+  ],
+  "schema_version": 1,
+  "profiles": {
+    "cpu_1core": {
+      "cpu_model": "allocated",
+      "slurm_hint": "scheduler-selected base node; exact CPU model is fixed and recorded after allocation"
+    },
+    "cpu_postgres_2core": {
+      "cpu_model": "allocated",
+      "slurm_hint": "scheduler-selected base node; exact CPU model is fixed and recorded after allocation"
+    },
+    "gpu_single_query": {
+      "cpu_model": "AMD EPYC 7313 16-Core Processor",
+      "gpu_name": "NVIDIA L40S",
+      "slurm_hint": "sbatch --partition=gpu --constraint=L40 --gres=gpu:1"
+    },
+    "cpu_fullnode_exclusive": {
+      "cpu_model": "allocated",
+      "slurm_hint": "scheduler-selected exclusive base node; exact CPU model is fixed and recorded after allocation"
+    }
+  }
+}

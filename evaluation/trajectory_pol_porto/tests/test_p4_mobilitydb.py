@@ -327,6 +327,47 @@ class PlannerEndToEndTest(unittest.TestCase):
         compare_aggregates([self.root / "agg" / "comparison.json"], self.root / "compare")
         self.assertTrue((self.root / "compare" / "trajectory_summary_v1.md").exists())
 
+    @unittest.skipUnless(hasattr(os, "sched_setaffinity"), "needs Linux CPU affinity")
+    def test_planner_timing_stage_on_one_client_core(self) -> None:
+        from unittest import mock
+
+        from evaluation.eval_core import timing_guard as guard
+        from evaluation.eval_core.timing import run_timing_stage
+
+        path = _config(self.root, self.dsn)
+        path.write_text(path.read_text().replace(
+            "  repetitions: 2\n",
+            "  repetitions: 1\n  timing_warmup_passes: 1\n  timing_repetitions: 2\n"
+            "  primary_profile: cpu_postgres_2core\n  profiles: [cpu_postgres_2core]\n"), encoding="utf-8")
+        config = load_experiment_config(path)
+        run = run_seed(config, 0, run_id="timed")
+        spec = self.root / "timing_hardware.json"
+        spec.write_text(json.dumps({"schema_version": 1, "profiles": {
+            "cpu_postgres_2core": {"cpu_model": guard.cpu_model()["model_name"]}}}))
+        original = os.sched_getaffinity(0)
+        os.sched_setaffinity(0, set(guard.thread_siblings(min(original))) & original)
+        existing = {child["pid"] for child in guard.child_processes()}  # helpers of earlier tests
+        children = guard.child_processes
+        try:
+            with mock.patch.dict(os.environ, {**guard.profile_environment("cpu_postgres_2core"),
+                                              guard.ALLOW_MISSING_THREADPOOLCTL_ENV: "1",
+                                              guard.HARDWARE_SPEC_ENV: str(spec)}), \
+                    mock.patch.object(guard, "child_processes", lambda *a, **k: [
+                        c for c in children(*a, **k) if c["pid"] not in existing]):
+                directory = run_timing_stage(config, 0, run, "cpu_postgres_2core")
+        finally:
+            os.sched_setaffinity(0, original)
+        summary = json.loads((directory / "timing_summary.json").read_text())
+        self.assertTrue(summary["reportable"], summary.get("failures"))
+        self.assertTrue(summary["estimate_consistency"]["passed"])
+        answered = len(read_predictions(run / "predictions.csv"))
+        timed = list(csv.DictReader((directory / "latency.csv").open()))
+        self.assertEqual(len(timed), 2 * answered)
+        self.assertEqual({row["scope"] for row in timed},
+                         {"sql_rendering_explain_planning_and_plan_rows_conversion"})
+        # the accuracy run's planner_details.csv is kept (timing runs do not rewrite it)
+        self.assertEqual(len(list(csv.DictReader((run / "planner_details.csv").open()))), answered)
+
     def test_changed_statistics_stop_the_run(self) -> None:
         from evaluation.eval_core.runner import initialize_staged_run, run_stage
 

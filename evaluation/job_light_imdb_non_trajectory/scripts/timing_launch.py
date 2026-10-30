@@ -11,6 +11,10 @@ estimates stay identical to the accuracy run) and pins the client to the
 first.  Plan format, one run per line (``#`` starts a comment)::
 
     CONFIG_PATH  SEED  RUN_DIRECTORY  [extra cli time arguments ...]
+
+``--cli-module`` selects the evaluation CLI (default: the JOB-light one); the
+trajectory pipeline passes ``evaluation.trajectory_pol_porto.traj_eval.cli``
+together with ``--database`` and its own PostgreSQL paths.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ if str(SCRIPTS) not in sys.path:
 import _timing  # noqa: E402
 import pg_cluster_lock  # noqa: E402
 
+DEFAULT_CLI_MODULE = "evaluation.job_light_imdb_non_trajectory.joblight_eval.cli"
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -43,6 +49,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--python", default=sys.executable,
                         help="interpreter of the evaluation CLI")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--cli-module", default=DEFAULT_CLI_MODULE,
+                        help="evaluation CLI module run as `python -m <module> time ...`")
     parser.add_argument("--allow-config-drift", action="append", default=[])
     parser.add_argument("--allow-estimate-drift", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -73,6 +81,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     report: Dict[str, Any] = {
         "profile": args.profile,
+        "cli_module": args.cli_module,
         "plan": str(args.plan.resolve()),
         "step_cpus": guard.format_cpu_list(cpus),
         "physical_cores": cores,
@@ -112,7 +121,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 report["postgres"] = server.describe()
         for entry in entries:
             command = [
-                args.python, "-m", "evaluation.job_light_imdb_non_trajectory.joblight_eval.cli",
+                args.python, "-m", args.cli_module,
                 "time", "--config", entry["config"], "--seed", entry["seed"],
                 "--run-directory", entry["run_directory"], "--profile", args.profile,
                 *[item for path in args.allow_config_drift for item in ("--allow-config-drift", path)],

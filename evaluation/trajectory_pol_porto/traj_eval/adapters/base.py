@@ -17,6 +17,12 @@ Config keys:
     ``config_sha256`` must match.
 ``adapter.verify_snapshot_checksums`` (default false)
     re-hash every snapshot array in ``prepare`` (a few minutes for POL).
+``timing.warmup_passes`` / ``timing.repetitions``
+    passes of the accuracy ``evaluate`` stage.
+``timing.timing_warmup_passes`` / ``timing.timing_repetitions``
+    passes of the profile-controlled ``time`` stage (default: the two above).
+    Timing keys never change estimates or the accuracy hash, so a timing run
+    may use more passes than its accuracy run.
 
 ``_estimate`` returns ``(status, estimate, diagnostic)``. Queries a method
 cannot express are ``("unsupported", None, reason)``; an estimate that answers
@@ -209,6 +215,9 @@ class InProcessTrajectoryAdapter(Adapter):
         model = self._model()
         warmup_passes = int(self.config.timing.get("warmup_passes", 1))
         repetitions = max(1, int(self.config.timing.get("repetitions", 1)))
+        if session is not None:  # the profile-controlled timing stage
+            warmup_passes = int(self.config.timing.get("timing_warmup_passes", warmup_passes))
+            repetitions = max(1, int(self.config.timing.get("timing_repetitions", repetitions)))
         predictions: List[PredictionRecord] = []
         latencies: List[LatencyRecord] = []
         rejections: Dict[str, Dict[str, Any]] = {}
