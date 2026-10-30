@@ -144,7 +144,7 @@ def merge(settings: Settings, run_dir: Path, exclude_paths=()) -> Dict[str, Any]
         if dict(observed) != expected and len(rows) == settings.total_queries:
             problems.append(f"{category.key}: add-on split {dict(observed)} differs from quotas {expected}")
 
-    for field in ("config_sha256", "pools_sha256"):
+    for field in ("config_sha256", "pools_sha256", "label_backend", "label_snapshot_manifest_sha256"):
         values = {row.get(field) for row in rows}
         if len(values) > 1:
             problems.append(f"rows disagree on {field}: {sorted(map(str, values))}")
@@ -221,6 +221,9 @@ def build_summary(settings: Settings, rows, rejected_by_category) -> Dict[str, A
         "pools_sha256": rows[0]["pools_sha256"] if rows else None,
         "base_seed": rows[0]["slot"]["base_seed"] if rows else None,
         "label_kinds": dict(Counter(row["label_kind"] for row in rows)),
+        # rows without the field were labelled with SQL (the original path)
+        "label_backend": rows[0].get("label_backend", "sql") if rows else None,
+        "label_snapshot_manifest_sha256": rows[0].get("label_snapshot_manifest_sha256") if rows else None,
         "temporal_width_seconds": _quantiles(widths),
         "label_seconds_total": sum(row["label_seconds"] for row in rows),
         "categories": dict(sorted(categories.items())),

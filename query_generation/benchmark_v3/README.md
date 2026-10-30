@@ -99,6 +99,27 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    rejected (reason `excluded`), and the merge refuses any overlap. Its
    verification checks 10 queries per category.
 
+5. **MSCN training workload** (8 x 312 single + 8 x 938 multi = 10,000
+   queries, seed 20261030, none of them in the test or the validation
+   benchmark):
+
+   ```bash
+   REPO_ROOT=$PWD TRAINING=1 query_generation/benchmark_v3/slurm/submit_v3.sh
+   ```
+
+   The pools job and the verification use the database as usual, but the
+   16 category tasks label with `NumpyBackend` on the shared snapshot
+   (`generate --backend numpy --snapshot DIR`, default
+   `$THESIS_WORK_ROOT/traj_snapshots/pol_v3`), so they run in parallel and
+   outside the database singleton. The snapshot's gate showed the numpy labels
+   equal the SQL labels for all 10,400 test and validation queries; the
+   verification still recounts a stratified sample with PostGIS and EXISTS.
+   Every accepted row records `label_backend` and
+   `label_snapshot_manifest_sha256`, both are part of the resume binding, and
+   the merge refuses a benchmark labelled by two backends. `LABEL_BACKEND=sql`
+   restores the database path; `LABEL_BACKEND=numpy` works for the other
+   modes too. `EXCLUDE_HASHES` takes a colon-separated list.
+
 All jobs that start PostgreSQL are submitted under the job name
 `pol_mobilitydb` with `--dependency=singleton`, so Slurm runs them one at a
 time (they share one data directory, and each stops PostgreSQL when it

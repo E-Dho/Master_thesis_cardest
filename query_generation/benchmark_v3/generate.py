@@ -8,6 +8,20 @@ category or if its label is 0, and accepted otherwise. Accepted rows and
 rejections are appended to JSONL files and fsynced one by one, so an
 interrupted task resumes without re-running any finished label query.
 
+Label backends (``--backend``):
+
+``sql`` (default)
+    one SQL statement per candidate against the MobilityDB database.
+``numpy``
+    ``NumpyBackend`` on the shared numpy snapshot of the same database
+    (``--snapshot``, written by ``evaluation/trajectory_pol_porto/traj_eval/
+    snapshot.py``). It needs no database, so categories can run in parallel.
+    The snapshot's label-reproduction gate showed it gives the SQL labels
+    exactly (10,400 of 10,400 test and validation labels). The backend and the
+    snapshot manifest hash are part of the resume binding and of every row
+    (``label_backend``, ``label_snapshot_manifest_sha256``), so a category is
+    never labelled half by one backend and half by the other.
+
 Exit codes: 0 finished, 75 stopped at the deadline (resubmit to resume).
 """
 
@@ -72,8 +86,12 @@ def binding(
     category: Category,
     base_seed: int,
     excluded_sources: Optional[List[Dict[str, Any]]] = None,
+    label_source: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
+    # ``label_source`` is absent for the SQL backend, so SQL runs keep their
+    # original binding (and resume across this change).
     return {
+        **(label_source or {}),
         "excluded_sha256": sorted(source["sha256"] for source in excluded_sources or []),
         "state_version": STATE_VERSION,
         "semantics_version": SEMANTICS_VERSION,
@@ -114,6 +132,7 @@ def generate_category(
     log: Callable[[str], None] = lambda message: print(message, flush=True),
     excluded_hashes: Optional[set] = None,
     excluded_sources: Optional[List[Dict[str, Any]]] = None,
+    label_source: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     paths = run_paths(output_dir, category)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -121,7 +140,7 @@ def generate_category(
     rejected = load_jsonl_recover_trailing_write(paths["rejected"])
     check_or_write_state(
         paths["state"],
-        binding(settings, pools, category, base_seed, excluded_sources),
+        binding(settings, pools, category, base_seed, excluded_sources, label_source),
         has_rows=bool(accepted or rejected),
     )
 
@@ -179,6 +198,7 @@ def generate_category(
                     seconds = time.perf_counter() - started
                     if cardinality > 0:
                         finish_record(record, cardinality, seconds)
+                        record.update(label_source or {})
                         append_jsonl(paths["accepted"], record)
                         accepted.append(record)
                         hashes.add(record["predicate_hash"])
@@ -193,6 +213,7 @@ def generate_category(
 
     summary = summarize(settings, category, accepted, rejected, base_seed, resumed, finished=True)
     summary["excluded_benchmarks"] = excluded_sources or []
+    summary["label_source"] = label_source or {"label_backend": "sql"}
     write_json_atomic(paths["summary"], summary)
     return summary
 
@@ -263,11 +284,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--statement-timeout-ms", type=int, default=0, help="0 disables the timeout")
     parser.add_argument("--deadline-seconds", type=float, help="stop cleanly after this many seconds")
     parser.add_argument("--progress-interval", type=int, default=10)
+    parser.add_argument("--backend", choices=("sql", "numpy"), default="sql",
+                        help="label with SQL (default) or with NumpyBackend on --snapshot")
+    parser.add_argument("--snapshot", help="numpy snapshot directory (--backend numpy)")
     parser.add_argument("--host")
     parser.add_argument("--port")
     parser.add_argument("--dbname")
     parser.add_argument("--user")
     return parser
+
+
+def numpy_label_source(snapshot: Path, config: Path, settings: Settings
+                       ) -> Tuple[Callable[[Dict[str, Any]], int], Dict[str, str]]:
+    """``count_fn`` and provenance for labelling with NumpyBackend on a snapshot.
+
+    The snapshot is bound to the config at its own grid (the export does not
+    depend on query counts), so the check uses the config without the grid
+    overrides of this run.
+    """
+
+    from evaluation.trajectory_pol_porto.traj_eval.snapshot import load_snapshot
+
+    from .numpy_backend import NumpyBackend
+
+    data = load_snapshot(snapshot, expected_config_sha256=load_settings(config).sha256)
+    manifest = hashlib.sha256((Path(snapshot) / "manifest.json").read_bytes()).hexdigest()
+    source = {"label_backend": "numpy_snapshot", "label_snapshot_manifest_sha256": manifest}
+    return NumpyBackend(settings, data).count, source
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -279,21 +322,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     category = Category.parse(args.category)
     deadline = time.time() + args.deadline_seconds if args.deadline_seconds else None
     excluded_hashes, excluded_sources = load_excluded_hashes(args.exclude_hashes)
-    with SqlSession(args.host, args.port, args.dbname, args.user, args.statement_timeout_ms) as session:
-        backend = SqlBackend(session)
-        summary = generate_category(
-            settings,
-            pools,
-            category,
-            base_seed=args.base_seed,
-            count_fn=backend.count,
-            output_dir=Path(args.output_dir),
-            deadline=deadline,
-            progress_interval=args.progress_interval,
-            is_timeout=SqlSession.is_timeout,
-            excluded_hashes=excluded_hashes,
-            excluded_sources=excluded_sources,
-        )
+    common = dict(
+        base_seed=args.base_seed,
+        output_dir=Path(args.output_dir),
+        deadline=deadline,
+        progress_interval=args.progress_interval,
+        excluded_hashes=excluded_hashes,
+        excluded_sources=excluded_sources,
+    )
+    if args.backend == "numpy":
+        if not args.snapshot:
+            raise SystemExit("--backend numpy needs --snapshot")
+        count_fn, source = numpy_label_source(Path(args.snapshot), Path(args.config), settings)
+        summary = generate_category(settings, pools, category, count_fn=count_fn, label_source=source, **common)
+    else:
+        with SqlSession(args.host, args.port, args.dbname, args.user, args.statement_timeout_ms) as session:
+            summary = generate_category(settings, pools, category, count_fn=SqlBackend(session).count,
+                                        is_timeout=SqlSession.is_timeout, **common)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["finished"] else EXIT_DEADLINE
 
