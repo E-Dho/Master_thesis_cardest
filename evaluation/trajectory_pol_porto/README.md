@@ -14,11 +14,13 @@ different. The plan behind it is the project doc
 | Phase | Content | State |
 |---|---|---|
 | P1 | Shared core, v3 workload format, features, strata, coverage | done |
-| P2 | Shared data snapshot + label-reproduction gate | implemented; cluster run pending |
-| P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | implemented; runs after P2 |
-| P4–P9 | MobilityDB, DeepDB-MBR, CASE+/TraHist (+ temporal), own model, RIS / MSCN, Porto | open |
+| P2 | Shared data snapshot + label-reproduction gate | done (all 10,400 labels reproduced) |
+| P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | implemented; cluster run in progress |
+| P4 | MobilityDB / PostgreSQL planner (three variants) | implemented; stbox templates provisional |
+| P5–P9 | DeepDB-MBR, CASE+/TraHist (+ temporal), own model, RIS / MSCN, Porto | open |
 
-`traj_eval/plugin.py` registers the adapters: `traj_exact_mbr` and `traj_sampling` (P3).
+`traj_eval/plugin.py` registers the adapters: `traj_exact_mbr` and
+`traj_sampling` (P3), `traj_mobilitydb` (P4).
 
 ## Workloads
 
@@ -195,6 +197,53 @@ The stratified Markdown table shows smoothed Q-errors and the zero-estimate
 count next to the raw ones, because one zero estimate makes the raw Q-error
 huge (1e-12 guard), which hides everything else for sampling methods.
 
+## P4 MobilityDB planner
+
+`traj_mobilitydb` (`traj_eval/adapters/mobilitydb.py`) reads the planner's
+row estimate with `EXPLAIN (FORMAT JSON)` on the loaded MobilityDB database;
+nothing is executed. Single queries are planned as `SELECT 1 FROM ... WHERE
+...`, multi queries as `SELECT t.trip_id ... GROUP BY t.trip_id`, so the top
+node is the planner's distinct-trip estimate; `planner_details.csv` also keeps
+the row estimate below the aggregate. Variants (`adapter.variant`, one config
+each):
+
+| Variant | SQL | Reported as |
+|---|---|---|
+| `v3_sql` (headline) | the label SQL of the benchmark itself (Liang-Barsky terms included) | exact question |
+| `segment_stbox` | segment windows/intervals as `s.segment_tgeom && stbox(...)`, rest v3 SQL | `approx:segment_stbox` |
+| `trip_stbox` | trips only, windows/intervals as `t.trip_tgeom && stbox(...)` | `approx:trip_stbox`; single queries and segment attribute predicates unsupported |
+
+- Statistics are the database's own; `adapter.analyze` stays false.
+  `prepare` writes `database_identity.json` (versions, planner settings,
+  `last_analyze`, a SHA-256 fingerprint of `pg_stats` for the benchmark
+  tables); `build` and `evaluate` stop if the fingerprint changed. The model
+  size is the `pg_statistic` storage of those tables.
+- `adapter.session_timezone: UTC`, and the stbox templates carry `+00`: the
+  moving `tgeompoint`s were built from `EXTRACT(EPOCH FROM t_s)`, i.e. UTC.
+  (The loader builds instant segments, `t_s = t_e`, from timestamp text, which
+  depends on the load session's time zone; the database probe checks this.)
+- The `stbox` literal syntax depends on the MobilityDB version, so it is a
+  template (`adapter.stbox.{xt,x,t}`); the shipped one is the 1.1+ syntax and
+  stays provisional until the probe on the cluster database confirms it.
+- The three configs must stay identical apart from the variant keys (tested),
+  because the config loader supports one level of `extends`.
+
+On the cluster:
+
+```bash
+REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_p4.sh
+```
+
+One job under the shared database job name `pol_mobilitydb`
+(`--dependency=singleton`) starts PostgreSQL once and runs the three configs
+in the `mobilitydb` environment; then an aggregate-and-compare job writes
+`results/traj_phase1_pol_v3/p4_comparison/` with the P3 configs included
+(`COMPARE_WITH=""` for P4 alone).
+
+Tests: rendering, plan parsing and config checks run everywhere; with
+`TRAJ_EVAL_TEST_PG` (PostgreSQL + PostGIS, no MobilityDB needed) the
+`v3_sql` variant runs end to end and a changed `pg_stats` must stop a run.
+
 ## Memory budget
 
 One level: 1× the own model's inference-only serialized size per dataset
@@ -206,8 +255,10 @@ checkpoint size is known.
 
 ## Timing
 
-The standardized profiles of the core apply. Two things still point at the
-IMDB pipeline and have to be switched for trajectory timing runs (P3/P4):
+The standardized profiles of the core apply (`cpu_1core` for the in-process
+estimators, `cpu_postgres_2core` for the planner, as for PostgreSQL on IMDB).
+Two things still point at the IMDB pipeline and have to be switched for
+trajectory timing runs (P3/P4):
 
 - `scripts/timing_launch.py` starts the JOB-light CLI;
 - the hardware-class file defaults to the IMDB one (override with

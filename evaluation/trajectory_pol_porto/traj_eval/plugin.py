@@ -17,7 +17,14 @@ def _trajectory_sampling():
     return TrajectorySamplingAdapter
 
 
-ADAPTERS = {"traj_exact_mbr": _exact_mbr, "traj_sampling": _trajectory_sampling}
+def _mobilitydb():
+    from .adapters.mobilitydb import MobilityDbAdapter
+
+    return MobilityDbAdapter
+
+
+ADAPTERS = {"traj_exact_mbr": _exact_mbr, "traj_sampling": _trajectory_sampling,
+            "traj_mobilitydb": _mobilitydb}
 WORKLOAD_FORMATS = {TRAJ_V3_JSONL_FORMAT.name: TRAJ_V3_JSONL_FORMAT}
-IN_PROCESS_TIMING_ADAPTERS = ("traj_exact_mbr", "traj_sampling")
+IN_PROCESS_TIMING_ADAPTERS = ("traj_exact_mbr", "traj_sampling", "traj_mobilitydb")
 SUMMARY_EXTENSIONS = {TRAJECTORY_SUMMARY_EXTENSION.schema: TRAJECTORY_SUMMARY_EXTENSION}

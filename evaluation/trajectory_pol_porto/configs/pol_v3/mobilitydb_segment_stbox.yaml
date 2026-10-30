@@ -1,0 +1,45 @@
+# P4: MobilityDB / PostgreSQL planner estimate, variant segment_stbox. Deterministic:
+# one seed. The adapter never runs ANALYZE (adapter.analyze: false) and
+# records a fingerprint of pg_stats in database_identity.json, so all three
+# variants are planned on the same statistics. Keep the three mobilitydb_*
+# configs identical except for experiment.variant_id/display_name/adaptation
+# and adapter.variant (the loader supports one level of extends only).
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_pol_v3
+  method_id: mobilitydb
+  variant_id: segment_stbox
+  display_name: MobilityDB planner (segment stbox)
+  adaptation: EXPLAIN row estimate with segment windows/intervals rewritten to segment_tgeom && stbox (MobilityDB selectivity); box overlap, reported as approx:segment_stbox.
+  protocol: adapted
+  seeds: [0]
+source:
+  url: https://github.com/MobilityDB/MobilityDB.git
+  installed_version: the cluster's mobilitydb environment; versions are recorded in database_identity.json
+timing:
+  comparison_basis: native_cpu_inference
+  published_reference_hardware: CPU (PostgreSQL planner with PostGIS/MobilityDB selectivity functions)
+  primary_profile: cpu_postgres_2core
+  profiles: [cpu_postgres_2core]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 0.0
+    absolute_tolerance: 0.0
+resources:
+  profile: cpu_primary
+  cpu_threads: 1
+adapter:
+  type: traj_mobilitydb
+  variant: segment_stbox
+  benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json
+  dsn: host=${MOBILITYDB_SOCKET_DIR} port=${MOBILITYDB_PORT} dbname=${MOBILITYDB_DB}
+  analyze: false
+  # stbox literals and the moving tgeompoints (built from EXTRACT(EPOCH FROM
+  # t_s)) are UTC; the templates carry +00 explicitly as well.
+  session_timezone: UTC
+  # PROVISIONAL until the database probe confirms the stbox syntax of the
+  # installed MobilityDB (>= 1.1 form below).
+  stbox:
+    xt: stbox 'SRID={srid};STBOX XT((({xmin},{ymin}),({xmax},{ymax})),[{tmin}+00, {tmax}+00])'
+    x: stbox 'SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))'
+    t: stbox 'STBOX T([{tmin}+00, {tmax}+00])'
