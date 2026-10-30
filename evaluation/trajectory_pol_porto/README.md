@@ -16,7 +16,7 @@ different. The plan behind it is the project doc
 | P1 | Shared core, v3 workload format, features, strata, coverage | done |
 | P2 | Shared data snapshot + label-reproduction gate | done (all 10,400 labels reproduced) |
 | P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | implemented; cluster run in progress |
-| P4 | MobilityDB / PostgreSQL planner (three variants) | implemented; stbox templates provisional |
+| P4 | MobilityDB / PostgreSQL planner (three variants) | implemented; database probe done, ready to run |
 | P5–P9 | DeepDB-MBR, CASE+/TraHist (+ temporal), own model, RIS / MSCN, Porto | open |
 
 `traj_eval/plugin.py` registers the adapters: `traj_exact_mbr` and
@@ -204,7 +204,10 @@ row estimate with `EXPLAIN (FORMAT JSON)` on the loaded MobilityDB database;
 nothing is executed. Single queries are planned as `SELECT 1 FROM ... WHERE
 ...`, multi queries as `SELECT t.trip_id ... GROUP BY t.trip_id`, so the top
 node is the planner's distinct-trip estimate; `planner_details.csv` also keeps
-the row estimate below the aggregate. Variants (`adapter.variant`, one config
+the planner's row estimate of the distinct step's input (below Gather, Sort and
+partial aggregates; per-process rows of parallel plans scaled to the total with
+PostgreSQL's parallel divisor), which separates the join-size error from the
+distinct-count error. Variants (`adapter.variant`, one config
 each):
 
 | Variant | SQL | Reported as |
@@ -218,13 +221,23 @@ each):
   `last_analyze`, a SHA-256 fingerprint of `pg_stats` for the benchmark
   tables); `build` and `evaluate` stop if the fingerprint changed. The model
   size is the `pg_statistic` storage of those tables.
-- `adapter.session_timezone: UTC`, and the stbox templates carry `+00`: the
-  moving `tgeompoint`s were built from `EXTRACT(EPOCH FROM t_s)`, i.e. UTC.
-  (The loader builds instant segments, `t_s = t_e`, from timestamp text, which
-  depends on the load session's time zone; the database probe checks this.)
+- `adapter.session_timezone: UTC`, and the stbox templates carry `+00`. The
+  probe (2026-10-30, job 22578953) showed the `tgeompoint` times equal the
+  naive `t_s`/`t_e` read as UTC (0 or −1 µs from float epochs) while the
+  server default is `CET`; without the UTC session the boxes would be shifted
+  by 1–2 h.
 - The `stbox` literal syntax depends on the MobilityDB version, so it is a
-  template (`adapter.stbox.{xt,x,t}`); the shipped one is the 1.1+ syntax and
-  stays provisional until the probe on the cluster database confirms it.
+  template (`adapter.stbox.{xt,x,t}`); the shipped one is the MobilityDB 1.4.0
+  syntax (all three forms parse on the cluster). Spatial literals must carry
+  the data SRID ("Operation on mixed SRID" otherwise), so `prepare` of an stbox
+  variant executes each template once on one row and stops on any error.
+- Cluster database (probe): PostgreSQL 16.10, MobilityDB 1.4.0, PostGIS 3.5.0
+  (MobilityDB's own version string names PostGIS 3.6.0, i.e. it was built
+  against newer headers; recorded, not shown to be a fault). Statistics exist
+  for all 23 columns, but `last_analyze` is empty, so their age is unknown;
+  `segments.trip_id` has `n_distinct` ≈ 40k against 4.3M trips, which drives
+  the distinct-trip estimates. That is the planner as configured, and it is
+  what the baseline reports.
 - The three configs must stay identical apart from the variant keys (tested),
   because the config loader supports one level of `extends`.
 

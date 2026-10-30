@@ -5,8 +5,11 @@ with ``EXPLAIN`` (never executed). Single queries are planned as
 ``SELECT 1 FROM ... WHERE ...`` (the row estimate, as in the IMDB PostgreSQL
 adapter); multi queries as ``SELECT t.trip_id FROM ... WHERE ... GROUP BY
 t.trip_id``, so the top node is the planner's estimate of the number of
-distinct trips. The input-row estimate below the aggregate is recorded too
-(``planner_details.csv``), which shows how much the distinct step changes.
+distinct trips. The planner's row estimate of the input of the distinct step
+is recorded too (``planner_details.csv``: the first node below the aggregate
+that is not a Gather, Sort or partial aggregate; rows below a Gather are per
+process in EXPLAIN and are scaled to the total with PostgreSQL's parallel
+divisor). It shows how much of the error comes from the distinct step.
 
 Variants (``adapter.variant``):
 
@@ -28,7 +31,11 @@ Variants (``adapter.variant``):
 The ``stbox`` literal depends on the MobilityDB version, so it is a template
 (``adapter.stbox``: ``xt``, ``x`` and ``t`` formats with ``{xmin} {ymin}
 {xmax} {ymax} {tmin} {tmax} {srid}``). Missing interval bounds use the data
-domain of the segment time attribute.
+domain of the segment time attribute. The spatial literals need the SRID of
+the data (MobilityDB raises "Operation on mixed SRID" otherwise), so
+``prepare`` of an stbox variant executes one overlap per template it uses on a
+single row (``SELECT <tgeompoint> && <literal> ... LIMIT 1``) and fails early
+on a syntax or SRID error.
 
 Statistics: the adapter never runs ``ANALYZE`` unless ``adapter.analyze`` is
 true. ``prepare`` records server, PostGIS and MobilityDB versions, settings,
@@ -66,23 +73,49 @@ RECORDED_SETTINGS = (
     "server_version", "default_statistics_target", "TimeZone", "work_mem", "effective_cache_size",
     "random_page_cost", "seq_page_cost", "cpu_tuple_cost", "jit", "max_parallel_workers_per_gather",
     "enable_hashagg", "enable_seqscan", "enable_indexscan", "enable_bitmapscan",
+    "parallel_leader_participation", "max_parallel_workers",
 )
+PASS_THROUGH = ("Gather", "Gather Merge", "Sort", "Incremental Sort", "Materialize")
 STATEMENT_TIMEOUT_MS = 60_000
 
 
-def plan_rows(payload: Any) -> Tuple[float, str, Optional[float], Optional[str]]:
-    """(top Plan Rows, top node type, rows of the node below an aggregate, its type)."""
+def parallel_divisor(workers: int, leader_participation: bool = True) -> float:
+    """PostgreSQL's ``get_parallel_divisor``: per-process rows x divisor = total rows."""
+
+    divisor = float(workers)
+    if leader_participation:
+        leader = 1.0 - 0.3 * workers
+        if leader > 0:
+            divisor += leader
+    return divisor
+
+
+def plan_rows(payload: Any, leader_participation: bool = True
+              ) -> Tuple[float, str, Optional[float], Optional[str], Optional[int]]:
+    """(top Plan Rows, top node type, total input rows of the distinct step, its node, workers).
+
+    The input is the first node below a top Aggregate/Group/Unique that is not a
+    Gather, Sort or partial aggregate; below a Gather its per-process rows are
+    scaled to the total.
+    """
 
     if isinstance(payload, str):
         payload = json.loads(payload)
     if isinstance(payload, list):
         payload = payload[0]
     plan = payload["Plan"]
-    child_rows = child_type = None
+    input_rows = input_type = workers = None
     if plan.get("Node Type") in ("Aggregate", "Group", "Unique") and plan.get("Plans"):
-        child = plan["Plans"][0]
-        child_rows, child_type = float(child["Plan Rows"]), str(child["Node Type"])
-    return float(plan["Plan Rows"]), str(plan["Node Type"]), child_rows, child_type
+        node = plan["Plans"][0]
+        while node.get("Plans") and (node["Node Type"] in PASS_THROUGH or (
+                node["Node Type"] == "Aggregate" and node.get("Partial Mode") == "Partial")):
+            if node["Node Type"] in ("Gather", "Gather Merge"):
+                workers = int(node.get("Workers Planned") or 0)
+            node = node["Plans"][0]
+        input_rows, input_type = float(node["Plan Rows"]), str(node["Node Type"])
+        if workers:
+            input_rows *= parallel_divisor(workers, leader_participation)
+    return float(plan["Plan Rows"]), str(plan["Node Type"]), input_rows, input_type, workers
 
 
 class PlannerSql:
@@ -123,6 +156,24 @@ class PlannerSql:
         if template not in self.stbox:
             raise ValueError(f"adapter.stbox.{template} is not configured")
         return self.stbox[template].format(**values)
+
+    def literal_checks(self) -> List[Tuple[str, str]]:
+        """(template, SQL) pairs that execute each stbox template this variant uses
+        once against its tgeompoint column (one row), on domain-sized boxes."""
+
+        from query_generation.benchmark_v3.query_model import from_clause
+
+        if self.variant == "v3_sql":
+            return []
+        table = self.settings.entity_table if self.variant == "trip_stbox" else self.segments.table
+        geometry = self._temporal_geometry(table)
+        source, _ = from_clause(self.settings, [table])
+        domain = self.settings.attr(self.segments.table, self.segments.spatial_attribute)["domain"]
+        space = {key: domain[key] for key in ("min_x", "min_y", "max_x", "max_y")}
+        probes = {"x": {"kind": "spatial", **space}, "t": {"kind": "temporal"},
+                  "xt": {"kind": "spatio_temporal", **space}}
+        return [(name, f"SELECT {geometry} && {self._box(probe)}\n{source}\nLIMIT 1")
+                for name, probe in probes.items()]
 
     def render(self, record: Any) -> Tuple[Optional[str], str]:
         """(SQL or None when unsupported, unsupported reason or approx diagnostic)."""
@@ -170,9 +221,10 @@ class PlannerSql:
 
 
 class PlannerEstimator:
-    def __init__(self, connection: Any, renderer: PlannerSql):
+    def __init__(self, connection: Any, renderer: PlannerSql, leader_participation: bool = True):
         self.connection = connection
         self.renderer = renderer
+        self.leader_participation = leader_participation
         self.details: Dict[Tuple[str, int], Dict[str, Any]] = {}
 
     def estimate(self, record: Any) -> Estimate:
@@ -182,10 +234,10 @@ class PlannerEstimator:
         with self.connection.cursor() as cursor:
             cursor.execute(f"EXPLAIN (FORMAT JSON, COSTS TRUE) {sql}")
             payload = cursor.fetchone()[0]
-        rows, node, child_rows, child_node = plan_rows(payload)
+        rows, node, input_rows, input_node, workers = plan_rows(payload, self.leader_participation)
         self.details.setdefault((record.workload, record.query_id), {
             "workload": record.workload, "query_id": record.query_id, "top_node": node, "plan_rows": rows,
-            "input_node": child_node, "input_plan_rows": child_rows,
+            "input_node": input_node, "input_plan_rows": input_rows, "parallel_workers": workers,
             "sql_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
         })
         return "ok", rows, note
@@ -219,6 +271,12 @@ class MobilityDbAdapter(InProcessTrajectoryAdapter):
             if timezone:
                 cursor.execute("SELECT set_config('TimeZone', %s, false)", (str(timezone),))
         return connection
+
+    def _estimator_for(self, connection: Any) -> PlannerEstimator:
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW parallel_leader_participation")
+            leader = str(cursor.fetchone()[0]).lower() == "on"
+        return PlannerEstimator(connection, self._renderer(), leader)
 
     def _renderer(self) -> PlannerSql:
         return PlannerSql(self.settings, self.variant, dict(self.config.adapter.get("stbox") or {}))
@@ -293,7 +351,18 @@ class MobilityDbAdapter(InProcessTrajectoryAdapter):
                         cursor.execute(f'ANALYZE "{schema}"."{name}"')
                 analyzed = True
             identity = self._identity(connection)
+            checks = []
+            with connection.cursor() as cursor:
+                for template, sql in self._renderer().literal_checks():
+                    try:
+                        cursor.execute(sql)
+                        cursor.fetchall()
+                    except Exception as exc:
+                        raise ValueError(f"adapter.stbox.{template} does not work on this database: "
+                                         f"{type(exc).__name__}: {exc}\n{sql}") from exc
+                    checks.append({"template": template, "sql": sql, "ok": True})
         identity["analyzed_by_this_run"] = analyzed
+        identity["stbox_literal_checks"] = checks
         (self.run_directory / "database_identity.json").write_text(
             json.dumps(identity, indent=2, sort_keys=True, default=str), encoding="utf-8")
         return StageMetrics(wall_seconds=time.perf_counter() - started, peak_rss_bytes=_peak_rss_bytes(),
@@ -304,7 +373,7 @@ class MobilityDbAdapter(InProcessTrajectoryAdapter):
         started = time.perf_counter()
         results = []
         with self._connect() as connection:
-            estimator = PlannerEstimator(connection, self._renderer())
+            estimator = self._estimator_for(connection)
             for workload in workloads:
                 for record in list(load_queries(workload))[:query_limit]:
                     status, estimate, note = estimator.estimate(record)
@@ -336,7 +405,7 @@ class MobilityDbAdapter(InProcessTrajectoryAdapter):
         if self._identity(connection)["statistics_fingerprint"] != meta["statistics_fingerprint"]:
             connection.close()
             raise ValueError("planner statistics changed since build; start a new run")
-        self._estimator = PlannerEstimator(connection, self._renderer())
+        self._estimator = self._estimator_for(connection)
         return self._estimator
 
     def _evaluate(self, workloads, *, session: Any = None, profile: str = "") -> AdapterEvaluation:
@@ -351,7 +420,8 @@ class MobilityDbAdapter(InProcessTrajectoryAdapter):
 
     def _write_details(self, estimator: PlannerEstimator) -> None:
         path = self.run_directory / "planner_details.csv"
-        fields = ["workload", "query_id", "top_node", "plan_rows", "input_node", "input_plan_rows", "sql_sha256"]
+        fields = ["workload", "query_id", "top_node", "plan_rows", "input_node", "input_plan_rows",
+                  "parallel_workers", "sql_sha256"]
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()

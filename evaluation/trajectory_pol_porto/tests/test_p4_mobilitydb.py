@@ -16,7 +16,7 @@ from evaluation.eval_core.artifacts import read_predictions
 from evaluation.eval_core.config import load_experiment_config
 from evaluation.eval_core.runner import run_seed
 from evaluation.eval_core.workload_formats import load_queries
-from evaluation.trajectory_pol_porto.traj_eval.adapters.mobilitydb import PlannerSql, plan_rows
+from evaluation.trajectory_pol_porto.traj_eval.adapters.mobilitydb import PlannerSql, parallel_divisor, plan_rows
 from evaluation.trajectory_pol_porto.traj_eval.workloads import load_traj_workload
 
 from query_generation.benchmark_v3 import synthetic
@@ -101,9 +101,33 @@ class RenderingTest(unittest.TestCase):
     def test_plan_rows_reads_the_aggregate_and_its_input(self) -> None:
         payload = [{"Plan": {"Node Type": "Aggregate", "Plan Rows": 12, "Plans": [
             {"Node Type": "Hash Join", "Plan Rows": 345}]}}]
-        self.assertEqual(plan_rows(payload), (12.0, "Aggregate", 345.0, "Hash Join"))
+        self.assertEqual(plan_rows(payload), (12.0, "Aggregate", 345.0, "Hash Join", None))
         self.assertEqual(plan_rows(json.dumps([{"Plan": {"Node Type": "Seq Scan", "Plan Rows": 7}}])),
-                         (7.0, "Seq Scan", None, None))
+                         (7.0, "Seq Scan", None, None, None))
+
+    def test_parallel_plans_report_total_input_rows(self) -> None:
+        # Finalize Group <- Gather Merge (2 workers) <- Partial Aggregate <- Sort <- Parallel Hash Join
+        payload = [{"Plan": {"Node Type": "Group", "Plan Rows": 900, "Plans": [
+            {"Node Type": "Gather Merge", "Plan Rows": 800, "Workers Planned": 2, "Plans": [
+                {"Node Type": "Aggregate", "Partial Mode": "Partial", "Plan Rows": 400, "Plans": [
+                    {"Node Type": "Sort", "Plan Rows": 1000, "Plans": [
+                        {"Node Type": "Hash Join", "Plan Rows": 1000}]}]}]}]}}]
+        rows, node, input_rows, input_node, workers = plan_rows(payload)
+        self.assertEqual((rows, node, input_node, workers), (900.0, "Group", "Hash Join", 2))
+        self.assertAlmostEqual(input_rows, 1000 * 2.4)  # 2 workers + leader 1 - 0.6
+        self.assertAlmostEqual(plan_rows(payload, leader_participation=False)[2], 2000.0)
+        self.assertAlmostEqual(parallel_divisor(4), 4.0)  # the leader no longer contributes
+
+    def test_literal_checks_cover_each_template_with_the_srid(self) -> None:
+        self.assertEqual(PlannerSql(self.settings, "v3_sql", {}).literal_checks(), [])
+        for variant, column in (("segment_stbox", "s.segment_tgeom"), ("trip_stbox", "t.trip_tgeom")):
+            checks = dict(PlannerSql(self.settings, variant, STBOX).literal_checks())
+            self.assertEqual(sorted(checks), ["t", "x", "xt"])
+            for template, sql in checks.items():
+                self.assertTrue(sql.startswith(f"SELECT {column} && stbox '"), sql)
+                self.assertTrue(sql.endswith("LIMIT 1"), sql)
+                if template != "t":
+                    self.assertIn("SRID=26916;", sql)
 
 
 SHIPPED = Path(__file__).resolve().parents[1] / "configs" / "pol_v3"
@@ -282,6 +306,7 @@ class PlannerEndToEndTest(unittest.TestCase):
         self.assertTrue(all(d["input_plan_rows"] for d in multi))
         identity = json.loads((run / "database_identity.json").read_text())
         self.assertIn("postgis", identity["extensions"])
+        self.assertEqual(identity["stbox_literal_checks"], [])
         self.assertEqual(len(identity["statistics_fingerprint"]), 64)
         self.assertFalse(identity["analyzed_by_this_run"])
         artifacts = json.loads((run / "build_metrics.json").read_text())["artifacts"]

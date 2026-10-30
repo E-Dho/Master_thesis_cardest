@@ -34,11 +34,12 @@ adapter:
   benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json
   dsn: host=${MOBILITYDB_SOCKET_DIR} port=${MOBILITYDB_PORT} dbname=${MOBILITYDB_DB}
   analyze: false
-  # stbox literals and the moving tgeompoints (built from EXTRACT(EPOCH FROM
-  # t_s)) are UTC; the templates carry +00 explicitly as well.
+  # The tgeompoint times equal the naive t_s/t_e read as UTC (probe
+  # 2026-10-30, job 22578953: 0 or -1 us after UTC normalization; the server
+  # default TimeZone is CET), so sessions run in UTC and the literals carry +00.
   session_timezone: UTC
-  # PROVISIONAL until the database probe confirms the stbox syntax of the
-  # installed MobilityDB (>= 1.1 form below).
+  # MobilityDB 1.4.0 syntax (all three forms parse; probe 2026-10-30). The
+  # spatial forms need the data SRID; prepare executes each template once.
   stbox:
     xt: stbox 'SRID={srid};STBOX XT((({xmin},{ymin}),({xmax},{ymax})),[{tmin}+00, {tmax}+00])'
     x: stbox 'SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))'
