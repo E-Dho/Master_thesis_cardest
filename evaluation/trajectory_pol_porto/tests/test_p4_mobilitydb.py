@@ -25,10 +25,17 @@ from ._fixture import MULTI, SINGLE, V3_CONFIG, synthetic_settings, write_benchm
 
 PG = os.environ.get("TRAJ_EVAL_TEST_PG")
 STBOX = {
-    "xt": "stbox 'SRID={srid};STBOX XT((({xmin},{ymin}),({xmax},{ymax})),[{tmin}, {tmax}])'",
-    "x": "stbox 'SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))'",
-    "t": "stbox 'STBOX T([{tmin}, {tmax}])'",
+    "xt": "SRID={srid};STBOX XT((({xmin},{ymin}),({xmax},{ymax})),[{tmin}, {tmax}])",
+    "x": "SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))",
+    "t": "STBOX T([{tmin}, {tmax}])",
 }
+LITERAL = __import__("re").compile(r"stbox '(SRID=\d+;)?STBOX (XT|X|T)\([^']*\)'")
+
+
+def assert_literals_closed(test: unittest.TestCase, sql: str) -> None:
+    """Every stbox literal is a complete, closed SQL string (the c312134 failure mode)."""
+    test.assertEqual(sql.count("'") % 2, 0, sql)
+    test.assertEqual(sql.count("stbox '"), len(LITERAL.findall(sql)), sql)
 
 
 class RenderingTest(unittest.TestCase):
@@ -90,6 +97,13 @@ class RenderingTest(unittest.TestCase):
         sql, reason = renderer.render(segment_attribute)
         self.assertIsNone(sql)
         self.assertIn("segment-level attribute predicate", reason)
+
+    def test_quoted_or_typed_templates_are_refused(self) -> None:
+        for bad in ("stbox 'SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))'",
+                    "stbox 'SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))",
+                    "'STBOX T([{tmin}, {tmax}])'"):
+            with self.assertRaisesRegex(ValueError, "literal text only"):
+                PlannerSql(self.settings, "segment_stbox", {"x": bad})
 
     def test_missing_template_and_unknown_variant_are_errors(self) -> None:
         with self.assertRaisesRegex(ValueError, "adapter.variant"):
@@ -176,10 +190,13 @@ class ShippedConfigTest(unittest.TestCase):
                 self.assertEqual(config.seeds, (0,))
                 self.assertEqual(config.adapter["session_timezone"], "UTC")
                 renderer = PlannerSql(synthetic_settings(), variant, dict(config.adapter["stbox"]))
+                for _, sql in renderer.literal_checks():  # the SQL prepare executes
+                    assert_literals_closed(self, sql)
                 for record in records:  # every template has every placeholder it needs
                     sql, note = renderer.render(record)
                     if sql is not None and "stbox" in note:
                         self.assertNotIn("{", sql)
+                        assert_literals_closed(self, sql)
                         if "STBOX T" in sql or "STBOX XT" in sql:
                             self.assertIn("+00", sql)
 

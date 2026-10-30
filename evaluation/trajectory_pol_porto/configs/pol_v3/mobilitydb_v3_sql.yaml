@@ -40,7 +40,8 @@ adapter:
   session_timezone: UTC
   # MobilityDB 1.4.0 syntax (all three forms parse; probe 2026-10-30). The
   # spatial forms need the data SRID; prepare executes each template once.
+  # Literal text only: the adapter writes stbox '<text>' (no quotes here).
   stbox:
-    xt: stbox 'SRID={srid};STBOX XT((({xmin},{ymin}),({xmax},{ymax})),[{tmin}+00, {tmax}+00])'
-    x: stbox 'SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))'
-    t: stbox 'STBOX T([{tmin}+00, {tmax}+00])'
+    xt: SRID={srid};STBOX XT((({xmin},{ymin}),({xmax},{ymax})),[{tmin}+00, {tmax}+00])
+    x: SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))
+    t: STBOX T([{tmin}+00, {tmax}+00])

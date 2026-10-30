@@ -30,7 +30,11 @@ Variants (``adapter.variant``):
 
 The ``stbox`` literal depends on the MobilityDB version, so it is a template
 (``adapter.stbox``: ``xt``, ``x`` and ``t`` formats with ``{xmin} {ymin}
-{xmax} {ymax} {tmin} {tmax} {srid}``). Missing interval bounds use the data
+{xmax} {ymax} {tmin} {tmax} {srid}``). A template is the literal's text only,
+e.g. ``SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))``; the adapter
+writes ``stbox '<text>'`` itself. Templates may not contain quotes: the config
+parser strips leading and trailing quote characters from scalars, which once
+removed the closing quote of a quoted template. Missing interval bounds use the data
 domain of the segment time attribute. The spatial literals need the SRID of
 the data (MobilityDB raises "Operation on mixed SRID" otherwise), so
 ``prepare`` of an stbox variant executes one overlap per template it uses on a
@@ -124,6 +128,12 @@ class PlannerSql:
     def __init__(self, settings: Any, variant: str, stbox: Dict[str, str]):
         if variant not in VARIANTS:
             raise ValueError(f"adapter.variant must be one of {VARIANTS}")
+        for name, template in stbox.items():
+            if "'" in str(template) or '"' in str(template) or not str(template).strip().upper().startswith(
+                    ("SRID=", "STBOX")):
+                raise ValueError(
+                    f"adapter.stbox.{name} must be the literal text only, e.g. "
+                    f"'SRID={{srid}};STBOX X(...)' without quotes or a type name; got {template!r}")
         self.settings = settings
         self.variant = variant
         self.stbox = stbox
@@ -155,7 +165,7 @@ class PlannerSql:
         template = {"spatial": "x", "temporal": "t", "spatio_temporal": "xt"}[kind]
         if template not in self.stbox:
             raise ValueError(f"adapter.stbox.{template} is not configured")
-        return self.stbox[template].format(**values)
+        return f"stbox '{self.stbox[template].format(**values)}'"
 
     def literal_checks(self) -> List[Tuple[str, str]]:
         """(template, SQL) pairs that execute each stbox template this variant uses

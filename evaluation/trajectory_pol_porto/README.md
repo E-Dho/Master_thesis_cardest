@@ -231,6 +231,10 @@ each):
   syntax (all three forms parse on the cluster). Spatial literals must carry
   the data SRID ("Operation on mixed SRID" otherwise), so `prepare` of an stbox
   variant executes each template once on one row and stops on any error.
+  A template is the literal's text only (`SRID={srid};STBOX X(...)`); the
+  adapter adds `stbox '...'`. Quoted templates are refused, because the config
+  parser strips leading and trailing quote characters (this broke the first
+  P4 run at c312134: the closing quote was lost).
 - Cluster database (probe): PostgreSQL 16.10, MobilityDB 1.4.0, PostGIS 3.5.0
   (MobilityDB's own version string names PostGIS 3.6.0, i.e. it was built
   against newer headers; recorded, not shown to be a fault). Statistics exist
