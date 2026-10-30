@@ -18,7 +18,11 @@ cd "$REPO_ROOT"
 # stops cleanly before the time limit (exit 75); resubmit with STAGE=verify and
 # it continues where it stopped.
 PER_CATEGORY=${PER_CATEGORY:-25}   # VALIDATION=1 sets 10 in v3_env.sh
-DEADLINE_SECONDS=${DEADLINE_SECONDS:-84600}
+# One check may run at most CHECK_TIMEOUT_SECONDS (then it is reported as
+# unverified). A query runs up to three checks, so the job stops taking new
+# queries 1.5 h + 10 min before the 24 h limit.
+CHECK_TIMEOUT_SECONDS=${CHECK_TIMEOUT_SECONDS:-1800}
+DEADLINE_SECONDS=${DEADLINE_SECONDS:-$((86400 - 3 * CHECK_TIMEOUT_SECONDS - 600))}
 if ! python -c "import numpy" 2>/dev/null; then
   echo "The verification job needs numpy in $MOBILITYDB_ENV (pools, generation and merge do not)." >&2
   echo "Install it once, e.g.: micromamba install -p $MOBILITYDB_ENV -c conda-forge numpy" >&2
@@ -30,7 +34,7 @@ set +e
 python -m query_generation.benchmark_v3.verify \
   --config "$V3_CONFIG" --benchmark "$RUN_DIR/benchmark.jsonl" "${GRID_ARGS[@]}" \
   --report "$RUN_DIR/verify_report.json" --per-category "$PER_CATEGORY" \
-  --deadline-seconds "$DEADLINE_SECONDS" "${DB_ARGS[@]}"
+  --deadline-seconds "$DEADLINE_SECONDS" --check-timeout-seconds "$CHECK_TIMEOUT_SECONDS" "${DB_ARGS[@]}"
 status=$?
 set -e
 exit $status
