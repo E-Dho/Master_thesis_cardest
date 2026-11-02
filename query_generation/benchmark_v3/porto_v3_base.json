@@ -1,0 +1,126 @@
+{
+  "name": "porto_taxi_exact_st_v3_base",
+  "schema": "porto",
+  "srid": 3763,
+  "_comment": [
+    "Porto base config for benchmark v3 only (the v2 runtime config of build_porto_taxi_query_config.py is unchanged).",
+    "Decided 2026-11-02: no taxis table (its only column is taxi_id), no daytype (one value), no origin_call (ID-like, 78 % NULL);",
+    "origin_stand stays nullable (NULL never matches, in SQL and in the snapshot); v3 has no exclusive groups or value",
+    "dependencies, so impossible call_type/origin_stand combinations are rejected as zero-label candidates."
+  ],
+  "entity": {
+    "table": "trips",
+    "key": "trip_id",
+    "expression": "t.trip_id"
+  },
+  "tables": {
+    "trips": {
+      "name": "porto.trips",
+      "alias": "t",
+      "primary_key": "trip_id",
+      "flags": [
+        "standard",
+        "temporal"
+      ],
+      "attributes": [
+        {
+          "name": "call_type",
+          "type": "nominal",
+          "dimension": "standard",
+          "expression": "t.call_type",
+          "values": [
+            "A",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "name": "origin_stand",
+          "type": "integer",
+          "dimension": "standard",
+          "expression": "t.origin_stand",
+          "domain": {
+            "min": 1,
+            "max": 63
+          }
+        },
+        {
+          "name": "num_of_segments",
+          "type": "integer",
+          "dimension": "standard",
+          "expression": "t.num_of_segments",
+          "domain": {
+            "min": 1,
+            "max": 3880
+          }
+        },
+        {
+          "name": "trip_time",
+          "type": "temporal_interval",
+          "dimension": "temporal",
+          "start_expression": "t.start_time",
+          "end_expression": "t.end_time",
+          "temporal_geometry_expression": "t.trip_tgeom",
+          "domain": {
+            "min": "2013-07-01 00:00:53",
+            "max": "2014-06-30 23:59:41"
+          }
+        }
+      ]
+    },
+    "segments": {
+      "name": "porto.segments",
+      "alias": "s",
+      "primary_key": "trip_id, segment_idx",
+      "flags": [
+        "standard",
+        "temporal",
+        "spatial"
+      ],
+      "attributes": [
+        {
+          "name": "segment_idx",
+          "type": "integer",
+          "dimension": "standard",
+          "expression": "s.segment_idx",
+          "domain": {
+            "min": 0,
+            "max": 3879
+          }
+        },
+        {
+          "name": "segment_time",
+          "type": "temporal_interval",
+          "dimension": "temporal",
+          "start_expression": "s.t_s",
+          "end_expression": "s.t_e",
+          "temporal_geometry_expression": "s.segment_tgeom",
+          "domain": {
+            "min": "2013-07-01 00:00:53",
+            "max": "2014-06-30 23:59:41"
+          }
+        },
+        {
+          "name": "segment_geom",
+          "type": "geometry",
+          "dimension": "spatial",
+          "expression": "s.segment_geom",
+          "srid": 3763,
+          "domain": {
+            "min_x": -610919.605185877,
+            "min_y": -302980.297887669,
+            "max_x": 315277.573883702,
+            "max_y": 1269994.79218329
+          }
+        }
+      ]
+    }
+  },
+  "joins": [
+    {
+      "left": "trips",
+      "right": "segments",
+      "condition": "t.trip_id = s.trip_id"
+    }
+  ]
+}

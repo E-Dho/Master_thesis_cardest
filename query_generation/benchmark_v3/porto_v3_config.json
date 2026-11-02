@@ -1,0 +1,80 @@
+{
+  "name": "porto_exact_st_v3",
+  "semantics_version": "pol_exact_st_v3",
+  "base_config": "porto_v3_base.json",
+  "domain_overrides_source": "Porto probe job 22629119 (2026-11-02): exact min/max of every ordered attribute. PROVISIONAL segments.segment_geom: the full extent including GPS outliers; to be replaced by the robust quantile box (decided 2026-11-02) from the follow-up quantile probe. Labels stay exact over all segments.",
+  "domain_overrides": {
+    "segments.segment_geom": {
+      "min_x": -610919.605185877,
+      "min_y": -302980.297887669,
+      "max_x": 315277.573883702,
+      "max_y": 1269994.79218329
+    },
+    "segments.segment_time": {
+      "min": "2013-07-01 00:00:53",
+      "max": "2014-06-30 23:59:41"
+    },
+    "trips.trip_time": {
+      "min": "2013-07-01 00:00:53",
+      "max": "2014-06-30 23:59:41"
+    },
+    "trips.origin_stand": {
+      "min": 1,
+      "max": 63
+    },
+    "trips.num_of_segments": {
+      "min": 1,
+      "max": 3880
+    },
+    "segments.segment_idx": {
+      "min": 0,
+      "max": 3879
+    }
+  },
+  "grid": {
+    "single": 250,
+    "multi": 750
+  },
+  "center_live_probability": 0.9,
+  "temporal_width": {
+    "distribution": "log_uniform",
+    "min_seconds": 60
+  },
+  "spatial_width": {
+    "distribution": "log_uniform",
+    "min_meters": 10
+  },
+  "attribute_addons": {
+    "applies_to": "multi_non_standard",
+    "counts": [
+      0,
+      1,
+      2
+    ],
+    "probabilities": [
+      0.5,
+      0.25,
+      0.25
+    ]
+  },
+  "unbounded_spatial_margin": 3000000.0,
+  "segments": {
+    "table": "segments",
+    "spatial_attribute": "segment_geom",
+    "temporal_attribute": "segment_time",
+    "trip_key": "s.trip_id",
+    "columns": {
+      "sx": "s.s_x",
+      "sy": "s.s_y",
+      "ex": "s.e_x",
+      "ey": "s.e_y",
+      "ts": "s.t_s",
+      "te": "s.t_e"
+    }
+  },
+  "pools": {
+    "size": 20000,
+    "oversample": 1.5
+  },
+  "max_attempts": 200
+}
