@@ -339,8 +339,10 @@ def run_timing_stage(
             "hardware_violations": hardware_problems,
             "estimate_consistency": consistency,
             "estimate_drift_allowed": bool(allow_estimate_drift),
-            "warmup_passes": int(config.timing.get("warmup_passes", 1)),
-            "repetitions": int(config.timing.get("repetitions", 10)),
+            # an adapter that runs its own pass counts reports them in
+            # detail["passes"]; otherwise the config's accuracy keys apply
+            "warmup_passes": int(_passes(outcome).get("warmup_passes", config.timing.get("warmup_passes", 1))),
+            "repetitions": int(_passes(outcome).get("repetitions", config.timing.get("repetitions", 10))),
             "workloads": workloads,
             "adapter_detail": outcome.detail,
             "failures": failures,
@@ -357,6 +359,12 @@ def run_timing_stage(
     if failures:
         raise TimingProtocolError(f"timing run {directory} failed: " + "; ".join(failures))
     return directory
+
+
+def _passes(outcome: Any) -> dict[str, Any]:
+    detail = getattr(outcome, "detail", None) or {}
+    passes = detail.get("passes") if isinstance(detail, dict) else None
+    return passes if isinstance(passes, dict) else {}
 
 
 def latency_coverage_failures(workloads, predictions, latencies) -> list[str]:

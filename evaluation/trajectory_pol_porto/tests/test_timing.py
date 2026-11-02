@@ -92,6 +92,8 @@ class InProcessTimingTest(unittest.TestCase):
         self.assertEqual(len(accuracy_rows), 2 * len(answered))
         self.assertEqual(len(timed), 3 * len(answered))
         self.assertEqual({row["profile"] for row in timed}, {"cpu_1core"})
+        # the summary records the passes that ran, not the accuracy defaults
+        self.assertEqual((summary["warmup_passes"], summary["repetitions"]), (1, 3))
         self.assertTrue(summary["workloads"]["pol_v3_multi"]["guard"]["passed"])
         self.assertEqual(list(load_timing_summaries(runs[0])), ["cpu_1core"])
         aggregate = aggregate_runs(runs, self.root / "aggregate")

@@ -267,7 +267,9 @@ class InProcessTrajectoryAdapter(Adapter):
                     ))
         return AdapterEvaluation(tuple(predictions), tuple(latencies),
                                  detail={"model_meta": self._meta_without_arrays(),
-                                         "rejections": rejections})
+                                         "rejections": rejections,
+                                         "passes": {"warmup_passes": warmup_passes,
+                                                    "repetitions": repetitions}})
 
     def _meta_without_arrays(self) -> Dict[str, Any]:
         path = self.model_directory / MODEL_META

@@ -305,7 +305,11 @@ REPO_ROOT=$PWD AFTER_JOB=<P4 accuracy job> evaluation/trajectory_pol_porto/slurm
   `results/traj_phase1_pol_v3/timed_comparison/`.
 
 Plans are written when each job starts, so the jobs can be submitted before
-their accuracy runs exist. The timing Python is `geo-mlp` (threadpoolctl)
+their accuracy runs exist. `timing_summary.json` records the passes that ran
+(`detail["passes"]` of the adapter). The first timing runs (bc4cb9b, jobs
+22579613/22579614) predate this and show the accuracy defaults (0 warm-up,
+1 repetition) although they ran 1 + 3 passes; their latency files hold
+exactly three rows per answered query. The timing Python is `geo-mlp` (threadpoolctl)
 with the IMDB timing package directory on `PYTHONPATH` (psycopg).
 
 ## Tests
