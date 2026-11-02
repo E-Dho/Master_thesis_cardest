@@ -144,6 +144,30 @@ class PipelineTest(_Root):
         self.assertEqual([p.estimated_cardinality for p in predictions],
                          [p.estimated_cardinality for p in read_predictions(again / "predictions.csv")])
 
+    def test_a_changed_vocabulary_or_domain_stops_loading(self) -> None:
+        from evaluation.eval_core.runner import create_adapter
+
+        config = load_experiment_config(self.config("vocab"))
+        run = run_seed(config, 0, run_id="vocab")
+        meta_path = run / "model" / "model_meta.json"
+        original = meta_path.read_text()
+        adapter = create_adapter(config, 0, run)
+        adapter._model()  # unchanged: loads
+        tampered = [
+            ("nominal", lambda v: v["nominal"].reverse()),  # two positions swap meaning
+            ("domains", lambda v: v["domains"]["agents.age"].__setitem__(1, v["domains"]["agents.age"][1] + 1)),
+            ("joins", lambda v: v["joins"].reverse()),
+        ]
+        try:
+            for field, change in tampered:
+                meta = json.loads(original)
+                change(meta["vocabulary"])
+                meta_path.write_text(json.dumps(meta))
+                with self.assertRaisesRegex(ValueError, f"vocabulary differs .*{field}"):
+                    adapter._model()
+        finally:
+            meta_path.write_text(original)
+
     def test_multi_only_variant_rejects_single_queries(self) -> None:
         config = load_experiment_config(self.config("multi", training_relations="[multi]"))
         run = run_seed(config, 0, run_id="multi")

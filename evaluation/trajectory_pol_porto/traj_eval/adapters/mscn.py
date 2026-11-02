@@ -428,8 +428,17 @@ class MscnAdapter(InProcessTrajectoryAdapter):
                 _, table_id, column = name.split("/", 2)
                 samples.setdefault(table_id, {})[column] = values
         featurizer = Featurizer(self.settings, samples, int(meta["recipe"]["sample_bits"]))
-        if featurizer.vocabulary()["keys"] != meta["vocabulary"]["keys"]:
-            raise ValueError("the v3 config changed since the model was built")
+        # Every input position is defined by the vocabulary (order of keys,
+        # kinds, nominal values, joins, tables) and every bound by its domain,
+        # so the rebuilt vocabulary must equal the saved one exactly.
+        current = json.loads(json.dumps(featurizer.vocabulary()))
+        saved = meta["vocabulary"]
+        differing = sorted(key for key in set(current) | set(saved) if current.get(key) != saved.get(key))
+        if differing:
+            raise ValueError(f"the feature vocabulary differs from the model's ({', '.join(differing)}); "
+                             "the v3 config changed since the model was built")
+        if sorted(samples) != sorted(featurizer.tables):
+            raise ValueError(f"model samples cover {sorted(samples)}, the config has {featurizer.tables}")
         network = make_model(featurizer, int(meta["recipe"]["hidden_size"]))
         network.load_state_dict({name[2:]: torch.from_numpy(np.asarray(values))
                                  for name, values in arrays.items() if name.startswith("w/")})
