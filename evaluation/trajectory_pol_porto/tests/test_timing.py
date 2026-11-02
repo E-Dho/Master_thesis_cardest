@@ -158,8 +158,9 @@ class ShippedTimingConfigTest(unittest.TestCase):
                 self.assertEqual(timing["profiles"], [expected], path.name)
             self.assertNotIn("timing_repetitions", timing, f"{path.name} must inherit the timing passes")
         spec = json.loads((configs.parent / "timing_hardware.json").read_text())
+        # fixed to the CPU of the first POL timing table, so later methods share it
         self.assertEqual({spec["profiles"][p]["cpu_model"] for p in ("cpu_1core", "cpu_postgres_2core")},
-                         {"allocated"})
+                         {"AMD EPYC 7313 16-Core Processor"})
 
 
 if __name__ == "__main__":

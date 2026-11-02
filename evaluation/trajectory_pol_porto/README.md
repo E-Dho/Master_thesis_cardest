@@ -15,12 +15,16 @@ different. The plan behind it is the project doc
 |---|---|---|
 | P1 | Shared core, v3 workload format, features, strata, coverage | done |
 | P2 | Shared data snapshot + label-reproduction gate | done (all 10,400 labels reproduced) |
-| P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | implemented; cluster run in progress |
-| P4 | MobilityDB / PostgreSQL planner (three variants) | implemented; database probe done, ready to run |
-| P5–P9 | DeepDB-MBR, CASE+/TraHist (+ temporal), own model, RIS / MSCN, Porto | open |
+| P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | done, timed |
+| P4 | MobilityDB / PostgreSQL planner (three variants) | done, timed |
+| P5 | DeepDB-MBR | implemented; cluster run pending |
+| P8b | MSCN | implemented; cluster run pending |
+| P6, P7, P9 | CASE+/TraHist (+ temporal), own model, Porto | open (RIS: no-go for now) |
 
-`traj_eval/plugin.py` registers the adapters: `traj_exact_mbr` and
-`traj_sampling` (P3), `traj_mobilitydb` (P4).
+`traj_eval/plugin.py` registers the in-process adapters: `traj_exact_mbr` and
+`traj_sampling` (P3), `traj_mobilitydb` (P4), `traj_mscn` (P8b). DeepDB-MBR
+(P5) uses the core's `external` adapter with
+`scripts/deepdb_mbr_bridge.py`.
 
 ## Workloads
 
@@ -262,6 +266,72 @@ Tests: rendering, plan parsing and config checks run everywhere; with
 `v3_sql` variant runs end to end, its `cpu_postgres_2core` time stage runs on
 one pinned client core, and a changed `pg_stats` must stop a run.
 
+## P5 DeepDB-MBR
+
+One row per trajectory, learned with DeepDB's single-table SPN
+(`create_naive_all_split_ensemble`, deepdb-public at `655ada1`, the IMDB
+DeepDB environment, Python 3.8). `traj_eval/deepdb_mbr.py`:
+
+- `export` (pipeline environment): `trips_mbr.csv` + `layout.json` from the P2
+  snapshot, shared by all seeds: `trip_id`, trip attributes
+  (`t_num_of_segments`, `t_trip_time_start/end`), agent attributes aligned via
+  the v3 join (`a_age`, `a_educationlevel`, ...), and the box
+  `b_xmin..b_ymax`, `b_tmin`, `b_tmax`; times as epoch seconds of the stored
+  microseconds.
+- `translate` (standard library only, imported by the bridge): exactly
+  Exact-MBR's question (tested on every fixture query): trip and agent
+  predicates on their columns, a segment window as closed box overlap, a
+  segment interval as `b_tmin <= upper AND b_tmax >= lower`; diagnostic
+  `approx:trajectory_box_overlap` when the box is used. Unsupported as for
+  Exact-MBR: single-table queries and `segment_idx` (decided 2026-10-30).
+
+`scripts/deepdb_mbr_bridge.py` (DeepDB environment): `prepare-shared` (CSV to
+DeepDB HDF, once), `prepare`, `smoke` (throwaway SPN on the first 20,000
+rows), `build` (per seed, all trips as samples: `--sample-size 10000000`,
+RDC threshold 0.3), `evaluate` (translation, DeepDB `parse_query`,
+`cardinality`; the expectation cache is cleared before each query, as on
+IMDB). SQL literals are the shortest round-trip decimals without exponents.
+On the cluster:
+
+```bash
+REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_p5.sh
+```
+
+Shared export + HDF (`deepdb_mbr_prepare_shared.sbatch`), then one
+`run_external.sbatch` task per seed (8 CPUs, 128 GB, 2 days, as the IMDB
+DeepDB build), then aggregate and compare into `p5_comparison/`. Tests: with
+`TRAJ_EVAL_DEEPDB_PYTHON` and `TRAJ_EVAL_DEEPDB_SOURCE` the real bridge runs
+through every pipeline stage on the fixture.
+
+## P8b MSCN
+
+`traj_mscn` (`traj_eval/adapters/mscn.py`) re-implements the published model
+and training (`mscn/model.py`, `train.py` at `5007328`): set convolution over
+samples, predicates and joins; sigmoid on min-max normalised log labels;
+q-error loss; Adam 1e-3, 100 epochs, batch 1024, 256 hidden units; 1,000
+samples per table. The adapted part is the featurisation of v3 predicates
+(attribute one-hot, kind one-hot, nominal one-hot, six domain-normalised
+bounds plus presence bits) and the bitmaps, evaluated with the exact v3
+semantics on rows sampled from the snapshot. One model serves both label
+kinds (single queries have an empty join set).
+
+- Trained on `adapter.training_jsonl` (the POL v3 training workload, 10,000
+  queries); `build` refuses any predicate hash shared with an evaluated
+  workload. `adapter.validation_jsonl` is reported in `model_meta.json`
+  (overall and per relation), never used for selection.
+- `mscn.yaml`: trained on single + multi (decided). `mscn_multi_only.yaml`:
+  the decided fallback, trained on multi only; it reports single queries as
+  unsupported.
+- Weights, normalisation and samples are stored in `model.npz`
+  (`serialized_bytes`); `parameter_count` is the weight count.
+
+```bash
+REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_p8b.sh
+```
+
+One `run_inprocess.sbatch` task per seed with 8 CPUs, then aggregate and
+compare into `p8b_comparison/`.
+
 ## Memory budget
 
 One level: 1× the own model's inference-only serialized size per dataset
@@ -290,6 +360,14 @@ classes (`configs/timing_hardware.json`, exported as
 ```bash
 REPO_ROOT=$PWD AFTER_JOB=<P4 accuracy job> evaluation/trajectory_pol_porto/slurm/submit_timing.sh
 ```
+
+The hardware class is fixed to the CPU of the first POL table (AMD EPYC
+7313, node n152), so later methods are timed on the same model; a job on
+another node fails before timing. `TIMING_SBATCH_ARGS` passes extra sbatch
+arguments (e.g. `--nodelist=n152` or a `--constraint`), `CPU_CONFIGS` /
+`PG_CONFIGS` choose the configs, `CPU_AFTER_JOB` makes the CPU timing wait for
+accuracy jobs, and `COMPARE_WITH` adds already timed configs to the final
+comparison.
 
 - `timing_cpu_1core.sbatch`: one plan with every P3 config and seed
   (`traj_eval/timing_plan.py` picks the latest complete accuracy run of each,

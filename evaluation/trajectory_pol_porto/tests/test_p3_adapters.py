@@ -277,7 +277,7 @@ class ShippedConfigTest(_Root):
             text = re.sub(r"sample_trips: \d+", "sample_trips: 60", text)
             (target / path.name).write_text(text, encoding="utf-8")
         # the P4 planner configs need a database; test_p4_mobilitydb covers them
-        configs = sorted(p for p in target.glob("*.yaml") if not p.name.startswith(("_", "mobilitydb_")))
+        configs = sorted(p for p in target.glob("*.yaml") if p.name.startswith(("exact_mbr", "traj_sampling")))
         self.assertEqual(len(configs), 5)
         for path in configs:
             config = load_experiment_config(path)

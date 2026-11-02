@@ -5,7 +5,12 @@
 #   PROFILES=cpu_1core ./submit_timing.sh      one profile
 #   CPU_CONFIGS="exact_mbr traj_sampling_n1000" ./submit_timing.sh
 #   AFTER_JOB=<id> ./submit_timing.sh          the planner timing starts after job <id> succeeded
-#                                              (the P4 accuracy job); cpu_1core needs no wait
+#                                              (the P4 accuracy job)
+#   CPU_AFTER_JOB=<id>[:<id>...] ./submit_timing.sh   cpu_1core waits for these jobs (afterok)
+#   TIMING_SBATCH_ARGS="--nodelist=n152" ./submit_timing.sh   extra sbatch arguments for both
+#                                              timing jobs (the hardware class is AMD EPYC 7313)
+#   COMPARE_WITH="exact_mbr mobilitydb_v3_sql" ./submit_timing.sh   further configs (already timed)
+#                                              in the final comparison
 # The plans are written when each job starts (latest complete accuracy run per
 # config and seed), so the jobs may be submitted before those runs exist.
 set -euo pipefail
@@ -17,6 +22,8 @@ CPU_CONFIGS=${CPU_CONFIGS:-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 t
 PG_CONFIGS=${PG_CONFIGS:-"mobilitydb_v3_sql mobilitydb_segment_stbox mobilitydb_trip_stbox"}
 COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/timed_comparison}
 DB_JOB_NAME=${DB_JOB_NAME:-pol_mobilitydb}
+COMPARE_WITH=${COMPARE_WITH:-}
+read -r -a extra_sbatch <<< "${TIMING_SBATCH_ARGS:-}"
 base_export="ALL,REPO_ROOT=$REPO_ROOT"
 
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }
@@ -35,13 +42,15 @@ for profile in $PROFILES; do
   case "$profile" in
     cpu_1core)
       configs=$(paths_of "$CPU_CONFIGS")
-      job=$(submit --export="$base_export,CONFIGS=$configs" "$SCRIPT_DIR/timing_cpu_1core.sbatch")
+      cpu_after=()
+      if [ -n "${CPU_AFTER_JOB:-}" ]; then cpu_after=(--dependency="afterok:$CPU_AFTER_JOB"); fi
+      job=$(submit "${extra_sbatch[@]}" "${cpu_after[@]}" --export="$base_export,CONFIGS=$configs" "$SCRIPT_DIR/timing_cpu_1core.sbatch")
       ;;
     cpu_postgres_2core)
       configs=$(paths_of "$PG_CONFIGS")
       deps="singleton"
       if [ -n "${AFTER_JOB:-}" ]; then deps="afterok:$AFTER_JOB,singleton"; fi
-      job=$(submit --job-name="$DB_JOB_NAME" --dependency="$deps" --export="$base_export,CONFIGS=$configs" \
+      job=$(submit "${extra_sbatch[@]}" --job-name="$DB_JOB_NAME" --dependency="$deps" --export="$base_export,CONFIGS=$configs" \
         "$SCRIPT_DIR/timing_cpu_postgres_2core.sbatch")
       ;;
     *) echo "unknown profile $profile (cpu_1core or cpu_postgres_2core)" >&2; exit 2 ;;
@@ -50,6 +59,7 @@ for profile in $PROFILES; do
   jobs+=("$job")
   all_configs+=("$configs")
 done
+if [ -n "$COMPARE_WITH" ]; then all_configs+=("$(paths_of "$COMPARE_WITH")"); fi
 aggregate=$(submit --dependency="afterok:$(IFS=:; echo "${jobs[*]}")" \
   --export="$base_export,CONFIGS=$(IFS=:; echo "${all_configs[*]}"),COMPARISON_DIR=$COMPARISON_DIR" \
   "$SCRIPT_DIR/aggregate_compare.sbatch")

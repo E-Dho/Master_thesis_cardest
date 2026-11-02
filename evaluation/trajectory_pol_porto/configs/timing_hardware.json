@@ -3,18 +3,20 @@
     "Hardware classes of the trajectory (POL/Porto) timing profiles; same schema",
     "and rules as evaluation/job_light_imdb_non_trajectory/configs/timing_hardware.json.",
     "The trajectory timing jobs export JOBLIGHT_TIMING_HARDWARE_SPEC=<this file>.",
-    "'allocated' binds a CPU profile to the exact CPU model of the node Slurm selects",
-    "for one timing job; every entry of one plan runs on that node."
+    "The first POL timing table (jobs 22579613/14, node n152) ran on AMD EPYC 7313; every",
+    "later method must be timed on the same CPU model to share that table, so the class",
+    "is fixed to it (was 'allocated'). A node of another model fails before timing;",
+    "submit with TIMING_SBATCH_ARGS (e.g. a --constraint or --nodelist) to get one."
   ],
   "schema_version": 1,
   "profiles": {
     "cpu_1core": {
-      "cpu_model": "allocated",
-      "slurm_hint": "scheduler-selected base node; exact CPU model is fixed and recorded after allocation"
+      "cpu_model": "AMD EPYC 7313 16-Core Processor",
+      "slurm_hint": "a base node with AMD EPYC 7313 (e.g. n152); pass TIMING_SBATCH_ARGS"
     },
     "cpu_postgres_2core": {
-      "cpu_model": "allocated",
-      "slurm_hint": "scheduler-selected base node; exact CPU model is fixed and recorded after allocation"
+      "cpu_model": "AMD EPYC 7313 16-Core Processor",
+      "slurm_hint": "a base node with AMD EPYC 7313 (e.g. n152); pass TIMING_SBATCH_ARGS"
     },
     "gpu_single_query": {
       "cpu_model": "AMD EPYC 7313 16-Core Processor",
