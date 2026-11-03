@@ -2,13 +2,13 @@
   "name": "porto_exact_st_v3",
   "semantics_version": "pol_exact_st_v3",
   "base_config": "porto_v3_base.json",
-  "domain_overrides_source": "Porto probe job 22629119 (2026-11-02): exact min/max of every ordered attribute. PROVISIONAL segments.segment_geom: the full extent including GPS outliers; to be replaced by the robust quantile box (decided 2026-11-02) from the follow-up quantile probe. Labels stay exact over all segments.",
+  "domain_overrides_source": "Porto probe job 22629119 (2026-11-02): exact min/max of every ordered attribute. segments.segment_geom (decided 2026-11-02): the robust window domain, the 0.1 %/99.9 % per-axis percentile_disc box of all 99,999,990 segment endpoints (quantile probe job 22636794): 81.9 x 156.8 km, 99.68 % of endpoints, 99.89 % of trips entirely inside. Data outside it (GPS outliers up to 1,131 km away) stays in every label; only windows are drawn and normalised in this box, and one-sided windows reach everything through unbounded_spatial_margin. The pools job will list the outliers as domain_violations; that is expected.",
   "domain_overrides": {
     "segments.segment_geom": {
-      "min_x": -610919.605185877,
-      "min_y": -302980.297887669,
-      "max_x": 315277.573883702,
-      "max_y": 1269994.79218329
+      "min_x": -52319.988053530826,
+      "min_y": 56518.77209420884,
+      "max_x": 29628.239768669046,
+      "max_y": 213325.0134066536
     },
     "segments.segment_time": {
       "min": "2013-07-01 00:00:53",

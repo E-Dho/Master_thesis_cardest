@@ -8,7 +8,7 @@
 
 set -euo pipefail
 REPO_ROOT=${REPO_ROOT:-${SLURM_SUBMIT_DIR:-}}
-source "$REPO_ROOT/dataset_generation/mobilitydb_loader/common.sh"
+source "$REPO_ROOT/query_generation/benchmark_v3/slurm/dataset_env.sh"
 source "$REPO_ROOT/query_generation/benchmark_v3/slurm/v3_env.sh"
 v3_resolve_repo_root
 activate_mobilitydb_env

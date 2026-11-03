@@ -120,8 +120,20 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    restores the database path; `LABEL_BACKEND=numpy` works for the other
    modes too. `EXCLUDE_HASHES` takes a colon-separated list.
 
+6. **Porto** (`V3_DATASET=porto`, decided 2026-11-02): the same scripts with
+   `porto_v3_config.json`, the Porto loader's database settings
+   (`dataset_generation/porto_taxi_loader/common.sh`, port 55433), run labels
+   `qgen_porto_v3_*` under `mobilitydb_porto/query_runs/` and the database job
+   name `porto_mobilitydb`. Seeds: test 20261102, validation 20261103,
+   training 20261104. Labelling (decided): the test set in SQL; then the
+   snapshot export and the label gate on the test set prove the numpy path on
+   Porto; validation and training are then labelled on the snapshot
+   (`LABEL_BACKEND=numpy`). `slurm/dataset_env.sh` clears stale
+   `MOBILITYDB_*` variables of the submitting shell and refuses a data
+   directory that does not belong to the selected dataset.
+
 All jobs that start PostgreSQL are submitted under the job name
-`pol_mobilitydb` with `--dependency=singleton`, so Slurm runs them one at a
+`pol_mobilitydb` (Porto: `porto_mobilitydb`) with `--dependency=singleton`, so Slurm runs them one at a
 time (they share one data directory, and each stops PostgreSQL when it
 ends). For a database job submitted under another name, add
 `AFTER_JOB=<job id>`.

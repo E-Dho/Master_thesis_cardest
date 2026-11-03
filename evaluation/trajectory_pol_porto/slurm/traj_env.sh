@@ -5,14 +5,20 @@
 #   SNAPSHOT_DIR=...           override the snapshot directory
 #   TEST_BENCHMARK=...         benchmark.jsonl of the test workload
 #   VALIDATION_BENCHMARK=...   benchmark.jsonl of the validation workload
-source "$REPO_ROOT/dataset_generation/mobilitydb_loader/common.sh"
-
+#   TRAJ_DATASET=porto_v3      the Porto database, config and benchmarks
 TRAJ_DATASET=${TRAJ_DATASET:-pol_v3}
-V3_CONFIG=${V3_CONFIG:-$REPO_ROOT/query_generation/benchmark_v3/pol_v3_config.json}
+case "$TRAJ_DATASET" in
+  pol_v3) V3_DATASET=pol; TEST_LABEL=qgen_pol_v3_exact_st_seed20261021; VALIDATION_LABEL=qgen_pol_v3_validation_seed20261026 ;;
+  porto_v3) V3_DATASET=porto; TEST_LABEL=qgen_porto_v3_exact_st_seed20261102; VALIDATION_LABEL=qgen_porto_v3_validation_seed20261103 ;;
+  *) echo "TRAJ_DATASET must be pol_v3 or porto_v3, got $TRAJ_DATASET" >&2; exit 2 ;;
+esac
+source "$REPO_ROOT/query_generation/benchmark_v3/slurm/dataset_env.sh"
+
+V3_CONFIG=${V3_CONFIG:-$REPO_ROOT/query_generation/benchmark_v3/${V3_DATASET}_v3_config.json}
 SNAPSHOT_ROOT=${SNAPSHOT_ROOT:-$THESIS_WORK_ROOT/traj_snapshots}
 SNAPSHOT_DIR=${SNAPSHOT_DIR:-$SNAPSHOT_ROOT/$TRAJ_DATASET}
-TEST_BENCHMARK=${TEST_BENCHMARK:-$MOBILITYDB_ROOT/query_runs/qgen_pol_v3_exact_st_seed20261021/benchmark.jsonl}
-VALIDATION_BENCHMARK=${VALIDATION_BENCHMARK:-$MOBILITYDB_ROOT/query_runs/qgen_pol_v3_validation_seed20261026/benchmark.jsonl}
+TEST_BENCHMARK=${TEST_BENCHMARK:-$MOBILITYDB_ROOT/query_runs/$TEST_LABEL/benchmark.jsonl}
+VALIDATION_BENCHMARK=${VALIDATION_BENCHMARK:-$MOBILITYDB_ROOT/query_runs/$VALIDATION_LABEL/benchmark.jsonl}
 DB_ARGS=(--host "$MOBILITYDB_SOCKET_DIR" --port "$MOBILITYDB_PORT" --dbname "$MOBILITYDB_DB")
 if [ -n "${MOBILITYDB_USER:-}" ]; then
   DB_ARGS+=(--user "$MOBILITYDB_USER")

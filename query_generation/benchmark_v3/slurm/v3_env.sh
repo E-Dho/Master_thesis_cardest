@@ -1,5 +1,6 @@
 #!/bin/bash
 # Shared settings of the v3 Slurm jobs. Source after common.sh.
+#   V3_DATASET=pol|porto -> which database, config and run labels (dataset_env.sh)
 #   PILOT=1        -> 10 queries per category, separate run label
 #   VALIDATION=1   -> validation workload: 8 x 75 single + 8 x 225 multi, its own
 #                     seed, every query of the test benchmark excluded
@@ -12,38 +13,45 @@
 #   EXCLUDE_HASHES=a.jsonl:b.jsonl -> benchmarks whose queries must not reappear
 #   LABEL_BACKEND=sql|numpy        -> label with SQL in the database job (default)
 #                     or with NumpyBackend on SNAPSHOT_DIR (parallel, no database)
-#   SNAPSHOT_DIR=...               -> numpy snapshot (default traj_snapshots/pol_v3)
+#   SNAPSHOT_DIR=...               -> numpy snapshot (default traj_snapshots/<dataset>_v3)
 
 V3_DIR="$REPO_ROOT/query_generation/benchmark_v3"
-V3_CONFIG=${V3_CONFIG:-$V3_DIR/pol_v3_config.json}
-TEST_RUN_LABEL=${TEST_RUN_LABEL:-qgen_pol_v3_exact_st_seed20261021}
-VALIDATION_RUN_LABEL=${VALIDATION_RUN_LABEL:-qgen_pol_v3_validation_seed20261026}
+# Per dataset (V3_DATASET, see dataset_env.sh): config and the seeds of the test,
+# validation and training workloads.
+case "${V3_DATASET:-pol}" in
+  pol) TEST_SEED=20261021; VALIDATION_SEED=20261026; TRAINING_SEED=20261030 ;;
+  porto) TEST_SEED=20261102; VALIDATION_SEED=20261103; TRAINING_SEED=20261104 ;;
+esac
+V3_PREFIX="qgen_${V3_DATASET:-pol}_v3"
+V3_CONFIG=${V3_CONFIG:-$V3_DIR/${V3_DATASET:-pol}_v3_config.json}
+TEST_RUN_LABEL=${TEST_RUN_LABEL:-${V3_PREFIX}_exact_st_seed${TEST_SEED}}
+VALIDATION_RUN_LABEL=${VALIDATION_RUN_LABEL:-${V3_PREFIX}_validation_seed${VALIDATION_SEED}}
 EXCLUDE_ARGS=()
 if [ "${PILOT:-0}" = "1" ]; then
   SEED=${SEED:-20261021}
   SINGLE_COUNT=${SINGLE_COUNT:-10}
   MULTI_COUNT=${MULTI_COUNT:-10}
-  RUN_LABEL=${RUN_LABEL:-qgen_pol_v3_pilot_seed${SEED}}
+  RUN_LABEL=${RUN_LABEL:-${V3_PREFIX}_pilot_seed${SEED}}
 elif [ "${VALIDATION:-0}" = "1" ]; then
-  SEED=${SEED:-20261026}
+  SEED=${SEED:-$VALIDATION_SEED}
   SINGLE_COUNT=${SINGLE_COUNT:-75}
   MULTI_COUNT=${MULTI_COUNT:-225}
-  RUN_LABEL=${RUN_LABEL:-qgen_pol_v3_validation_seed${SEED}}
+  RUN_LABEL=${RUN_LABEL:-${V3_PREFIX}_validation_seed${SEED}}
   EXCLUDE_HASHES=${EXCLUDE_HASHES:-$MOBILITYDB_ROOT/query_runs/$TEST_RUN_LABEL/benchmark.jsonl}
   PER_CATEGORY=${PER_CATEGORY:-10}
 elif [ "${TRAINING:-0}" = "1" ]; then
-  SEED=${SEED:-20261030}
+  SEED=${SEED:-$TRAINING_SEED}
   SINGLE_COUNT=${SINGLE_COUNT:-312}
   MULTI_COUNT=${MULTI_COUNT:-938}
-  RUN_LABEL=${RUN_LABEL:-qgen_pol_v3_training_seed${SEED}}
+  RUN_LABEL=${RUN_LABEL:-${V3_PREFIX}_training_seed${SEED}}
   EXCLUDE_HASHES=${EXCLUDE_HASHES:-$MOBILITYDB_ROOT/query_runs/$TEST_RUN_LABEL/benchmark.jsonl:$MOBILITYDB_ROOT/query_runs/$VALIDATION_RUN_LABEL/benchmark.jsonl}
   LABEL_BACKEND=${LABEL_BACKEND:-numpy}
   PER_CATEGORY=${PER_CATEGORY:-10}
 else
-  SEED=${SEED:-20261021}
+  SEED=${SEED:-$TEST_SEED}
   SINGLE_COUNT=${SINGLE_COUNT:-250}
   MULTI_COUNT=${MULTI_COUNT:-750}
-  RUN_LABEL=${RUN_LABEL:-qgen_pol_v3_exact_st_seed${SEED}}
+  RUN_LABEL=${RUN_LABEL:-${V3_PREFIX}_exact_st_seed${SEED}}
 fi
 if [ -n "${EXCLUDE_HASHES:-}" ]; then
   IFS=: read -r -a _exclude_list <<< "$EXCLUDE_HASHES"
@@ -56,7 +64,7 @@ if [ -n "${EXCLUDE_HASHES:-}" ]; then
   done
 fi
 LABEL_BACKEND=${LABEL_BACKEND:-sql}
-SNAPSHOT_DIR=${SNAPSHOT_DIR:-$THESIS_WORK_ROOT/traj_snapshots/pol_v3}
+SNAPSHOT_DIR=${SNAPSHOT_DIR:-$THESIS_WORK_ROOT/traj_snapshots/${V3_DATASET:-pol}_v3}
 case "$LABEL_BACKEND" in
   sql|numpy) ;;
   *) echo "LABEL_BACKEND must be sql or numpy" >&2; exit 2 ;;

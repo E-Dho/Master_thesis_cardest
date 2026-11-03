@@ -5,6 +5,9 @@
 #   WORKLOADS=test ./submit_snapshot.sh       only the test workload's gate
 #   AFTER_JOB=<id> ./submit_snapshot.sh       the export also waits for job <id>
 #   FORCE=1 ./submit_snapshot.sh              replace an existing snapshot
+#   TRAJ_DATASET=porto_v3 ./submit_snapshot.sh   the Porto database (job name porto_mobilitydb)
+#   GATE_AFTER_OK=<id>[:<id>...] ./submit_snapshot.sh   the gates also wait for these jobs (afterok),
+#                                             e.g. the merge job of a benchmark still being generated
 #
 # The export starts PostgreSQL, so it is submitted under the shared database job
 # name (DB_JOB_NAME, default pol_mobilitydb) with --dependency=singleton, like
@@ -17,8 +20,8 @@ source "$SCRIPT_DIR/traj_env.sh"
 traj_resolve_repo_root
 STAGE=${STAGE:-all}
 WORKLOADS=${WORKLOADS:-"test validation"}
-DB_JOB_NAME=${DB_JOB_NAME:-pol_mobilitydb}
-export_vars="ALL,REPO_ROOT=$REPO_ROOT,SNAPSHOT_DIR=$SNAPSHOT_DIR,V3_CONFIG=$V3_CONFIG,TEST_BENCHMARK=$TEST_BENCHMARK,VALIDATION_BENCHMARK=$VALIDATION_BENCHMARK,FORCE=${FORCE:-0}"
+DB_JOB_NAME=${DB_JOB_NAME:-${V3_DATASET}_mobilitydb}  # pol_mobilitydb / porto_mobilitydb
+export_vars="ALL,REPO_ROOT=$REPO_ROOT,TRAJ_DATASET=$TRAJ_DATASET,SNAPSHOT_DIR=$SNAPSHOT_DIR,V3_CONFIG=$V3_CONFIG,TEST_BENCHMARK=$TEST_BENCHMARK,VALIDATION_BENCHMARK=$VALIDATION_BENCHMARK,FORCE=${FORCE:-0}"
 
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }
 
@@ -43,7 +46,9 @@ for workload in $WORKLOADS; do
     echo "warning: $benchmark does not exist yet; its gate fails unless it exists when the gate starts" >&2
   fi
   dependency_args=()
-  if [ -n "$gate_dependency" ]; then dependency_args=(--dependency="$gate_dependency"); fi
+  dependency="$gate_dependency"
+  if [ -n "${GATE_AFTER_OK:-}" ]; then dependency="${dependency:+$dependency,}afterok:$GATE_AFTER_OK"; fi
+  if [ -n "$dependency" ]; then dependency_args=(--dependency="$dependency"); fi
   gate=$(submit "${dependency_args[@]}" --array=0-$((shards - 1)) \
     --export="$export_vars,WORKLOAD=$workload,GATE_SHARDS=$shards" "$SCRIPT_DIR/snapshot_gate.sbatch")
   merge=$(submit --dependency="afterany:$gate" --export="$export_vars,WORKLOAD=$workload" \

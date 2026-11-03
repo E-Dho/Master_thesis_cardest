@@ -30,6 +30,16 @@ class PortoConfigTests(unittest.TestCase):
         for category in categories:
             self.assertTrue(eligible_tables(self.settings.base, category), category.key)
 
+    def test_window_domain_is_the_robust_quantile_box(self):
+        domain = self.settings.attr("segments", "segment_geom")["domain"]
+        # 0.1 %/99.9 % endpoint quantiles of quantile probe 22636794 (decided 2026-11-02)
+        self.assertEqual(domain, {"min_x": -52319.988053530826, "min_y": 56518.77209420884,
+                                  "max_x": 29628.239768669046, "max_y": 213325.0134066536})
+        for key in ("min_x", "min_y"):
+            self.assertGreater(domain[key], EXTENT[key])
+        for key in ("max_x", "max_y"):
+            self.assertLess(domain[key], EXTENT[key])
+
     def test_one_sided_windows_reach_every_outlier(self):
         domain = self.settings.attr("segments", "segment_geom")["domain"]
         margin = self.settings.unbounded_spatial_margin
