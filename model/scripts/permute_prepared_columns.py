@@ -17,7 +17,8 @@ into the output's provenance record whole, so the arm says how its order was
 chosen.
 
 The source directory is never modified, and the two directories may not overlap
-in either direction.  ``--force`` empties the output first, so a rewritten arm
+in either direction -- judged by what they are on disk, not by how they are
+spelled, since a case-insensitive filesystem gives one directory many names.  ``--force`` empties the output first, so a rewritten arm
 is this source under a new order rather than a union with whatever the previous
 arm left there.
 """
@@ -58,15 +59,50 @@ def load_order(path: Path) -> tuple[list[str], dict[str, Any]]:
     )
 
 
+def same_directory(first: Path, second: Path) -> bool:
+    """Say whether two paths name the same directory on disk."""
+
+    try:
+        return first.samefile(second)
+    except OSError:
+        # One of them does not exist yet, or cannot be stat'd.  A path that is
+        # not there is not the other one.
+        return False
+
+
 def overlaps(first: Path, second: Path) -> bool:
-    """Say whether either resolved path contains the other, or they are equal."""
+    """Say whether either path is, or contains, the other -- by identity.
 
-    return first == second or first in second.parents or second in first.parents
+    resolve() normalizes symlinks and ".." segments but not case, and not every
+    filesystem this runs on is case-sensitive: APFS and NTFS are not by
+    default.  "<root>/Source" and "<root>/source" are then one directory
+    spelled two ways, which comparing the spellings calls distinct -- and
+    --force went on to empty the "output", which was the source, taking
+    sample_rows.npy with it and exiting 0.  Stat identity does not care how a
+    path is spelled.
+    """
+
+    if same_directory(first, second):
+        return True
+    if any(same_directory(parent, second) for parent in first.parents):
+        return True
+    return any(same_directory(parent, first) for parent in second.parents)
 
 
-def clear_directory(directory: Path) -> None:
-    """Empty a directory without removing it, so a forced arm is not a union."""
+def clear_directory(directory: Path, *, protecting: Path) -> None:
+    """Empty a directory without removing it, so a forced arm is not a union.
 
+    ``protecting`` is re-checked here even though main refuses an overlap
+    before reaching this point.  This is the one destructive step in the
+    script, what it would destroy is a prepared fixture that costs hours to
+    rebuild, and a later change that reorders or weakens the checks above
+    should fail loudly rather than delete.
+    """
+
+    if overlaps(directory, protecting):
+        raise SystemExit(
+            f"refusing to empty {directory}: it is, or contains, {protecting}"
+        )
     for entry in sorted(directory.iterdir()):
         if entry.is_dir() and not entry.is_symlink():
             shutil.rmtree(entry)
@@ -140,7 +176,7 @@ def main() -> None:
         # exactly this source under a new order: a companion the previous arm
         # left behind, sample_trajectory_ids.npy above all, would be read as
         # this arm's row provenance.
-        clear_directory(output)
+        clear_directory(output, protecting=prepared)
     for entry in sorted(prepared.iterdir()):
         if entry.name in {MANIFEST_NAME, SAMPLE_ROWS_NAME, PROVENANCE_NAME}:
             continue

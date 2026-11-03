@@ -34,6 +34,30 @@ from model.src.model.factorization import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _case_insensitive_scratch():
+    """Return a context manager over a case-insensitive scratch directory.
+
+    The alias that loses data only exists where the filesystem folds case, so
+    the test needs such a filesystem to run on at all.  The system temporary
+    directory is the first choice; where that is case-sensitive and the
+    checkout is not -- a Linux VM mounting a macOS folder, which is exactly how
+    this is developed -- a directory beside the checkout is used instead.
+    Returns None where neither folds case, as on the cluster.
+    """
+
+    for base in (None, REPOSITORY_ROOT):
+        candidate = tempfile.TemporaryDirectory(dir=base)
+        root = Path(candidate.name)
+        probe = root / "CaseProbe"
+        probe.mkdir()
+        folds = (root / "caseprobe").exists()
+        probe.rmdir()
+        if folds:
+            return candidate
+        candidate.cleanup()
+    return None
+
+
 def _tables() -> tuple[dict[str, pd.DataFrame], CompleteDomainSpec]:
     tables = {
         "title": pd.DataFrame(
@@ -79,6 +103,14 @@ def _sample_frame(keyword_values: list[object]) -> pd.DataFrame:
 def _metadata():
     tables, spec = _tables()
     return build_complete_metadata(tables, spec)
+
+
+def _permute_module():
+    """Import the script as a module so its helpers can be called directly."""
+
+    import importlib
+
+    return importlib.import_module("model.scripts.permute_prepared_columns")
 
 
 def _rotated(names):
@@ -483,6 +515,67 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
                 (output / "preparation_stats.json").read_text(encoding="utf-8"),
                 (prepared / "preparation_stats.json").read_text(encoding="utf-8"),
             )
+
+    def test_the_same_directory_under_two_names_is_refused(self) -> None:
+        # resolve() normalizes symlinks and ".." but not case.  Spelled one way
+        # as --prepared and another as --output, the source passed the overlap
+        # check and --force then emptied it, sample_rows.npy included, exiting
+        # 0.  A prepared fixture costs hours to rebuild and has no undo.
+        scratch = _case_insensitive_scratch()
+        if scratch is None:
+            self.skipTest("no case-insensitive filesystem available here")
+        with scratch:
+            root = Path(scratch.name)
+            prepared = self.prepared(root)
+            source = validate_prepared_manifest(prepared)
+            before = sorted(entry.name for entry in prepared.iterdir())
+            alias = prepared.parent / prepared.name.upper()
+            self.assertNotEqual(str(alias), str(prepared))
+            order = _rotated(column.name for column in source.columns)
+            result = self.run_script(
+                prepared,
+                alias,
+                self.write_order(root / "order.json", order),
+                "--force",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("overlap", result.stderr)
+            self.assertEqual(
+                sorted(entry.name for entry in prepared.iterdir()), before
+            )
+
+    def test_overlap_is_decided_by_identity_not_spelling(self) -> None:
+        # The portable half of the same property: one directory reached by two
+        # different paths is one directory.  A symlink stands in for the case
+        # alias on filesystems that do not fold case.
+        module = _permute_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = root / "real"
+            (real / "inner").mkdir(parents=True)
+            link = root / "link"
+            link.symlink_to(real, target_is_directory=True)
+            self.assertTrue(module.overlaps(link, real))
+            self.assertTrue(module.overlaps(link / "inner", real))
+            self.assertTrue(module.overlaps(real, link / "inner"))
+            other = root / "other"
+            other.mkdir()
+            self.assertFalse(module.overlaps(other, real))
+
+    def test_clearing_refuses_to_touch_the_source(self) -> None:
+        # main refuses an overlap before reaching the delete, so this cannot
+        # fire today; it is the backstop on the one destructive step.
+        module = _permute_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kept = root / "source"
+            kept.mkdir()
+            (kept / "sample_rows.npy").write_bytes(b"irreplaceable")
+            with self.assertRaisesRegex(SystemExit, "refusing to empty"):
+                module.clear_directory(kept, protecting=kept)
+            with self.assertRaisesRegex(SystemExit, "refusing to empty"):
+                module.clear_directory(root, protecting=kept)
+            self.assertTrue((kept / "sample_rows.npy").exists())
 
     def test_an_output_inside_the_source_is_refused(self) -> None:
         # Writing the arm into its own source leaves a directory the next run
