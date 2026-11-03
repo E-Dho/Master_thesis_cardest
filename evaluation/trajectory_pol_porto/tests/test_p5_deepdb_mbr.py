@@ -178,7 +178,7 @@ class RealDeepDbTest(_Shared):
                        check=True, capture_output=True, text=True)
 
     def test_compatibility_shims(self) -> None:
-        """NumPy >= 1.24 ragged domains and scikit-learn's failing CCA on a constant slice."""
+        """NumPy >= 1.24 ragged domains; the CCA fallback only for verified degenerate (constant, finite) pairs."""
         script = f"""
 import sys, importlib.util
 sys.path.insert(0, {str(DEEPDB_SOURCE)!r})
@@ -189,9 +189,42 @@ import numpy as np, rspn.rspn as r, spn.algorithms.splitting.RDC as rdc
 domains = r.np.asanyarray([[0.0, 1.0], np.arange(0, 5)])
 assert domains.dtype == object and domains.shape == (2,), domains
 assert r.np.asanyarray([[0, 1], [2, 3]]).shape == (2, 2)
-constant = np.ones((50, 3)); varied = np.random.RandomState(0).rand(50, 3)
-value = rdc.rdc_cca((0, 1, [constant, varied]))
-assert value != value, value  # NaN: SPFlow treats it as independent
+rs = np.random.RandomState(0)
+constant = np.ones((50, 3)); varied = rs.rand(50, 3); other = rs.rand(50, 3)
+original = rdc.rdc_cca.__wrapped__
+def raises(call):
+    try: call()
+    except (ValueError, np.linalg.LinAlgError) as error: return type(error)
+    return None
+def nan(value): return value != value
+# 1. one side constant: upstream raises, the shim returns NaN (SPFlow: independent)
+assert raises(lambda: original((0, 1, [constant, varied]))) is not None
+assert nan(rdc.rdc_cca((0, 1, [constant, varied])))
+# 2. the case found in the DeepDB fixture build: a 4-row slice where both variables take two values
+#    in orthogonal patterns (A B B A vs. C C D D), so the centred cross-covariance is exactly zero
+a, b, c, d = (np.r_[np.sin(rs.rand(4)) * 0.1, 1.0] for _ in range(4))
+x_tiny, y_tiny = np.array([a, b, b, a]), np.array([c, c, d, d])
+assert raises(lambda: original((0, 1, [x_tiny, y_tiny]))) is not None
+assert bridge.degenerate_pair((0, 1, [x_tiny, y_tiny]))
+assert nan(rdc.rdc_cca((0, 1, [x_tiny, y_tiny])))
+assert rdc.rdc_cca.fallbacks == [(0, 1), (0, 1)], rdc.rdc_cca.fallbacks
+assert bridge.cca_fallback_count() == 2
+# 3. valid pairs are unchanged, including tiny and near-constant ones that upstream answers itself
+for pair in ([varied, other], [constant + 1e-13 * rs.rand(50, 3), varied], [x_tiny, np.array([c, d, d, d])]):
+    assert rdc.rdc_cca((0, 1, pair)) == original((0, 1, pair))
+# 4. non-constant input with NaN or inf: upstream rejects it, so must the shim (no silent independence);
+#    a constant side with a non-finite entry is not verified degenerate either
+for bad in (np.nan, np.inf):
+    broken = varied.copy(); broken[3, 1] = bad
+    assert raises(lambda: original((0, 1, [broken, other]))) is not None
+    assert raises(lambda: rdc.rdc_cca((0, 1, [broken, other]))) is not None, bad
+    constant_bad = constant.copy(); constant_bad[0, 0] = bad
+    assert not bridge.degenerate_pair((0, 1, [constant_bad, varied]))
+    assert raises(lambda: rdc.rdc_cca((0, 1, [constant_bad, varied]))) is not None, bad
+# 5. other failures re-raise (mismatched rows)
+assert raises(lambda: rdc.rdc_cca((0, 1, [varied, rs.rand(40, 3)]))) is not None
+assert not bridge.degenerate_pair((0, 1, [varied, other]))
+assert rdc.rdc_cca.fallbacks == [(0, 1), (0, 1)]  # no further fallbacks were taken
 assert not hasattr(rdc.rdc_cca.__wrapped__, "__wrapped__")  # wrapped once
 print("ok")
 """
@@ -271,6 +304,9 @@ adapter:
         self.assertLess(float(np.median(q_errors)), 2.0)  # SPN on all 240 trips
         artifacts = json.loads((run / "exchange" / "artifact_manifest.json").read_text())
         self.assertGreater(artifacts["serialized_bytes"], 0)
+        build = json.loads((run / "exchange" / "build_stage_metrics.json").read_text())
+        self.assertIsInstance(build["cca_degenerate_fallbacks"], int)
+        self.assertEqual(len(build["numpy_compat"]), 2)
         summary = json.loads((run / "summary.json").read_text())
         self.assertIn("extension", summary["workloads"]["pol_v3_multi"])
 

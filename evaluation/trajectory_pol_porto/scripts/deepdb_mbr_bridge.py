@@ -136,9 +136,13 @@ NUMPY_COMPAT = [
     "rspn.rspn.build_ds_context: ragged column domains become a 1-d object array, as numpy < 1.24 did "
     "(numpy >= 1.24 raises for np.asanyarray of [min, max] pairs mixed with the value lists of "
     "categorical columns)",
-    "spn.algorithms.splitting.RDC.rdc_cca: a pair whose CCA fails on a degenerate (constant) slice gets "
-    "rdc = NaN, as older scikit-learn returned; SPFlow then treats NaN as independent "
-    "(getIndependentRDCGroups_py sets NaN to 0); newer scikit-learn raises from scipy's pinv instead",
+    "spn.algorithms.splitting.RDC.rdc_cca: only when CCA raises AND the pair is verified degenerate "
+    "(both feature matrices finite with equal row counts, and the centred cross-covariance of the two "
+    "feature matrices is zero, e.g. one variable constant over the slice, or two-valued variables with "
+    "orthogonal patterns on a tiny slice) the pair gets rdc = NaN. Every canonical correlation of such a "
+    "pair is 0, and SPFlow maps NaN to 0, i.e. independence (getIndependentRDCGroups_py); scikit-learn "
+    "1.2's NIPALS divides 0 by 0 there and scipy's gesdd then raises. Every other failure, including "
+    "non-finite input, is re-raised; the number of fallbacks is recorded (cca_degenerate_fallbacks)",
 ]
 
 
@@ -171,17 +175,56 @@ class _RaggedAsObject:
             return out
 
 
+ZERO_CROSS_TOLERANCE = 1e-12  # per row; RDC features are sin(.) values and a ones column, |value| <= 1
+
+
+def degenerate_pair(indexes: Any) -> bool:
+    """Both feature matrices finite, same rows, and zero centred cross-covariance.
+
+    Then every canonical correlation of the pair is 0 (this covers a constant
+    variable, whose centred features vanish), so rdc = 0 is the exact answer.
+    """
+    import numpy
+
+    i, j, features = indexes
+    try:
+        x = numpy.asarray(features[i], dtype=float)
+        y = numpy.asarray(features[j], dtype=float)
+    except (TypeError, ValueError):
+        return False
+    if x.ndim != 2 or y.ndim != 2 or x.shape[0] != y.shape[0] or x.shape[0] < 2 or x.size == 0 or y.size == 0:
+        return False
+    if not (numpy.all(numpy.isfinite(x)) and numpy.all(numpy.isfinite(y))):
+        return False
+    cross = (x - x.mean(axis=0)).T @ (y - y.mean(axis=0))
+    return bool(numpy.max(numpy.abs(cross)) <= ZERO_CROSS_TOLERANCE * x.shape[0])
+
+
 def _nan_on_degenerate_cca(original):
+    """``rdc_cca`` with NaN for a verified degenerate pair whose CCA raised; anything else re-raises."""
+    fallbacks: List[Any] = []
+
     def rdc_cca(indexes):
         import numpy
 
         try:
             return original(indexes)
         except (ValueError, numpy.linalg.LinAlgError):
+            if not degenerate_pair(indexes):
+                raise
+            fallbacks.append((indexes[0], indexes[1]))  # list.append is atomic (threading backend)
             return float("nan")
 
     rdc_cca.__wrapped__ = original
+    rdc_cca.fallbacks = fallbacks
     return rdc_cca
+
+
+def cca_fallback_count() -> Optional[int]:
+    import spn.algorithms.splitting.RDC as rdc_module
+
+    fallbacks = getattr(rdc_module.rdc_cca, "fallbacks", None)
+    return None if fallbacks is None else len(fallbacks)
 
 
 def install_compat() -> None:
@@ -311,7 +354,7 @@ def smoke(source: Path, shared: Path, output: Path, rows: int) -> None:
     if not all(math.isfinite(value) and -1e-6 <= value <= count * (1 + 1e-6) for value in estimates):
         raise ValueError(f"invalid DeepDB-MBR smoke estimates {estimates} for {count} rows")
     payload = {"status": "ok", "rows": count, "estimates": estimates,
-               "wall_seconds": time.perf_counter() - started}
+               "wall_seconds": time.perf_counter() - started, "cca_degenerate_fallbacks": cca_fallback_count()}
     write_json(output / "smoke_metrics.json", payload)
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -352,7 +395,7 @@ def build_model(source: Path, shared: Path, output: Path, sample_size: int, rdc_
                "shared_hdf_seconds": (json.loads(preparation.read_text())["seconds"]
                                       if preparation.exists() else None),
                "note": "trip-table export and HDF preparation are shared, reported once",
-               "numpy_compat": NUMPY_COMPAT}
+               "numpy_compat": NUMPY_COMPAT, "cca_degenerate_fallbacks": cca_fallback_count()}
     write_json(output / "build_stage_metrics.json", metrics)
     write_json(output / "artifact_manifest.json", {
         "parameter_count": None,

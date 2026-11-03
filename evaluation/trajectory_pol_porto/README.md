@@ -295,9 +295,14 @@ Two compatibility shims (`install_compat`, recorded as `numpy_compat` in the
 prepare manifest and the build metrics) keep the pinned DeepDB/SPFlow working
 in the cluster's DeepDB environment (numpy 1.24, newer scikit-learn): the mixed
 column domains of `rspn.build_ds_context` become an object array, as older
-numpy produced, and an RDC pair whose CCA fails on a constant slice gets
-NaN, as older scikit-learn returned and SPFlow already maps to independence.
-The first cluster attempt (2801ae3) failed on the first of these in smoke.
+numpy produced, and an RDC pair gets NaN (SPFlow: independent) only if its CCA
+raises *and* the pair is verified degenerate: finite features and a zero
+centred cross-covariance, so every canonical correlation is 0 (a constant
+variable, or two-valued variables with orthogonal patterns on a tiny slice,
+where scikit-learn 1.2 divides 0 by 0). Any other CCA failure, non-finite input
+included, is re-raised; the number of fallbacks is recorded
+(`cca_degenerate_fallbacks` in the smoke and build metrics). The first cluster
+attempt (2801ae3) failed on the first of these in smoke.
 On the cluster:
 
 ```bash
