@@ -296,10 +296,12 @@ prepare manifest and the build metrics) keep the pinned DeepDB/SPFlow working
 in the cluster's DeepDB environment (numpy 1.24, newer scikit-learn): the mixed
 column domains of `rspn.build_ds_context` become an object array, as older
 numpy produced, and an RDC pair gets NaN (SPFlow: independent) only if its CCA
-raises *and* the pair is verified degenerate: finite features and a zero
-centred cross-covariance, so every canonical correlation is 0 (a constant
-variable, or two-valued variables with orthogonal patterns on a tiny slice,
-where scikit-learn 1.2 divides 0 by 0). Any other CCA failure, non-finite input
+raises *and* the pair is verified degenerate: finite features and every
+canonical correlation at most 1e-8, computed scale-free from orthonormal bases
+of the centred feature matrices (variation below 1e-12 per entry counts as
+rounding noise), so rdc = 0 is exact. Examples: a constant variable, or
+two-valued variables with orthogonal patterns on a tiny slice, where
+scikit-learn 1.2 divides 0 by 0. Any other CCA failure, non-finite input
 included, is re-raised; the number of fallbacks is recorded
 (`cca_degenerate_fallbacks` in the smoke and build metrics). The first cluster
 attempt (2801ae3) failed on the first of these in smoke.

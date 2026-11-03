@@ -137,11 +137,12 @@ NUMPY_COMPAT = [
     "(numpy >= 1.24 raises for np.asanyarray of [min, max] pairs mixed with the value lists of "
     "categorical columns)",
     "spn.algorithms.splitting.RDC.rdc_cca: only when CCA raises AND the pair is verified degenerate "
-    "(both feature matrices finite with equal row counts, and the centred cross-covariance of the two "
-    "feature matrices is zero, e.g. one variable constant over the slice, or two-valued variables with "
-    "orthogonal patterns on a tiny slice) the pair gets rdc = NaN. Every canonical correlation of such a "
-    "pair is 0, and SPFlow maps NaN to 0, i.e. independence (getIndependentRDCGroups_py); scikit-learn "
-    "1.2's NIPALS divides 0 by 0 there and scipy's gesdd then raises. Every other failure, including "
+    "(both feature matrices finite with equal row counts, and every canonical correlation, computed "
+    "scale-free from orthonormal bases of the centred matrices, at most 1e-8; e.g. one variable constant "
+    "over the slice, or two-valued variables with orthogonal patterns on a tiny slice) the pair gets "
+    "rdc = NaN. rdc = 0 is then the exact answer, and SPFlow maps NaN to 0, i.e. independence "
+    "(getIndependentRDCGroups_py); scikit-learn 1.2's NIPALS divides 0 by 0 there and scipy's gesdd "
+    "then raises. Variation below 1e-12 per entry counts as rounding noise. Every other failure, including "
     "non-finite input, is re-raised; the number of fallbacks is recorded (cca_degenerate_fallbacks)",
 ]
 
@@ -175,14 +176,45 @@ class _RaggedAsObject:
             return out
 
 
-ZERO_CROSS_TOLERANCE = 1e-12  # per row; RDC features are sin(.) values and a ones column, |value| <= 1
+# Variation below NOISE_FLOOR per entry is rounding noise: RDC features are sin(.) of
+# copula-rank projections plus a ones column (|value| <= 1), and real variation between distinct
+# values is many orders of magnitude larger.
+NOISE_FLOOR = 1e-12
+# Largest canonical correlation (scale-free, in [0, 1]) that still counts as independent.
+CANONICAL_TOLERANCE = 1e-8
+
+
+def _centred_basis(matrix: Any) -> Any:
+    """Orthonormal basis of the column space of the centred matrix (numerical rank)."""
+    import numpy
+
+    centred = matrix - matrix.mean(axis=0)
+    u, singular, _ = numpy.linalg.svd(centred, full_matrices=False)
+    if singular.size == 0:
+        return u[:, :0]
+    rows, columns = centred.shape
+    cutoff = max(NOISE_FLOOR * math.sqrt(rows * columns),
+                 float(singular[0]) * max(rows, columns) * numpy.finfo(float).eps)
+    return u[:, singular > cutoff]
+
+
+def canonical_correlations(x: Any, y: Any) -> Any:
+    """All canonical correlations of two finite feature matrices (empty if a side has no variation)."""
+    import numpy
+
+    basis_x, basis_y = _centred_basis(x), _centred_basis(y)
+    if basis_x.shape[1] == 0 or basis_y.shape[1] == 0:
+        return numpy.zeros(0)
+    return numpy.linalg.svd(basis_x.T @ basis_y, compute_uv=False)
 
 
 def degenerate_pair(indexes: Any) -> bool:
-    """Both feature matrices finite, same rows, and zero centred cross-covariance.
+    """Finite features, same rows, and every canonical correlation of the pair (numerically) 0.
 
-    Then every canonical correlation of the pair is 0 (this covers a constant
-    variable, whose centred features vanish), so rdc = 0 is the exact answer.
+    Computed scale-free from orthonormal bases of the centred feature matrices,
+    so a small but genuine dependent component is not mistaken for
+    independence. A side without variation (a constant variable) has no
+    canonical correlations at all. For such a pair rdc = 0 is the exact answer.
     """
     import numpy
 
@@ -196,8 +228,11 @@ def degenerate_pair(indexes: Any) -> bool:
         return False
     if not (numpy.all(numpy.isfinite(x)) and numpy.all(numpy.isfinite(y))):
         return False
-    cross = (x - x.mean(axis=0)).T @ (y - y.mean(axis=0))
-    return bool(numpy.max(numpy.abs(cross)) <= ZERO_CROSS_TOLERANCE * x.shape[0])
+    try:
+        rho = canonical_correlations(x, y)
+    except numpy.linalg.LinAlgError:
+        return False
+    return rho.size == 0 or float(rho.max()) <= CANONICAL_TOLERANCE
 
 
 def _nan_on_degenerate_cca(original):

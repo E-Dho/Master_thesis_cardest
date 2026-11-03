@@ -178,7 +178,7 @@ class RealDeepDbTest(_Shared):
                        check=True, capture_output=True, text=True)
 
     def test_compatibility_shims(self) -> None:
-        """NumPy >= 1.24 ragged domains; the CCA fallback only for verified degenerate (constant, finite) pairs."""
+        """NumPy >= 1.24 ragged domains; the CCA fallback only for verified degenerate pairs (all canonical correlations 0)."""
         script = f"""
 import sys, importlib.util
 sys.path.insert(0, {str(DEEPDB_SOURCE)!r})
@@ -201,7 +201,7 @@ def nan(value): return value != value
 assert raises(lambda: original((0, 1, [constant, varied]))) is not None
 assert nan(rdc.rdc_cca((0, 1, [constant, varied])))
 # 2. the case found in the DeepDB fixture build: a 4-row slice where both variables take two values
-#    in orthogonal patterns (A B B A vs. C C D D), so the centred cross-covariance is exactly zero
+#    in orthogonal patterns (A B B A vs. C C D D), so every canonical correlation is zero
 a, b, c, d = (np.r_[np.sin(rs.rand(4)) * 0.1, 1.0] for _ in range(4))
 x_tiny, y_tiny = np.array([a, b, b, a]), np.array([c, c, d, d])
 assert raises(lambda: original((0, 1, [x_tiny, y_tiny]))) is not None
@@ -209,6 +209,21 @@ assert bridge.degenerate_pair((0, 1, [x_tiny, y_tiny]))
 assert nan(rdc.rdc_cca((0, 1, [x_tiny, y_tiny])))
 assert rdc.rdc_cca.fallbacks == [(0, 1), (0, 1)], rdc.rdc_cca.fallbacks
 assert bridge.cca_fallback_count() == 2
+# 2b. the same slice plus a small genuinely dependent component (review of c33aaf4): canonical
+#     correlation about 1 at every scale, so never treated as independent, whatever upstream does
+pattern = np.array([1.0, 1.0, -1.0, -1.0])  # the pattern of y_tiny
+for scale in (1e-3, 1e-6, 1e-9):
+    x_dep = x_tiny.copy(); x_dep[:, 0] += scale * pattern
+    assert bridge.canonical_correlations(x_dep, y_tiny).max() > 0.99, scale
+    assert not bridge.degenerate_pair((0, 1, [x_dep, y_tiny])), scale
+    upstream = raises(lambda: original((0, 1, [x_dep, y_tiny])))
+    if upstream is None:
+        assert rdc.rdc_cca((0, 1, [x_dep, y_tiny])) == original((0, 1, [x_dep, y_tiny])), scale
+    else:
+        assert raises(lambda: rdc.rdc_cca((0, 1, [x_dep, y_tiny]))) is upstream, scale
+assert bridge.canonical_correlations(x_tiny, y_tiny).max() <= bridge.CANONICAL_TOLERANCE
+assert bridge.canonical_correlations(constant, varied).size == 0
+assert rdc.rdc_cca.fallbacks == [(0, 1), (0, 1)], rdc.rdc_cca.fallbacks
 # 3. valid pairs are unchanged, including tiny and near-constant ones that upstream answers itself
 for pair in ([varied, other], [constant + 1e-13 * rs.rand(50, 3), varied], [x_tiny, np.array([c, d, d, d])]):
     assert rdc.rdc_cca((0, 1, pair)) == original((0, 1, pair))
