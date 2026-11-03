@@ -6,7 +6,11 @@ types A/B/C with origin_stand NULL for A and C (and for some B). Checks:
 
 - the label SQL (in DuckDB) equals NumpyBackend for every category, with
   queries on the nullable origin_stand among them (NULL never matches);
-- every category generates and the merge gates pass with the Porto config.
+- every category generates and the merge gates pass with the Porto config;
+- the verifier, which fetches rows from SQL (NULL arrives as None), agrees on
+  queries with origin_stand (pilot verification 22728877 crashed there);
+- the GPS outliers are reported under window_domain_outside, not as domain
+  violations, unless they lie beyond the reach of one-sided windows.
 """
 
 import random
@@ -18,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from query_generation.benchmark_v3.backends import SqlBackend
+from query_generation.benchmark_v3.build_pools import data_domains, domain_violations, window_domain_outside
 from query_generation.benchmark_v3.config import load_settings
 from query_generation.benchmark_v3.exact import to_us
 from query_generation.benchmark_v3.generate import generate_category
@@ -25,6 +30,7 @@ from query_generation.benchmark_v3.merge import merge
 from query_generation.benchmark_v3.numpy_backend import NumpyBackend
 from query_generation.benchmark_v3.sampler import Sampler
 from query_generation.benchmark_v3.synthetic import pools_from
+from query_generation.benchmark_v3.verify import Fetcher, summarize, verify_record
 
 from .test_duckdb_end_to_end import DuckSession, _spatial_available, duckdb
 
@@ -151,6 +157,64 @@ class PortoSqlEqualsNumpyTest(_Porto):
                 stand_queries += any(p["attribute"] == "origin_stand" for p in record["predicates"])
         self.assertGreater(positive, 150)
         self.assertGreater(stand_queries, 10)  # NULL handling exercised
+
+
+
+@unittest.skipUnless(_spatial_available(), "duckdb spatial extension unavailable")
+class PortoVerifyAndDomainsTest(_Porto):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.session = DuckSession(load_porto_duckdb(cls.rows))
+
+    def test_verify_with_nullable_origin_stand(self):
+        wide = load_settings(CONFIG, single_count=12, multi_count=12)
+        with tempfile.TemporaryDirectory() as tmp:
+            for category in wide.categories():
+                generate_category(wide, self.pools, category, base_seed=31, count_fn=self.numpy.count,
+                                  output_dir=Path(tmp), progress_interval=0, log=lambda message: None)
+            rows = merge(wide, Path(tmp))["rows"]
+        fetcher = Fetcher(wide, self.session, max_rows=10**7)
+        results = [verify_record(wide, fetcher, self.session, row) for row in rows]
+        summary = summarize(results)
+        for key in ("numpy_mismatches", "exists_mismatches", "postgis_mismatches"):
+            self.assertEqual(summary[key], [], key)
+        self.assertEqual(summary["st_intersects_disagreements"], 0)
+        by_id = {result["query_id"]: result for result in results}
+        stand = [row for row in rows if row["category"]["dimension"] != "standard"
+                 and any(p["attribute"] == "origin_stand" for p in row["predicates"])]
+        checked = [by_id[row["query_id"]] for row in stand if "numpy_count" in by_id[row["query_id"]]]
+        self.assertGreater(len(checked), 5)  # rows with NULL origin_stand were fetched and compared
+        self.assertTrue(all(result["numpy_ok"] for result in checked))
+
+    def test_fetched_null_origin_stand_is_nan(self):
+        fetcher = Fetcher(self.settings, self.session, max_rows=10**7)
+        trips = fetcher._select("trips", [], "")
+        stand = trips["origin_stand"]
+        self.assertEqual(stand.dtype, np.float64)
+        self.assertEqual(int(np.isnan(stand).sum()), sum(r["origin_stand"] is None for r in self.rows["trips"]))
+        self.assertEqual(trips["call_type"].dtype.kind, "U")  # nominal, no NULLs: unchanged
+
+    def test_outliers_are_window_domain_outside_not_violations(self):
+        domains = data_domains(self.settings, self.session)
+        self.assertEqual(domain_violations(self.settings, domains), [])
+        outside = window_domain_outside(self.settings, domains)
+        self.assertTrue(outside)  # the synthetic GPS jumps leave the window box
+        self.assertEqual({entry["attribute"] for entry in outside}, {"segments.segment_geom"})
+        for entry in outside:
+            beyond = entry["data"] < entry["window"] if entry["field"].startswith("min") else entry["data"] > entry["window"]
+            self.assertTrue(beyond, entry)
+        margin = self.settings.unbounded_spatial_margin
+        far = dict(domains["segments.segment_geom"], max_y=entry_bound(self.settings, "max_y") + margin + 1.0)
+        violations = domain_violations(self.settings, dict(domains, **{"segments.segment_geom": far}))
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("beyond the reach", violations[0])
+        late = dict(domains, **{"trips.num_of_segments": {"min": 1, "max": 99999}})
+        self.assertEqual(len(domain_violations(self.settings, late)), 1)  # ordinary attributes unchanged
+
+
+def entry_bound(settings, field):
+    return float(settings.attr("segments", "segment_geom")["domain"][field])
 
 
 if __name__ == "__main__":

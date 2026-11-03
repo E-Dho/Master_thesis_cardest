@@ -131,6 +131,16 @@ class Settings:
         return float(self.v3["unbounded_spatial_margin"])
 
     @property
+    def window_domains(self) -> List[str]:
+        """Attributes whose configured domain is a deliberate window domain, not the data extent.
+
+        Windows and centres are drawn inside it; data outside it stays in every
+        label and is reached by one-sided windows (``unbounded_spatial_margin``).
+        Only the segment geometry may be listed.
+        """
+        return [str(name) for name in self.v3.get("window_domains") or []]
+
+    @property
     def max_attempts(self) -> int:
         return int(self.v3["max_attempts"])
 
@@ -230,6 +240,11 @@ def validate_settings(settings: Settings) -> None:
             if attr["type"] == "temporal_interval":
                 parse_timestamp(attr["domain"]["min"])
                 parse_timestamp(attr["domain"]["max"])
+
+    allowed = f"{seg.table}.{seg.spatial_attribute}"
+    for name in settings.window_domains:
+        if name != allowed:
+            raise ConfigError(f"window_domains: only {allowed} may be a window domain, not {name!r}")
 
     counts, probabilities = settings.addon_distribution
     if len(counts) != len(probabilities) or abs(sum(probabilities) - 1.0) > 1e-9:

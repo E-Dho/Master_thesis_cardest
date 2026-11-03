@@ -52,7 +52,11 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    Data domains: `pol_v3_config.json` carries the measured domains of all
    ordered attributes in `domain_overrides`. The pools job (first stage of
    every run) re-measures them and prints `domain_violations`; the list must
-   be empty.
+   be empty. An attribute listed in `window_domains` (Porto: the segment
+   geometry, a robust quantile box) only bounds where windows are drawn; data
+   outside it is printed under `window_domain_outside` (informational) and is
+   a violation only beyond the reach of one-sided windows (window bound ±
+   `unbounded_spatial_margin`).
 
 2. **Pilot** (10 queries per category, own run directory):
 
@@ -128,7 +132,9 @@ Check out the branch `feature/exact-st-benchmark-v3` and use it as `REPO_ROOT`.
    training 20261104. Labelling (decided): the test set in SQL; then the
    snapshot export and the label gate on the test set prove the numpy path on
    Porto; validation and training are then labelled on the snapshot
-   (`LABEL_BACKEND=numpy`). `slurm/dataset_env.sh` clears stale
+   (`LABEL_BACKEND=numpy`). The pilot verification of 2026-11-03 (22728877) crashed on
+   the nullable `origin_stand`: the verifier's SQL fetch now stores NULL as
+   NaN in non-nominal columns, as the snapshot does. `slurm/dataset_env.sh` clears stale
    `MOBILITYDB_*` variables of the submitting shell and refuses a data
    directory that does not belong to the selected dataset.
 

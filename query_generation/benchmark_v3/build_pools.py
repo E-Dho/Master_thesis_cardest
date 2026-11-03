@@ -47,10 +47,9 @@ def data_domains(settings: Settings, session) -> Dict[str, Dict[str, Any]]:
     return domains
 
 
-def domain_violations(settings: Settings, domains: Dict[str, Dict[str, Any]]) -> List[str]:
-    """Data outside the configured domain cannot be reached by range predicates."""
+def _outside(settings: Settings, domains: Dict[str, Dict[str, Any]]):
+    """(name, field, data value, configured bound) for every measured value outside its domain."""
 
-    problems = []
     for name, measured in sorted(domains.items()):
         table_id, _, attribute = name.partition(".")
         configured = settings.attr(table_id, attribute)["domain"]
@@ -60,10 +59,45 @@ def domain_violations(settings: Settings, domains: Dict[str, Dict[str, Any]]) ->
                 value, bound = parse_timestamp(value), parse_timestamp(bound)
             else:
                 value, bound = float(value), float(bound)
-            outside = value < bound if field.startswith("min") else value > bound
-            if outside:
-                problems.append(f"{name}.{field}: data {value} outside configured {bound}")
+            if value < bound if field.startswith("min") else value > bound:
+                yield name, field, value, bound
+
+
+def _reach(settings: Settings, field: str, bound: float) -> float:
+    """How far one-sided windows of a window domain reach beyond ``bound``."""
+
+    margin = settings.unbounded_spatial_margin
+    return bound - margin if field.startswith("min") else bound + margin
+
+
+def domain_violations(settings: Settings, domains: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Data that range predicates cannot reach.
+
+    Outside the configured domain of an ordinary attribute, or, for a declared
+    window domain (``window_domains``), beyond what one-sided windows reach
+    (the window bound plus ``unbounded_spatial_margin``). Data between a window
+    domain and its reach is expected and listed by :func:`window_domain_outside`.
+    """
+
+    problems = []
+    window = set(settings.window_domains)
+    for name, field, value, bound in _outside(settings, domains):
+        if name not in window:
+            problems.append(f"{name}.{field}: data {value} outside configured {bound}")
+            continue
+        reach = _reach(settings, field, bound)
+        if value < reach if field.startswith("min") else value > reach:
+            problems.append(f"{name}.{field}: data {value} beyond the reach {reach} of window domain {bound}")
     return problems
+
+
+def window_domain_outside(settings: Settings, domains: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Informational: data outside a declared window domain (reached by one-sided windows)."""
+
+    window = set(settings.window_domains)
+    return [{"attribute": name, "field": field, "data": value, "window": bound,
+             "reach": _reach(settings, field, bound)}
+            for name, field, value, bound in _outside(settings, domains) if name in window]
 
 
 def diagnostics(settings: Settings, session) -> Dict[str, Any]:
@@ -102,6 +136,8 @@ def database_fingerprint(settings: Settings, session) -> Dict[str, Any]:
         fingerprint[f"{table_id}.rows"] = int(session.scalar(f"SELECT count(*) FROM {table['name']}"))
     fingerprint["data_domains"] = data_domains(settings, session)
     fingerprint["domain_violations"] = domain_violations(settings, fingerprint["data_domains"])
+    if settings.window_domains:  # only then, so the bindings of configs without window domains stay as they were
+        fingerprint["window_domain_outside"] = window_domain_outside(settings, fingerprint["data_domains"])
     fingerprint["diagnostics"] = diagnostics(settings, session)
     return fingerprint
 
@@ -172,6 +208,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     violations = pools.binding["database"]["domain_violations"]
     print(json.dumps({
         "domain_violations": violations,
+        "window_domain_outside": pools.binding["database"].get("window_domain_outside", []),
         "pools": str(output),
         "sha256": pools.sha256,
         "rows": {table: len(payload["rows"]) for table, payload in pools.tables.items()},

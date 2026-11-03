@@ -1,10 +1,11 @@
 """The Porto v3 config (decided 2026-11-02): loads, every category has tables."""
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
-from query_generation.benchmark_v3.config import eligible_tables, load_settings
+from query_generation.benchmark_v3.config import ConfigError, eligible_tables, load_settings
 
 CONFIG = Path(__file__).with_name("porto_v3_config.json")
 # exact extent of all segment endpoints (Porto probe 22629119), GPS outliers included
@@ -47,6 +48,20 @@ class PortoConfigTests(unittest.TestCase):
         self.assertLessEqual(domain["min_y"] - margin, EXTENT["min_y"])
         self.assertGreaterEqual(domain["max_x"] + margin, EXTENT["max_x"])
         self.assertGreaterEqual(domain["max_y"] + margin, EXTENT["max_y"])
+
+    def test_window_domains_only_the_segment_geometry(self):
+        self.assertEqual(self.settings.window_domains, ["segments.segment_geom"])
+        raw = json.loads(CONFIG.read_text())
+        raw["base_config"] = str(CONFIG.with_name(raw["base_config"]).resolve())
+        raw["window_domains"] = ["trips.num_of_segments"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "porto_v3_config.json"
+            path.write_text(json.dumps(raw))
+            with self.assertRaises(ConfigError):
+                load_settings(path)
+
+    def test_pol_has_no_window_domains(self):
+        self.assertEqual(load_settings(CONFIG.with_name("pol_v3_config.json")).window_domains, [])
 
 
 if __name__ == "__main__":

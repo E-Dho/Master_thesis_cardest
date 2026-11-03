@@ -97,13 +97,24 @@ def _attribute_columns(settings: Settings, table_id: str) -> List[Tuple[str, str
     return columns
 
 
-def _to_arrays(names: List[str], rows: List[Tuple[Any, ...]]) -> Dict[str, np.ndarray]:
+def _to_arrays(names: List[str], rows: List[Tuple[Any, ...]],
+               nominal: Optional[set] = None) -> Dict[str, np.ndarray]:
+    """Column arrays as the snapshot stores them: SQL NULL is NaN in every non-nominal column.
+
+    NaN fails every comparison, as NULL never satisfies a v3 predicate. Nominal
+    columns keep ``None``, which never equals a value either.
+    """
+
+    nominal = nominal or set()
     columns = list(zip(*rows)) if rows else [[] for _ in names]
     arrays = {}
     for name, values in zip(names, columns):
-        array = np.asarray(values)
-        if array.dtype == object and all(isinstance(v, (int, float)) for v in values):
-            array = array.astype(float)
+        if name not in nominal and any(v is None for v in values):
+            array = np.asarray([np.nan if v is None else float(v) for v in values], dtype=float)
+        else:
+            array = np.asarray(values)
+            if array.dtype == object and all(isinstance(v, (int, float)) for v in values):
+                array = array.astype(float)
         arrays[name] = array
     return arrays
 
@@ -126,7 +137,8 @@ class Fetcher:
             + (f" WHERE {where}" if where else "")
             + (f" LIMIT {int(limit)}" if limit is not None else "")
         )
-        return _to_arrays([name for name, _ in columns], self.session.rows(sql, params))
+        nominal = {attr["name"] for attr in table["attributes"] if attr["type"] == "nominal"}
+        return _to_arrays([name for name, _ in columns], self.session.rows(sql, params), nominal)
 
     @staticmethod
     def _size(columns: Dict[str, np.ndarray]) -> int:
