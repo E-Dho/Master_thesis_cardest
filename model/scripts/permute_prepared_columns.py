@@ -14,7 +14,12 @@ that differs from the control only in ``dataset.prepared_directory``.
 ``--order`` is a JSON list of column names, or a JSON object carrying that list
 under "order" plus whatever the ordering was derived from; an object is copied
 into the output's provenance record whole, so the arm says how its order was
-chosen.  The source directory is never modified.
+chosen.
+
+The source directory is never modified, and the two directories may not overlap
+in either direction.  ``--force`` empties the output first, so a rewritten arm
+is this source under a new order rather than a union with whatever the previous
+arm left there.
 """
 
 from __future__ import annotations
@@ -51,6 +56,22 @@ def load_order(path: Path) -> tuple[list[str], dict[str, Any]]:
         f"{path} must hold a JSON list of column names, or an object with an "
         '"order" list'
     )
+
+
+def overlaps(first: Path, second: Path) -> bool:
+    """Say whether either resolved path contains the other, or they are equal."""
+
+    return first == second or first in second.parents or second in first.parents
+
+
+def clear_directory(directory: Path) -> None:
+    """Empty a directory without removing it, so a forced arm is not a union."""
+
+    for entry in sorted(directory.iterdir()):
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
 
 
 def permute_sample_rows(source: Path, destination: Path, permutation: tuple[int, ...]) -> int:
@@ -90,8 +111,16 @@ def main() -> None:
 
     prepared = Path(args.prepared).resolve()
     output = Path(args.output).resolve()
-    if output == prepared:
-        raise SystemExit("--output must differ from --prepared; this never edits in place")
+    if overlaps(output, prepared):
+        # Equality is not the only way to write into the source.  With --output
+        # inside --prepared the arm directory is created in the source and then
+        # copied into the next arm; with --prepared inside --output the source
+        # ends up nested in the arm it produced.  Neither is a directory any
+        # later run could read, and both contradict leaving the source alone.
+        raise SystemExit(
+            f"--output {output} and --prepared {prepared} overlap; this never "
+            "edits in place or writes an arm inside its own source"
+        )
     if output.exists() and any(output.iterdir()) and not args.force:
         raise SystemExit(f"{output} is not empty; pass --force to overwrite it")
 
@@ -105,6 +134,13 @@ def main() -> None:
     permuted = permute_metadata_columns(source_metadata, order)
 
     output.mkdir(parents=True, exist_ok=True)
+    if args.force:
+        # Everything above this line can still refuse -- a bad order file leaves
+        # the output untouched.  From here the arm is written, and it has to be
+        # exactly this source under a new order: a companion the previous arm
+        # left behind, sample_trajectory_ids.npy above all, would be read as
+        # this arm's row provenance.
+        clear_directory(output)
     for entry in sorted(prepared.iterdir()):
         if entry.name in {MANIFEST_NAME, SAMPLE_ROWS_NAME, PROVENANCE_NAME}:
             continue
@@ -122,15 +158,11 @@ def main() -> None:
     )
 
     sample_rows = prepared / SAMPLE_ROWS_NAME
-    written_rows = output / SAMPLE_ROWS_NAME
     row_count = None
     if sample_rows.exists():
-        row_count = permute_sample_rows(sample_rows, written_rows, permutation)
-    elif written_rows.exists():
-        # --force into a directory that held an earlier arm.  Leaving its rows
-        # beside a manifest they were never encoded against would give this arm
-        # the other arm's data in this arm's column order.
-        written_rows.unlink()
+        row_count = permute_sample_rows(
+            sample_rows, output / SAMPLE_ROWS_NAME, permutation
+        )
 
     provenance = {
         "source_prepared_directory": str(prepared),

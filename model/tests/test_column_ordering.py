@@ -484,6 +484,88 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
                 (prepared / "preparation_stats.json").read_text(encoding="utf-8"),
             )
 
+    def test_an_output_inside_the_source_is_refused(self) -> None:
+        # Writing the arm into its own source leaves a directory the next run
+        # would copy into the arm after it, and modifies the source besides.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = validate_prepared_manifest(prepared)
+            order = _rotated(column.name for column in source.columns)
+            before = sorted(entry.name for entry in prepared.iterdir())
+            result = self.run_script(
+                prepared,
+                prepared / "ordB",
+                self.write_order(root / "order.json", order),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("overlap", result.stderr)
+            self.assertEqual(sorted(entry.name for entry in prepared.iterdir()), before)
+
+    def test_a_source_inside_the_output_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outer = root / "outer"
+            outer.mkdir()
+            prepared = self.prepared(outer)
+            source = validate_prepared_manifest(prepared)
+            order = _rotated(column.name for column in source.columns)
+            result = self.run_script(
+                prepared, outer, self.write_order(root / "order.json", order), "--force"
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("overlap", result.stderr)
+            self.assertTrue((prepared / "manifest.json").exists())
+
+    def test_force_writes_the_source_file_set_and_nothing_else(self) -> None:
+        # A companion the previous arm left behind -- sample_trajectory_ids.npy
+        # above all, which is read as row provenance -- would otherwise be
+        # picked up as this arm's.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = validate_prepared_manifest(prepared)
+            output = root / "ordB"
+            output.mkdir()
+            (output / "sample_trajectory_ids.npy").write_bytes(b"previous arm")
+            (output / "leftover").mkdir()
+            (output / "leftover" / "notes.json").write_text("{}", encoding="utf-8")
+            order = _rotated(column.name for column in source.columns)
+            result = self.run_script(
+                prepared,
+                output,
+                self.write_order(root / "order.json", order),
+                "--force",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                sorted(entry.name for entry in output.iterdir()),
+                sorted(
+                    [entry.name for entry in prepared.iterdir()]
+                    + ["column_permutation.json"]
+                ),
+            )
+
+    def test_a_refused_order_leaves_the_output_untouched(self) -> None:
+        # The directory is emptied only once everything that can refuse has,
+        # so a bad order file does not cost the arm already sitting there.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = validate_prepared_manifest(prepared)
+            output = root / "ordB"
+            output.mkdir()
+            (output / "previous.json").write_text("{}", encoding="utf-8")
+            order = [column.name for column in source.columns][:-1]
+            result = self.run_script(
+                prepared,
+                output,
+                self.write_order(root / "order.json", order),
+                "--force",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((output / "previous.json").exists())
+
     def test_force_does_not_leave_the_previous_arm_rows_behind(self) -> None:
         # A source without sample_rows.npy forced into a directory that has one
         # would otherwise publish the earlier arm's rows under this arm's
@@ -516,7 +598,7 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
                 prepared, prepared, self.write_order(root / "order.json", order)
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("must differ", result.stderr)
+            self.assertIn("overlap", result.stderr)
 
     def test_a_non_empty_output_needs_force(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
