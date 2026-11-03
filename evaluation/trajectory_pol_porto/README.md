@@ -291,6 +291,13 @@ rows), `build` (per seed, all trips as samples: `--sample-size 10000000`,
 RDC threshold 0.3), `evaluate` (translation, DeepDB `parse_query`,
 `cardinality`; the expectation cache is cleared before each query, as on
 IMDB). SQL literals are the shortest round-trip decimals without exponents.
+Two compatibility shims (`install_compat`, recorded as `numpy_compat` in the
+prepare manifest and the build metrics) keep the pinned DeepDB/SPFlow working
+in the cluster's DeepDB environment (numpy 1.24, newer scikit-learn): the mixed
+column domains of `rspn.build_ds_context` become an object array, as older
+numpy produced, and an RDC pair whose CCA fails on a constant slice gets
+NaN, as older scikit-learn returned and SPFlow already maps to independence.
+The first cluster attempt (2801ae3) failed on the first of these in smoke.
 On the cluster:
 
 ```bash

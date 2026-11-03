@@ -177,6 +177,27 @@ class RealDeepDbTest(_Shared):
                         "--revision", REVISION, "--shared-root", str(self.shared)],
                        check=True, capture_output=True, text=True)
 
+    def test_compatibility_shims(self) -> None:
+        """NumPy >= 1.24 ragged domains and scikit-learn's failing CCA on a constant slice."""
+        script = f"""
+import sys, importlib.util
+sys.path.insert(0, {str(DEEPDB_SOURCE)!r})
+spec = importlib.util.spec_from_file_location("bridge", {str(BRIDGE)!r})
+bridge = importlib.util.module_from_spec(spec); spec.loader.exec_module(bridge)
+bridge.install_compat(); bridge.install_compat()
+import numpy as np, rspn.rspn as r, spn.algorithms.splitting.RDC as rdc
+domains = r.np.asanyarray([[0.0, 1.0], np.arange(0, 5)])
+assert domains.dtype == object and domains.shape == (2,), domains
+assert r.np.asanyarray([[0, 1], [2, 3]]).shape == (2, 2)
+constant = np.ones((50, 3)); varied = np.random.RandomState(0).rand(50, 3)
+value = rdc.rdc_cca((0, 1, [constant, varied]))
+assert value != value, value  # NaN: SPFlow treats it as independent
+assert not hasattr(rdc.rdc_cca.__wrapped__, "__wrapped__")  # wrapped once
+print("ok")
+"""
+        result = subprocess.run([DEEPDB_PYTHON, "-W", "ignore", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip().splitlines()[-1:], ["ok"], result.stderr[-2000:])
+
     def test_pipeline_run_matches_exact_mbr_coverage(self) -> None:
         self.bridge("prepare-shared")
         common = (f"--source-root {DEEPDB_SOURCE} --revision {REVISION} --shared-root {self.shared} --seed {{seed}}")

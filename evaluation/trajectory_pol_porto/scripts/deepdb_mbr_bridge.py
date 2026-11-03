@@ -126,9 +126,73 @@ def load_upstream(source: Path) -> Dict[str, Any]:
     from ensemble_creation.naive import create_naive_all_split_ensemble
     from evaluation.utils import parse_query
 
+    install_compat()
     return {"np": np, "pd": pd, "prepare_all_tables": prepare_all_tables, "SchemaGraph": SchemaGraph,
             "Table": Table, "read_ensemble": read_ensemble,
             "single_ensemble": create_naive_all_split_ensemble, "parse_query": parse_query}
+
+
+NUMPY_COMPAT = [
+    "rspn.rspn.build_ds_context: ragged column domains become a 1-d object array, as numpy < 1.24 did "
+    "(numpy >= 1.24 raises for np.asanyarray of [min, max] pairs mixed with the value lists of "
+    "categorical columns)",
+    "spn.algorithms.splitting.RDC.rdc_cca: a pair whose CCA fails on a degenerate (constant) slice gets "
+    "rdc = NaN, as older scikit-learn returned; SPFlow then treats NaN as independent "
+    "(getIndependentRDCGroups_py sets NaN to 0); newer scikit-learn raises from scipy's pinv instead",
+]
+
+
+class _RaggedAsObject:
+    """``numpy`` for ``rspn.rspn`` only, restoring numpy < 1.24's ragged ``asanyarray``.
+
+    ``build_ds_context`` stores one domain per column: ``[min, max]`` for real
+    columns and the list of codes for categorical ones. Older numpy turned the
+    mixed list into an object array (with a deprecation warning) and DeepDB
+    indexes it per column; numpy 1.24 raises instead. Everything else is the
+    real numpy.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        import numpy
+
+        return getattr(numpy, name)
+
+    def asanyarray(self, value: Any, *args: Any, **kwargs: Any) -> Any:
+        import numpy
+
+        try:
+            return numpy.asanyarray(value, *args, **kwargs)
+        except ValueError:
+            if args or kwargs or not isinstance(value, (list, tuple)):
+                raise
+            out = numpy.empty(len(value), dtype=object)
+            for index, item in enumerate(value):
+                out[index] = item
+            return out
+
+
+def _nan_on_degenerate_cca(original):
+    def rdc_cca(indexes):
+        import numpy
+
+        try:
+            return original(indexes)
+        except (ValueError, numpy.linalg.LinAlgError):
+            return float("nan")
+
+    rdc_cca.__wrapped__ = original
+    return rdc_cca
+
+
+def install_compat() -> None:
+    """The two compatibility shims of ``NUMPY_COMPAT`` (idempotent)."""
+    import rspn.rspn as rspn_module
+    import spn.algorithms.splitting.RDC as rdc_module
+
+    if not isinstance(rspn_module.np, _RaggedAsObject):
+        rspn_module.np = _RaggedAsObject()
+    if not hasattr(rdc_module.rdc_cca, "__wrapped__"):
+        rdc_module.rdc_cca = _nan_on_degenerate_cca(rdc_module.rdc_cca)
 
 
 def set_seed(seed: int) -> None:
@@ -190,6 +254,8 @@ def prepare(source: Path, shared: Path, output: Path) -> None:
         raise ValueError(f"{files['hdf']} is not prepared for the current export; run prepare-shared")
     payload = {"status": "ready", "source_revision": _revision(source), "python": sys.version,
                "numpy": runtime["np"].__version__, "pandas": runtime["pd"].__version__,
+               "numpy_compat": NUMPY_COMPAT,
+               "sklearn": __import__("sklearn").__version__, "scipy": __import__("scipy").__version__,
                "rows": files["manifest"]["rows"], "columns": files["manifest"]["columns"],
                "export_csv_sha256": files["manifest"]["csv_sha256"],
                "snapshot_manifest_sha256": files["manifest"]["snapshot_manifest_sha256"]}
@@ -285,7 +351,8 @@ def build_model(source: Path, shared: Path, output: Path, sample_size: int, rdc_
                "rdc_threshold": float(rdc_threshold), "post_sampling_factor": int(post_sampling_factor),
                "shared_hdf_seconds": (json.loads(preparation.read_text())["seconds"]
                                       if preparation.exists() else None),
-               "note": "trip-table export and HDF preparation are shared, reported once"}
+               "note": "trip-table export and HDF preparation are shared, reported once",
+               "numpy_compat": NUMPY_COMPAT}
     write_json(output / "build_stage_metrics.json", metrics)
     write_json(output / "artifact_manifest.json", {
         "parameter_count": None,
