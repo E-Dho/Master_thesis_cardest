@@ -1591,6 +1591,65 @@ do not read better than they are. This is the
 quantity to watch when a joint prefix is suspected of starving: a global
 auxiliary effective sample size says nothing about it.
 
+## Column Ordering
+
+The model's autoregressive order *is* the order of `ModelMetadata.columns`.
+ResMADE derives its input and hidden degrees from column position
+(`model/src/model/resmade.py`), and because `OnePassEstimator` conditions on
+predicate tokens alone, column `i` contributes
+`P(col_i in R_i | predicates on columns < i)`. A column early in the order has
+its predicate conditioning every later factor while its own factor is an
+unconditioned marginal; a column late in the order has the reverse. The product
+is the chain rule over events and is exact at infinite capacity, so ordering can
+only matter through what the network actually learns -- which makes it an
+empirical question rather than one the factorization settles.
+
+`schema.column_order` in a config, and `ModelMetadata.column_order`, are labels.
+Nothing reads either to order anything. `build_complete_metadata` emits all DATA
+columns (by `join_tables` order, then frame column order), then one INDICATOR per
+table, then one FANOUT per non-root table, and every consumer takes its index
+from `enumerate(metadata.columns)` or from a name-to-index map built the same
+way. No site assumes the DATA/INDICATOR/FANOUT grouping.
+
+So an ordering is varied by rewriting the prepared artifacts, not by threading an
+ordering through the model:
+
+```bash
+python3 -m model.scripts.permute_prepared_columns \
+    --prepared data/neurocard_prepared/job_light_ranges_live_content \
+    --output   data/neurocard_prepared/job_light_ranges_live_content_ordB \
+    --order    model/orderings/<criterion>.json
+```
+
+`--order` is a JSON list of column names, or an object carrying that list under
+`"order"` plus whatever the ordering was derived from; an object is copied into
+the output's `column_permutation.json` whole, so an arm records how its order was
+chosen. An arm is then an ordinary run whose config differs from the control only
+in `dataset.prepared_directory`.
+
+Rewriting the artifacts is also the only safe place to do it. `sample_rows.npy`
+is aligned to the manifest by position and is loaded raw beside `source.metadata`
+in `model/src/data/full_join_sampler.py` and
+`model/src/data/importance_sampling.py`, so a permutation applied to metadata at
+load time would misalign rows with no error raised. Applied to the directory, the
+manifest and the rows move together, and `validate_prepared_manifest` -- which
+checks every column's encoded values against that column's domain and runs on
+every sample-source construction -- is what says so. With JOB-light domains
+running from 2 (indicators) to six figures (`keyword_id`), a permutation applied
+to one artifact and not the other does not survive that check.
+
+Two properties are worth knowing. Permuting a directory by its own current order
+is a no-op: the schema hash is unchanged, so the control arm needs no rewrite and
+an arm cannot differ from it by the act of having been rewritten. And a real
+permutation *is* a different schema, so its hash differs -- which is correct, and
+is what keeps a checkpoint from being evaluated against the wrong manifest.
+
+One source change was needed. `encode_sample_dataframe` used to require the
+sampled frame's column order to equal the manifest's, which held only because
+NeuroCard's `_rearrange_columns` and `build_complete_metadata` happened to agree.
+It now matches by name and reorders, and still refuses a frame that carries
+different columns, a repeated column, or a missing one.
+
 ## Factorization Status
 
 The baseline and unfactorized configs leave factorization disabled. The

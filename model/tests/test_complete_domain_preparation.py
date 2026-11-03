@@ -19,6 +19,11 @@ from model.src.data.complete_domain_preparation import (
     validate_prepared_manifest,
     write_prepared_artifacts,
 )
+from model.src.data.column_ordering import (
+    column_permutation,
+    permute_encoded_rows,
+    permute_metadata_columns,
+)
 from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.model.factorization import (
     FactorizationConfig,
@@ -174,6 +179,77 @@ class CompleteDomainPreparationTest(unittest.TestCase):
             raw = json.loads(artifacts.manifest_path.read_text(encoding="utf-8"))
             self.assertTrue(raw["domains_complete"])
             self.assertEqual(raw["metadata_source"], COMPLETE_METADATA_SOURCE)
+
+
+class SampleColumnMatchingTest(unittest.TestCase):
+    """The sampler's column order is its own; only the names have to agree.
+
+    The frame arrives in whatever order the sampler emits -- for the live
+    source, NeuroCard's _rearrange_columns -- and that equalled the manifest's
+    order only because build_complete_metadata happened to build the manifest
+    the same way.  A manifest permuted on purpose, to vary the model's
+    autoregressive ordering, is the same schema over the same columns, so the
+    encoder matches by name.  A frame that carries different columns is a
+    different schema and is still refused.
+    """
+
+    def test_a_shuffled_frame_encodes_identically(self) -> None:
+        tables, spec = _tiny_tables()
+        metadata = build_complete_metadata(tables, spec)
+        frame = _sample_frame([10, 12, 9999])
+        shuffled = frame[list(reversed(list(frame.columns)))]
+        self.assertNotEqual(list(shuffled.columns), list(frame.columns))
+        np.testing.assert_array_equal(
+            encode_sample_dataframe(shuffled, metadata).encoded_rows,
+            encode_sample_dataframe(frame, metadata).encoded_rows,
+        )
+
+    def test_the_sampler_order_encodes_against_permuted_metadata(self) -> None:
+        # The ablation's actual path: the manifest is permuted, the sampler is
+        # not.  The encoded rows have to come out in the manifest's order, which
+        # is what the fixture permutation produces offline.
+        tables, spec = _tiny_tables()
+        metadata = build_complete_metadata(tables, spec)
+        frame = _sample_frame([10, 12, 9999])
+        # Rotated, not reversed: reversal is its own inverse, so a permutation
+        # applied in the wrong direction would reproduce itself here.
+        names = [column.name for column in metadata.columns]
+        order = names[1:] + names[:1]
+        permuted = permute_metadata_columns(metadata, order)
+        np.testing.assert_array_equal(
+            encode_sample_dataframe(frame, permuted).encoded_rows,
+            permute_encoded_rows(
+                encode_sample_dataframe(frame, metadata).encoded_rows,
+                column_permutation(metadata, order),
+            ),
+        )
+
+    def test_a_missing_column_is_named(self) -> None:
+        tables, spec = _tiny_tables()
+        metadata = build_complete_metadata(tables, spec)
+        frame = _sample_frame([10, 12]).drop(columns=["title:kind_id"])
+        with self.assertRaises(ValueError) as caught:
+            encode_sample_dataframe(frame, metadata)
+        self.assertIn("title:kind_id", str(caught.exception))
+
+    def test_an_extra_column_is_named(self) -> None:
+        tables, spec = _tiny_tables()
+        metadata = build_complete_metadata(tables, spec)
+        frame = _sample_frame([10, 12])
+        frame["title:not_modeled"] = 1
+        with self.assertRaises(ValueError) as caught:
+            encode_sample_dataframe(frame, metadata)
+        self.assertIn("title:not_modeled", str(caught.exception))
+
+    def test_a_repeated_column_is_refused(self) -> None:
+        # Selecting by name against a duplicated label widens the frame instead
+        # of reordering it, which would then misalign every later column.
+        tables, spec = _tiny_tables()
+        metadata = build_complete_metadata(tables, spec)
+        frame = _sample_frame([10, 12])
+        doubled = pd.concat([frame, frame[["title:kind_id"]]], axis=1)
+        with self.assertRaisesRegex(ValueError, "repeats"):
+            encode_sample_dataframe(doubled, metadata)
 
 
 def _tiny_tables() -> tuple[dict[str, pd.DataFrame], CompleteDomainSpec]:

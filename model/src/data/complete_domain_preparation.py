@@ -199,10 +199,31 @@ def encode_sample_dataframe(
     expected_columns = tuple(column.name for column in metadata.columns)
     observed_columns = tuple(str(column) for column in frame.columns)
     if observed_columns != expected_columns:
-        raise ValueError(
-            "sampled column order differs from metadata order: "
-            f"expected {expected_columns}, observed {observed_columns}"
-        )
+        # Columns are matched by name and reordered, not required to arrive in
+        # metadata order.  The sampler emits its own fixed ordering -- for the
+        # live source, NeuroCard's _rearrange_columns -- which equalled the
+        # manifest's only because build_complete_metadata happened to build the
+        # manifest in that same order.  A manifest whose columns were permuted
+        # deliberately, to vary the model's autoregressive ordering, is the same
+        # schema over the same columns and has to encode to the same rows.  What
+        # is still refused is a frame that does not carry exactly this schema's
+        # columns, because that is a different schema and not a reordering.
+        if len(set(observed_columns)) != len(observed_columns):
+            repeated = sorted(
+                {name for name in observed_columns if observed_columns.count(name) > 1}
+            )
+            raise ValueError(
+                f"sampled frame repeats column(s) {repeated}; selecting by name "
+                "would widen the frame instead of reordering it"
+            )
+        missing = tuple(name for name in expected_columns if name not in set(observed_columns))
+        unexpected = tuple(name for name in observed_columns if name not in set(expected_columns))
+        if missing or unexpected:
+            raise ValueError(
+                "sampled columns do not match metadata columns: "
+                f"missing {missing}, unexpected {unexpected}"
+            )
+        frame = frame[list(expected_columns)]
     indicator_values_by_table = _canonical_indicator_values_by_table(frame, metadata)
     encoded = np.zeros((len(frame), len(metadata.columns)), dtype=np.int64)
     issues: list[SampleEncodingIssue] = []
