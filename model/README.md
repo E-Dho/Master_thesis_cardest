@@ -1650,6 +1650,51 @@ NeuroCard's `_rearrange_columns` and `build_complete_metadata` happened to agree
 It now matches by name and reorders, and still refuses a frame that carries
 different columns, a repeated column, or a missing one.
 
+### Choosing an ordering
+
+The order has to come from the join data, never from a previous run on the
+benchmark: an order read off the queries an arm is then scored on would make
+any improvement unfalsifiable. `model/scripts/compute_column_ordering.py` draws
+full-outer-join rows through the same sampler a training run uses and ranks the
+DATA columns on them.
+
+```bash
+python3 -m model.scripts.compute_column_ordering \
+    --config model/configs/<the control arm>.yaml \
+    --rows 2000000 --sampler-seed 11 \
+    --output-directory model/orderings/
+```
+
+It writes one ordering file per criterion plus `column_statistics.json`, so an
+arm can be read back to the figures that chose it. The criteria are `coupling`
+(descending total mutual information with the other DATA columns -- the model
+conditions each column on the predicates of the columns before it, so the
+column that says most about the rest goes first), `coupling_reversed` (that
+order inverted, as the falsification arm), `entropy` (descending marginal
+entropy) and `domain_size` (descending domain size, needing no sample at all
+and serving as the baseline the others have to beat).
+
+Two details decide whether the numbers mean anything. Columns are binned by
+frequency rank before mutual information is estimated, because
+`movie_keyword:keyword_id` has 134,171 values and a few million rows leave
+almost every cell of a joint table empty, where the estimate is noise. Mutual
+information depends on the partition and not on the labels, so the same binning
+serves ordinal and categorical columns alike and the estimates' upward
+small-sample bias stays comparable between columns -- which is why these
+figures are only ever used to rank. And the draw is taken with rare support and
+importance sampling forced off, since both reweight the stream towards the
+regions they target and the order would otherwise be chosen from a distribution
+no arm trains on.
+
+Only the DATA columns move. The indicator and fanout blocks keep their
+positions, so an arm differs from the control in the DATA order alone. A
+statistic that says nothing reproduces the control exactly, because ties break
+on current position.
+
+Note that `sample_rows.npy` in a live-sampling directory is a small validation
+sample -- 2,000 rows for JOB-light-ranges -- and is far too small for this. The
+script draws its own sample through the sampler rather than reading that file.
+
 ## Factorization Status
 
 The baseline and unfactorized configs leave factorization disabled. The
