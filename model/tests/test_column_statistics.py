@@ -340,6 +340,50 @@ class DrawRowsTest(unittest.TestCase):
         drawn = compute_column_ordering.draw_rows(self.source(3, 40), 100, 32)
         self.assertEqual(drawn.rows.shape, (100, 3))
 
+    def test_the_counters_describe_the_sample_that_was_kept(self) -> None:
+        # Trimming the rows while adding the whole batch's counters reported a
+        # hundred-row sample made of a hundred and twenty rows.
+        drawn = compute_column_ordering.draw_rows(self.source(3, 40), 100, 32)
+        self.assertEqual(
+            drawn.fresh_rows_drawn + drawn.fixture_rows_reused, drawn.rows.shape[0]
+        )
+        self.assertEqual(drawn.fixture_rows_reused, 100)
+
+    def test_a_partly_fresh_batch_is_split_in_proportion(self) -> None:
+        class HalfFresh:
+            def batches(self, batch_size, *, seed=0):
+                return types.SimpleNamespace(
+                    encoded_values=np.zeros((40, 3), dtype=np.int64),
+                    fresh_rows_drawn=20,
+                    fixture_rows_reused=20,
+                )
+
+        drawn = compute_column_ordering.draw_rows(HalfFresh(), 50, 40)
+        self.assertEqual(drawn.rows.shape, (50, 3))
+        self.assertEqual(drawn.fresh_rows_drawn, 25)
+        self.assertEqual(drawn.fixture_rows_reused, 25)
+
+    def test_a_batch_that_accounts_for_itself_oddly_is_capped(self) -> None:
+        # Counters that do not partition the batch are not rescaled, because
+        # the proportion they would be rescaled by is not known to mean
+        # anything; capping understates rather than invents.
+        class Undercounts:
+            def batches(self, batch_size, *, seed=0):
+                return types.SimpleNamespace(
+                    encoded_values=np.zeros((40, 3), dtype=np.int64),
+                    fresh_rows_drawn=4,
+                    fixture_rows_reused=0,
+                )
+
+        drawn = compute_column_ordering.draw_rows(Undercounts(), 10, 40)
+        self.assertEqual(drawn.rows.shape, (10, 3))
+        self.assertEqual(drawn.fresh_rows_drawn, 4)
+        self.assertEqual(drawn.fixture_rows_reused, 0)
+
+    def test_a_nonpositive_batch_size_is_refused(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "--batch-size"):
+            compute_column_ordering.draw_rows(self.source(3, 10), 10, 0)
+
     def test_a_sampler_that_returns_nothing_is_refused(self) -> None:
         with self.assertRaisesRegex(SystemExit, "no rows"):
             compute_column_ordering.draw_rows(self.source(3, 0), 10, 5)
@@ -347,6 +391,46 @@ class DrawRowsTest(unittest.TestCase):
     def test_a_nonpositive_row_count_is_refused(self) -> None:
         with self.assertRaisesRegex(SystemExit, "--rows"):
             compute_column_ordering.draw_rows(self.source(3, 10), 0, 5)
+
+
+class SamplerSeedTest(unittest.TestCase):
+    """One seed, used by the sampler and by the batch sequence alike."""
+
+    def test_the_flag_wins(self) -> None:
+        config = {"dataset": {"sampler_seed": 5}, "training": {"seed": 9}}
+        self.assertEqual(compute_column_ordering.resolve_sampler_seed(config, 1), 1)
+
+    def test_the_config_is_next(self) -> None:
+        config = {"dataset": {"sampler_seed": 5}, "training": {"seed": 9}}
+        self.assertEqual(compute_column_ordering.resolve_sampler_seed(config, None), 5)
+
+    def test_the_training_seed_is_the_last_resort(self) -> None:
+        # Matching sample_source_from_config's chain, so omitting the flag
+        # changes what is recorded and not which sample is drawn.
+        config = {"dataset": {}, "training": {"seed": 9}}
+        self.assertEqual(compute_column_ordering.resolve_sampler_seed(config, None), 9)
+
+    def test_zero_is_a_seed_like_any_other(self) -> None:
+        config = {"dataset": {"sampler_seed": 5}}
+        self.assertEqual(compute_column_ordering.resolve_sampler_seed(config, 0), 0)
+
+    def test_nothing_anywhere_means_zero(self) -> None:
+        config = {}
+        self.assertEqual(compute_column_ordering.resolve_sampler_seed(config, None), 0)
+
+    def test_the_resolved_seed_reaches_the_sampler(self) -> None:
+        # The live source reads dataset.sampler_seed when it is constructed,
+        # and the batch sequence reads the returned value.  Resolving them
+        # separately is how a run was built with one seed and stepped through
+        # batches from another.
+        config = {"dataset": {"sampler_seed": 5}, "training": {"seed": 9}}
+        seed = compute_column_ordering.resolve_sampler_seed(config, 1)
+        self.assertEqual(config["dataset"]["sampler_seed"], seed)
+
+    def test_it_reaches_the_sampler_from_the_training_seed_too(self) -> None:
+        config = {"training": {"seed": 9}}
+        seed = compute_column_ordering.resolve_sampler_seed(config, None)
+        self.assertEqual(config["dataset"]["sampler_seed"], seed)
 
 
 class BuildOrderingsTest(unittest.TestCase):
@@ -541,6 +625,61 @@ class ComputeOrderingCommandTest(unittest.TestCase):
             self.assertEqual(seeds, [0, 0, 1, 2, 3])
             self.assertEqual(figures[0], figures[1])
             self.assertGreater(len(set(figures)), 1)
+
+    def test_the_config_seed_is_used_and_recorded_when_the_flag_is_absent(self) -> None:
+        # --sampler-seed defaulted base_seed to 0 while the source was built
+        # from dataset.sampler_seed, so the two disagreed and the report said
+        # null.  What is recorded has to be what was used.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self.config(root, self.prepared(root))
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "  sampling_mode: fixture",
+                    "  sampling_mode: fixture\n  sampler_seed: 5",
+                ),
+                encoding="utf-8",
+            )
+            output = root / "orderings"
+            result = self.run_script(config, output)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            statistics = json.loads(
+                (output / "column_statistics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(statistics["sampler_seed"], 5)
+            self.assertIsNone(statistics["sampler_seed_requested"])
+
+    def test_the_flag_overrides_the_config_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self.config(root, self.prepared(root))
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "  sampling_mode: fixture",
+                    "  sampling_mode: fixture\n  sampler_seed: 5",
+                ),
+                encoding="utf-8",
+            )
+            output = root / "orderings"
+            self.run_script(config, output, "--sampler-seed", "9")
+            statistics = json.loads(
+                (output / "column_statistics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(statistics["sampler_seed"], 9)
+            self.assertEqual(statistics["sampler_seed_requested"], 9)
+
+    def test_the_batch_size_is_recorded(self) -> None:
+        # One seed per batch means the batch boundaries are part of the sample:
+        # the same seed with a different batch size is a different draw.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self.config(root, self.prepared(root))
+            output = root / "orderings"
+            self.run_script(config, output, "--batch-size", "32")
+            statistics = json.loads(
+                (output / "column_statistics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(statistics["batch_size"], 32)
 
     def test_the_statistics_record_what_chose_the_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

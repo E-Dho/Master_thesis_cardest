@@ -88,6 +88,29 @@ class DrawnRows:
     fixture_rows_reused: int
 
 
+def resolve_sampler_seed(config: dict[str, Any], requested: int | None) -> int:
+    """Return the one seed the sampler and the batch sequence both use.
+
+    Written back into the config as well as returned, because the live source
+    takes its seed from ``dataset.sampler_seed`` at construction while the
+    batch sequence takes it from here.  Leaving the two to be resolved
+    separately is how a run was built with the config's seed, stepped through
+    batches from zero, and reported null.  The fallback chain is
+    sample_source_from_config's own, so omitting the flag changes nothing about
+    which sample is drawn -- only that the provenance now names it.
+    """
+
+    dataset = config.setdefault("dataset", {})
+    if requested is not None:
+        seed = int(requested)
+    elif "sampler_seed" in dataset:
+        seed = int(dataset["sampler_seed"])
+    else:
+        seed = int(config.get("training", {}).get("seed", 0))
+    dataset["sampler_seed"] = seed
+    return seed
+
+
 def draw_rows(
     source: Any, total_rows: int, batch_size: int, *, base_seed: int = 0
 ) -> DrawnRows:
@@ -103,6 +126,8 @@ def draw_rows(
 
     if total_rows <= 0:
         raise SystemExit("--rows must be positive")
+    if batch_size <= 0:
+        raise SystemExit("--batch-size must be positive")
     collected = []
     seen = 0
     fresh = 0
@@ -112,14 +137,31 @@ def draw_rows(
             min(batch_size, total_rows - seen), seed=int(base_seed) + len(collected)
         )
         values = np.asarray(batch.encoded_values)
-        if values.shape[0] == 0:
+        returned = int(values.shape[0])
+        if returned == 0:
             raise SystemExit("the sampler returned no rows")
-        collected.append(values.astype(np.int32, copy=False))
-        seen += values.shape[0]
-        fresh += int(getattr(batch, "fresh_rows_drawn", 0) or 0)
-        reused += int(getattr(batch, "fixture_rows_reused", 0) or 0)
+        kept = min(returned, total_rows - seen)
+        batch_fresh = int(getattr(batch, "fresh_rows_drawn", 0) or 0)
+        batch_reused = int(getattr(batch, "fixture_rows_reused", 0) or 0)
+        if kept < returned:
+            # Only rows that stay in the sample are counted.  The two counters
+            # partition a batch for both shipped sources -- every row is either
+            # freshly drawn or resampled from the fixture -- so the kept part
+            # is split in that same proportion.  A source that accounts for its
+            # batch some other way is capped rather than rescaled, which
+            # understates rather than invents.
+            if batch_fresh + batch_reused == returned:
+                batch_fresh = round(batch_fresh * kept / returned)
+                batch_reused = kept - batch_fresh
+            else:
+                batch_fresh = min(batch_fresh, kept)
+                batch_reused = min(batch_reused, kept)
+        collected.append(values[:kept].astype(np.int32, copy=False))
+        seen += kept
+        fresh += batch_fresh
+        reused += batch_reused
     rows = np.concatenate(collected, axis=0) if len(collected) > 1 else collected[0]
-    return DrawnRows(rows[:total_rows], fresh, reused)
+    return DrawnRows(rows, fresh, reused)
 
 
 def build_orderings(metadata: Any, rows: np.ndarray, max_bins: int) -> dict[str, Any]:
@@ -191,8 +233,7 @@ def main() -> None:
 
     config = load_simple_yaml(args.config)
     validate_config(config)
-    if args.sampler_seed is not None:
-        config.setdefault("dataset", {})["sampler_seed"] = int(args.sampler_seed)
+    effective_seed = resolve_sampler_seed(config, args.sampler_seed)
     # Statistics describe the join, not a training objective: rare support
     # would reweight the stream towards the regions it targets and the order
     # would then be chosen from a distribution no arm actually trains on.
@@ -201,10 +242,7 @@ def main() -> None:
 
     source = sample_source_from_config(config)
     drawn = draw_rows(
-        source,
-        int(args.rows),
-        int(args.batch_size),
-        base_seed=int(args.sampler_seed or 0),
+        source, int(args.rows), int(args.batch_size), base_seed=effective_seed
     )
     rows = drawn.rows
     report = build_orderings(source.metadata, rows, int(args.max_bins))
@@ -213,8 +251,12 @@ def main() -> None:
     directory.mkdir(parents=True, exist_ok=True)
     provenance = {
         "config": str(Path(args.config)),
-        "sampler_seed": args.sampler_seed,
+        "sampler_seed": effective_seed,
+        "sampler_seed_requested": args.sampler_seed,
         "rows": int(rows.shape[0]),
+        # The seed sequence runs one seed per batch, so the batch size is part
+        # of what has to be repeated to draw this sample again.
+        "batch_size": int(args.batch_size),
         "max_bins": int(args.max_bins),
         "source": type(source).__name__,
         # A fixture source resamples a fixed set of rows with replacement, so a

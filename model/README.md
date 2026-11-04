@@ -1712,10 +1712,18 @@ Each batch is drawn with its own seed. The fixture and synthetic sources build
 a fresh `default_rng(seed)` per call, so one seed for every batch would make a
 two-million-row sample thirty-one copies of one sixty-five-thousand-row draw
 while the report still said two million; the live NeuroCard source ignores the
-argument and advances its own sampler. `column_statistics.json` also records
-how many rows were drawn fresh against how many were resampled from a fixture,
-because a fixture resamples a fixed set with replacement and a large sample is
-then not a large number of distinct rows.
+argument and advances its own sampler.
+
+Because the sequence runs one seed per batch, repeating a sample needs the
+batch size as well as the seed, and both are recorded. The seed itself is
+resolved once -- `--sampler-seed`, else `dataset.sampler_seed`, else
+`training.seed`, the same chain `sample_source_from_config` uses -- and written
+back into the config, so the sampler and the batch sequence cannot be built
+from different numbers. `column_statistics.json` also records how many rows
+were drawn fresh against how many were resampled from a fixture, counting only
+the rows that stayed in the sample, because a fixture resamples a fixed set
+with replacement and a large sample is then not a large number of distinct
+rows.
 
 Note that `sample_rows.npy` in a live-sampling directory is a small validation
 sample -- 2,000 rows for JOB-light-ranges -- and is far too small for this. The
