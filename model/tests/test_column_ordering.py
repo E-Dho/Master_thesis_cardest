@@ -422,7 +422,11 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
 
     def test_the_identity_reproduces_the_source_manifest(self) -> None:
         # The sharpest check available: rewriting a directory by its own order
-        # has to give the same schema back, rows included.
+        # has to give the same directory back.  Compared as bytes, not as
+        # parsed JSON -- parsed equality held while the manifest was a byte
+        # shorter, because this script wrote it without the trailing newline
+        # the preparation writer adds, so a regenerated control arm did not
+        # checksum against the original.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             prepared = self.prepared(root)
@@ -433,13 +437,80 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
                 prepared, output, self.write_order(root / "order.json", order)
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                json.loads((output / "manifest.json").read_text(encoding="utf-8")),
-                json.loads((prepared / "manifest.json").read_text(encoding="utf-8")),
+            for name in ("manifest.json", "sample_rows.npy", "preparation_stats.json"):
+                self.assertEqual(
+                    (output / name).read_bytes(),
+                    (prepared / name).read_bytes(),
+                    f"{name} differs byte for byte after an identity rewrite",
+                )
+
+    def test_a_permuted_manifest_is_written_the_same_way(self) -> None:
+        # The identity check above would also pass if both writers were wrong
+        # in the same way, so the format is pinned against the preparation
+        # writer itself rather than against this script's own output.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = validate_prepared_manifest(prepared)
+            order = _rotated(column.name for column in source.columns)
+            output = root / "ordB"
+            self.run_script(
+                prepared, output, self.write_order(root / "order.json", order)
             )
+            for name in ("manifest.json", "column_permutation.json"):
+                written = (output / name).read_bytes()
+                self.assertTrue(
+                    written.endswith(b"}\n"),
+                    f"{name} does not end the way the preparation writer ends a file",
+                )
+
+    def test_an_interrupted_row_copy_leaves_no_fixture(self) -> None:
+        # The rows are written beside the destination and moved into place, so
+        # a run that dies part way through does not leave something that passes
+        # for a prepared fixture.  The failure has to land mid-copy: a copy
+        # that never starts leaves no file whether it staged or not, so it
+        # cannot tell the two apart.  An index past the end of the source does
+        # it without mocking -- the width check compares lengths only, so the
+        # first columns are written and then the read raises.
+        module = _permute_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = prepared / "sample_rows.npy"
+            destination = root / "sample_rows.npy"
+            width = int(np.load(source, mmap_mode="r").shape[1])
+            doomed = tuple(range(width - 1)) + (width + 5,)
+            self.assertEqual(len(doomed), width)
+            with self.assertRaises(IndexError):
+                module.permute_sample_rows(source, destination, doomed)
+            self.assertFalse(destination.exists())
+            # Nor the staging file, which would make the directory non-empty
+            # and cost the next run its --force-free write.
+            self.assertEqual(
+                sorted(entry.name for entry in root.iterdir()), ["source"]
+            )
+
+    def test_the_rows_appear_at_the_destination_all_at_once(self) -> None:
+        # Staged and moved into place rather than written where they belong.
+        # Cleaning up after an in-process failure hides the difference, so the
+        # property is checked the way it actually differs: os.replace gives the
+        # destination the staging file's inode, while writing directly
+        # truncates whatever is already there and keeps its inode.  That is the
+        # same mechanism that keeps a killed run -- where no cleanup runs at
+        # all -- from leaving a half-written fixture in place.
+        module = _permute_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = prepared / "sample_rows.npy"
+            destination = root / "sample_rows.npy"
+            destination.write_bytes(b"an older arm")
+            before = destination.stat().st_ino
+            width = int(np.load(source, mmap_mode="r").shape[1])
+            module.permute_sample_rows(source, destination, tuple(range(width)))
+            self.assertNotEqual(destination.stat().st_ino, before)
             np.testing.assert_array_equal(
-                np.load(output / "sample_rows.npy"),
-                np.load(prepared / "sample_rows.npy"),
+                np.load(destination), np.load(source)
             )
 
     def test_the_provenance_records_how_the_order_was_chosen(self) -> None:

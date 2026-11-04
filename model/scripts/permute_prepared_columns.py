@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,15 @@ from model.src.data.column_ordering import (
     column_permutation,
     permute_metadata_columns,
 )
-from model.src.data.complete_domain_preparation import validate_prepared_manifest
+from model.src.data.complete_domain_preparation import (
+    # Private on purpose, and imported on purpose: this is the writer that
+    # produced the directory being rewritten.  Spelling the same format out a
+    # second time is how an arm ends up differing from its control by a
+    # trailing byte, and a hand-rolled write_text is not atomic either, so a
+    # crash mid-write would leave a truncated manifest beside intact rows.
+    _atomic_write_text,
+    validate_prepared_manifest,
+)
 
 PROVENANCE_NAME = "column_permutation.json"
 MANIFEST_NAME = "manifest.json"
@@ -119,13 +128,24 @@ def permute_sample_rows(source: Path, destination: Path, permutation: tuple[int,
             f"{source} has shape {rows.shape}, which does not match the "
             f"{len(permutation)} columns the manifest declares"
         )
+    # Written beside the destination and moved into place, as
+    # _atomic_write_npy does, so an interrupted run cannot leave a half-copied
+    # fixture that still looks like one.  open_memmap rather than np.save
+    # because the copy is column by column: peak memory is one column, not the
+    # whole array.
+    staging = destination.with_suffix(destination.suffix + ".tmp")
     out = np.lib.format.open_memmap(
-        destination, mode="w+", dtype=rows.dtype, shape=rows.shape
+        staging, mode="w+", dtype=rows.dtype, shape=rows.shape
     )
-    for new_index, old_index in enumerate(permutation):
-        out[:, new_index] = rows[:, old_index]
-    out.flush()
-    del out
+    try:
+        for new_index, old_index in enumerate(permutation):
+            out[:, new_index] = rows[:, old_index]
+        out.flush()
+        del out
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    os.replace(staging, destination)
     return int(rows.shape[0])
 
 
@@ -189,8 +209,8 @@ def main() -> None:
             shutil.copy2(entry, destination)
 
     manifest["metadata"] = permuted.to_json_dict()
-    (output / MANIFEST_NAME).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    _atomic_write_text(
+        output / MANIFEST_NAME, json.dumps(manifest, indent=2, sort_keys=True)
     )
 
     sample_rows = prepared / SAMPLE_ROWS_NAME
@@ -211,8 +231,8 @@ def main() -> None:
         "sample_rows": row_count,
         "order_provenance": order_provenance,
     }
-    (output / PROVENANCE_NAME).write_text(
-        json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
+    _atomic_write_text(
+        output / PROVENANCE_NAME, json.dumps(provenance, indent=2, sort_keys=True)
     )
 
     # The same check every sample source runs at startup: each column's encoded
