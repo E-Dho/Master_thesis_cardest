@@ -478,7 +478,9 @@ class CaseModel:
     def _sum(self, name: str, keys: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> int:
         if keys.size == 0 or r1 < r0 or c1 < c0:
             return 0
-        return int(_rect_sum(self.prefix[name][keys], r0, r1, c0, c1).sum())
+        prefix = self.prefix[name]  # gather the four corners per key, never whole grids
+        return int((prefix[keys, r1 + 1, c1 + 1] - prefix[keys, r0, c1 + 1]
+                    - prefix[keys, r1 + 1, c0] + prefix[keys, r0, c0]).sum())
 
     def _min(self, name: str, keys: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> Optional[int]:
         if r1 < r0 or c1 < c0:
