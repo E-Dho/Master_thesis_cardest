@@ -86,7 +86,11 @@ def bin_columns(
         lookup = np.full(column.domain_size, len(keep), dtype=np.int32)
         lookup[keep] = np.arange(len(keep), dtype=np.int32)
         assignments[:, index] = lookup[rows[:, index]]
-        bin_counts.append(int(lookup.max()) + 1)
+        # Counted from what was assigned, not from the lookup's range.  A
+        # column whose observed values all fit still has a fallback bin for the
+        # domain values the sample never showed, and nothing lands in it, so
+        # taking the lookup's maximum reported one bin more than exists.
+        bin_counts.append(int(assignments[:, index].max()) + 1)
     return BinnedColumns(assignments, tuple(bin_counts), int(max_bins))
 
 

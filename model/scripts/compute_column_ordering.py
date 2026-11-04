@@ -31,8 +31,18 @@ Criteria:
     is doing the work.
 
 ``entropy``
-    DATA columns by descending marginal entropy, a cheaper story -- put the
-    columns with most to predict where they are conditioned on most.
+    DATA columns by descending marginal entropy.  Same mechanism as
+    ``coupling``, read through one column at a time: an early column's own
+    factor is an unconditioned marginal while its predicate conditions every
+    later factor, so the column carrying the most information is the one whose
+    predicate is worth conditioning the rest on.
+
+``entropy_reversed``
+    The inverse, and not merely a formality.  The competing hypothesis is that
+    a high-entropy column is the one that most needs conditioning itself, which
+    argues for placing it last, where its factor is conditioned on everything.
+    The two readings predict opposite orders, so both are generated and the
+    runs decide rather than the wording.
 
 ``domain_size``
     DATA columns by descending domain size.  Needs no sample at all and is the
@@ -43,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -59,25 +70,56 @@ from model.src.data.column_statistics import (
 )
 from model.src.data.sample_sources import sample_source_from_config
 
-CRITERIA = ("coupling", "coupling_reversed", "entropy", "domain_size")
+CRITERIA = (
+    "coupling",
+    "coupling_reversed",
+    "entropy",
+    "entropy_reversed",
+    "domain_size",
+)
 
 
-def draw_rows(source: Any, total_rows: int, batch_size: int) -> np.ndarray:
-    """Collect ``total_rows`` encoded rows from the sampler, in batches."""
+@dataclass(frozen=True)
+class DrawnRows:
+    """The sample, plus how much of it the sampler actually drew fresh."""
+
+    rows: np.ndarray
+    fresh_rows_drawn: int
+    fixture_rows_reused: int
+
+
+def draw_rows(
+    source: Any, total_rows: int, batch_size: int, *, base_seed: int = 0
+) -> DrawnRows:
+    """Collect ``total_rows`` encoded rows from the sampler, in batches.
+
+    Each batch gets its own seed.  The fixture and synthetic sources build a
+    fresh ``default_rng(seed)`` per call and index into their rows with it, so
+    passing one seed every time makes a two-million-row sample thirty-one
+    copies of the same sixty-five-thousand-row draw while the report still says
+    two million.  The live NeuroCard source ignores the argument and advances
+    its own sampler, so it is unaffected either way.
+    """
 
     if total_rows <= 0:
         raise SystemExit("--rows must be positive")
     collected = []
     seen = 0
+    fresh = 0
+    reused = 0
     while seen < total_rows:
-        batch = source.batches(min(batch_size, total_rows - seen), seed=0)
+        batch = source.batches(
+            min(batch_size, total_rows - seen), seed=int(base_seed) + len(collected)
+        )
         values = np.asarray(batch.encoded_values)
         if values.shape[0] == 0:
             raise SystemExit("the sampler returned no rows")
         collected.append(values.astype(np.int32, copy=False))
         seen += values.shape[0]
+        fresh += int(getattr(batch, "fresh_rows_drawn", 0) or 0)
+        reused += int(getattr(batch, "fixture_rows_reused", 0) or 0)
     rows = np.concatenate(collected, axis=0) if len(collected) > 1 else collected[0]
-    return rows[:total_rows]
+    return DrawnRows(rows[:total_rows], fresh, reused)
 
 
 def build_orderings(metadata: Any, rows: np.ndarray, max_bins: int) -> dict[str, Any]:
@@ -95,12 +137,14 @@ def build_orderings(metadata: Any, rows: np.ndarray, max_bins: int) -> dict[str,
         index: float(metadata.columns[index].domain_size) for index in indices
     }
     coupling_order = ordering_from_scores(metadata, coupling)
+    entropy_order = ordering_from_scores(metadata, entropy_scores)
     orders = {
         "coupling": coupling_order,
         # Built by reversing the arm it falsifies, so the two are opposites
         # even where the statistic ties.
         "coupling_reversed": reversed_ordering(coupling_order, indices),
-        "entropy": ordering_from_scores(metadata, entropy_scores),
+        "entropy": entropy_order,
+        "entropy_reversed": reversed_ordering(entropy_order, indices),
         "domain_size": ordering_from_scores(metadata, domain_scores),
     }
     names = [metadata.columns[index].name for index in indices]
@@ -156,7 +200,13 @@ def main() -> None:
     config.setdefault("importance_sampling", {})["enabled"] = False
 
     source = sample_source_from_config(config)
-    rows = draw_rows(source, int(args.rows), int(args.batch_size))
+    drawn = draw_rows(
+        source,
+        int(args.rows),
+        int(args.batch_size),
+        base_seed=int(args.sampler_seed or 0),
+    )
+    rows = drawn.rows
     report = build_orderings(source.metadata, rows, int(args.max_bins))
 
     directory = Path(args.output_directory)
@@ -167,6 +217,11 @@ def main() -> None:
         "rows": int(rows.shape[0]),
         "max_bins": int(args.max_bins),
         "source": type(source).__name__,
+        # A fixture source resamples a fixed set of rows with replacement, so a
+        # large sample is not a large number of distinct rows.  Saying which it
+        # was keeps the figures honest about what they were estimated from.
+        "fresh_rows_drawn": drawn.fresh_rows_drawn,
+        "fixture_rows_reused": drawn.fixture_rows_reused,
     }
     for criterion in CRITERIA:
         payload = {

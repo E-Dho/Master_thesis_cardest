@@ -93,6 +93,18 @@ class BinningTest(unittest.TestCase):
         self.assertEqual(binned.bin_counts[0], 8)
         self.assertEqual(len(np.unique(binned.assignments[:, 0])), 8)
 
+    def test_the_bin_count_is_what_was_used_not_what_was_reserved(self) -> None:
+        # A column whose observed values all fit still needs a fallback bin for
+        # the domain values the sample never showed, and nothing lands in it.
+        # Counting the lookup's range instead reported one bin too many for
+        # every partially observed column -- four values seen in a hundred-value
+        # domain were reported as five bins.
+        metadata = _metadata([("t:a", 100)])
+        rows = np.tile(np.arange(4), 25).reshape(-1, 1)
+        binned = bin_columns(rows, metadata, max_bins=64)
+        self.assertEqual(binned.bin_counts[0], 4)
+        self.assertEqual(len(np.unique(binned.assignments[:, 0])), 4)
+
     def test_a_wide_column_is_capped_at_max_bins(self) -> None:
         metadata = _metadata([("t:a", 1000)])
         rng = np.random.default_rng(0)
@@ -286,20 +298,47 @@ class DrawRowsTest(unittest.TestCase):
 
     def source(self, width, per_batch):
         class Oversized:
+            def __init__(self):
+                self.seeds = []
+
             def batches(self, batch_size, *, seed=0):
+                self.seeds.append(seed)
                 return types.SimpleNamespace(
-                    encoded_values=np.zeros((per_batch, width), dtype=np.int64)
+                    encoded_values=np.zeros((per_batch, width), dtype=np.int64),
+                    fresh_rows_drawn=0,
+                    fixture_rows_reused=per_batch,
                 )
 
         return Oversized()
+
+    def test_each_batch_is_drawn_with_its_own_seed(self) -> None:
+        # The fixture and synthetic sources build a fresh default_rng(seed) per
+        # call, so one seed for every batch makes a large sample a handful of
+        # identical draws while the report still states the large number.
+        source = self.source(3, 10)
+        compute_column_ordering.draw_rows(source, 40, 10, base_seed=7)
+        self.assertEqual(source.seeds, [7, 8, 9, 10])
+
+    def test_the_seeds_start_from_the_requested_one(self) -> None:
+        source = self.source(3, 10)
+        compute_column_ordering.draw_rows(source, 20, 10)
+        self.assertEqual(source.seeds, [0, 1])
+
+    def test_it_reports_how_much_of_the_sample_was_fresh(self) -> None:
+        # A fixture source resamples a fixed set with replacement, so a large
+        # sample is not a large number of distinct rows, and the statistics
+        # should say which they were estimated from.
+        drawn = compute_column_ordering.draw_rows(self.source(3, 10), 30, 10)
+        self.assertEqual(drawn.fresh_rows_drawn, 0)
+        self.assertEqual(drawn.fixture_rows_reused, 30)
 
     def test_a_sampler_that_over_delivers_is_trimmed(self) -> None:
         # Both shipped sources return exactly what they are asked for, so
         # nothing in the pipeline exercises this -- but a sample larger than
         # the one recorded in the provenance is a statistic nobody can
         # reproduce.
-        rows = compute_column_ordering.draw_rows(self.source(3, 40), 100, 32)
-        self.assertEqual(rows.shape, (100, 3))
+        drawn = compute_column_ordering.draw_rows(self.source(3, 40), 100, 32)
+        self.assertEqual(drawn.rows.shape, (100, 3))
 
     def test_a_sampler_that_returns_nothing_is_refused(self) -> None:
         with self.assertRaisesRegex(SystemExit, "no rows"):
@@ -410,6 +449,7 @@ class ComputeOrderingCommandTest(unittest.TestCase):
                     "coupling_reversed.json",
                     "domain_size.json",
                     "entropy.json",
+                    "entropy_reversed.json",
                 ],
             )
 
@@ -427,7 +467,13 @@ class ComputeOrderingCommandTest(unittest.TestCase):
                     (prepared / "manifest.json").read_text(encoding="utf-8")
                 )["metadata"]["columns"]
             )
-            for name in ("coupling", "coupling_reversed", "entropy", "domain_size"):
+            for name in (
+                "coupling",
+                "coupling_reversed",
+                "entropy",
+                "entropy_reversed",
+                "domain_size",
+            ):
                 payload = json.loads((output / f"{name}.json").read_text(encoding="utf-8"))
                 self.assertEqual(sorted(payload["order"]), expected)
                 self.assertEqual(payload["criterion"], name)
@@ -445,6 +491,57 @@ class ComputeOrderingCommandTest(unittest.TestCase):
             data_backward = [name for name in backward["order"] if ":" in name]
             self.assertEqual(data_forward, list(reversed(data_backward)))
 
+    def test_the_entropy_arms_are_opposites(self) -> None:
+        # Both directions are generated because both readings of the mechanism
+        # are defensible: an early column's predicate conditions every later
+        # factor, while a late column's own factor is the one conditioned.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "orderings"
+            self.run_script(self.config(root, self.prepared(root)), output)
+            forward = json.loads((output / "entropy.json").read_text(encoding="utf-8"))
+            backward = json.loads(
+                (output / "entropy_reversed.json").read_text(encoding="utf-8")
+            )
+            data_forward = [name for name in forward["order"] if ":" in name]
+            data_backward = [name for name in backward["order"] if ":" in name]
+            self.assertEqual(data_forward, list(reversed(data_backward)))
+
+    def test_the_sampler_seed_is_honoured_and_reproducible(self) -> None:
+        # Same seed, same figures: an arm has to be traceable to a sample
+        # someone else can draw again.  Different seeds, different figures:
+        # otherwise the flag records a provenance the run did not have.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self.config(root, self.prepared(root))
+            figures = []
+            seeds = []
+            for seed in (0, 0, 1, 2, 3):
+                output = root / f"orderings_{len(figures)}"
+                result = self.run_script(
+                    config, output, "--sampler-seed", str(seed), "--rows", "300"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(
+                    (output / "column_statistics.json").read_text(encoding="utf-8")
+                )
+                seeds.append(payload["sampler_seed"])
+                # The provenance records the seed, so whole-file equality would
+                # differ even when the sample behind it did not.  What has to
+                # move is the figures.
+                figures.append(
+                    json.dumps(
+                        [
+                            payload["marginal_entropy_bits"],
+                            payload["total_mutual_information_bits"],
+                        ],
+                        sort_keys=True,
+                    )
+                )
+            self.assertEqual(seeds, [0, 0, 1, 2, 3])
+            self.assertEqual(figures[0], figures[1])
+            self.assertGreater(len(set(figures)), 1)
+
     def test_the_statistics_record_what_chose_the_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -455,6 +552,8 @@ class ComputeOrderingCommandTest(unittest.TestCase):
             )
             self.assertEqual(statistics["rows"], 100)
             self.assertEqual(statistics["max_bins"], 8)
+            self.assertEqual(statistics["fresh_rows_drawn"], 0)
+            self.assertEqual(statistics["fixture_rows_reused"], 100)
             self.assertIn("title:production_year", statistics["marginal_entropy_bits"])
             self.assertIn(
                 "title:production_year", statistics["total_mutual_information_bits"]

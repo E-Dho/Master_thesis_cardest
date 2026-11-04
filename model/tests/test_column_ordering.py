@@ -583,9 +583,10 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
             # column-ordered, so it has to arrive unchanged rather than go
             # missing and leave the arm without its preparation record.
             self.assertEqual(
-                (output / "preparation_stats.json").read_text(encoding="utf-8"),
+                (output / "source_preparation_stats.json").read_text(encoding="utf-8"),
                 (prepared / "preparation_stats.json").read_text(encoding="utf-8"),
             )
+            self.assertFalse((output / "preparation_stats.json").exists())
 
     def test_the_same_directory_under_two_names_is_refused(self) -> None:
         # resolve() normalizes symlinks and ".." but not case.  Spelled one way
@@ -705,7 +706,12 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
             self.assertEqual(
                 sorted(entry.name for entry in output.iterdir()),
                 sorted(
-                    [entry.name for entry in prepared.iterdir()]
+                    [
+                        "source_preparation_stats.json"
+                        if entry.name == "preparation_stats.json"
+                        else entry.name
+                        for entry in prepared.iterdir()
+                    ]
                     + ["column_permutation.json"]
                 ),
             )
@@ -751,6 +757,53 @@ class PermutePreparedDirectoryTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((output / "sample_rows.npy").exists())
+
+    def test_a_reordered_arm_does_not_publish_the_source_hashes(self) -> None:
+        # preparation_stats.json carries the source schema_hash, the
+        # factorization_hash and the factorized columns in column order, while
+        # the permuted manifest deliberately carries a different hash.  Kept
+        # under its own name, the arm would state two schemas at once.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = validate_prepared_manifest(prepared)
+            order = _rotated(column.name for column in source.columns)
+            output = root / "ordB"
+            self.run_script(
+                prepared, output, self.write_order(root / "order.json", order)
+            )
+            self.assertFalse((output / "preparation_stats.json").exists())
+            carried = json.loads(
+                (output / "source_preparation_stats.json").read_text(encoding="utf-8")
+            )
+            written = validate_prepared_manifest(output)
+            self.assertNotEqual(carried["schema_hash"], written.stable_schema_hash())
+            provenance = json.loads(
+                (output / "column_permutation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                provenance["source_preparation_stats"],
+                "source_preparation_stats.json",
+            )
+
+    def test_an_identity_rewrite_keeps_the_statistics_where_they_were(self) -> None:
+        # Nothing is stale when no column moved, and renaming there would cost
+        # the byte-for-byte no-op the control arm relies on.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self.prepared(root)
+            source = validate_prepared_manifest(prepared)
+            order = [column.name for column in source.columns]
+            output = root / "ordA"
+            self.run_script(
+                prepared, output, self.write_order(root / "order.json", order)
+            )
+            self.assertTrue((output / "preparation_stats.json").exists())
+            self.assertFalse((output / "source_preparation_stats.json").exists())
+            provenance = json.loads(
+                (output / "column_permutation.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(provenance["source_preparation_stats"])
 
     def test_writing_over_the_source_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

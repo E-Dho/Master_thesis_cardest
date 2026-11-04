@@ -21,6 +21,11 @@ in either direction -- judged by what they are on disk, not by how they are
 spelled, since a case-insensitive filesystem gives one directory many names.  ``--force`` empties the output first, so a rewritten arm
 is this source under a new order rather than a union with whatever the previous
 arm left there.
+
+``preparation_stats.json`` describes the schema it was prepared for, hashes
+included, so a reordered arm keeps it as ``source_preparation_stats.json``
+rather than publishing provenance that contradicts its own manifest.  An
+identity rewrite changes no hash and keeps the original name.
 """
 
 from __future__ import annotations
@@ -51,6 +56,8 @@ from model.src.data.complete_domain_preparation import (
 PROVENANCE_NAME = "column_permutation.json"
 MANIFEST_NAME = "manifest.json"
 SAMPLE_ROWS_NAME = "sample_rows.npy"
+STATS_NAME = "preparation_stats.json"
+SOURCE_STATS_NAME = "source_preparation_stats.json"
 
 
 def load_order(path: Path) -> tuple[list[str], dict[str, Any]]:
@@ -189,6 +196,9 @@ def main() -> None:
     permutation = column_permutation(source_metadata, order)
     permuted = permute_metadata_columns(source_metadata, order)
 
+    moved_columns = [
+        index for position, index in enumerate(permutation) if position != index
+    ]
     output.mkdir(parents=True, exist_ok=True)
     if args.force:
         # Everything above this line can still refuse -- a bad order file leaves
@@ -200,12 +210,24 @@ def main() -> None:
     for entry in sorted(prepared.iterdir()):
         if entry.name in {MANIFEST_NAME, SAMPLE_ROWS_NAME, PROVENANCE_NAME}:
             continue
-        destination = output / entry.name
+        name = entry.name
+        if name == STATS_NAME and moved_columns:
+            # preparation_stats.json records the source's schema_hash, its
+            # factorization_hash and its factorized columns in column order,
+            # and the permuted manifest deliberately carries a different schema
+            # hash.  Copying it under its own name would give the arm
+            # provenance that contradicts its manifest.  It cannot be
+            # regenerated faithfully either: its figures come from the encoding
+            # pass and the factorization config, neither of which survives in
+            # the directory.  So it is kept, named for what it describes.  An
+            # identity rewrite changes no hash, so there it keeps its name.
+            name = SOURCE_STATS_NAME
+        destination = output / name
         if entry.is_dir():
             shutil.copytree(entry, destination, dirs_exist_ok=True)
         else:
-            # Row-aligned companions (trajectory ids, segment ids) and the
-            # preparation statistics are unaffected by a column permutation.
+            # Row-aligned companions -- trajectory ids, segment ids -- are
+            # unaffected by a column permutation.
             shutil.copy2(entry, destination)
 
     manifest["metadata"] = permuted.to_json_dict()
@@ -230,6 +252,11 @@ def main() -> None:
         "permutation": list(permutation),
         "sample_rows": row_count,
         "order_provenance": order_provenance,
+        "source_preparation_stats": (
+            SOURCE_STATS_NAME
+            if moved_columns and (prepared / STATS_NAME).exists()
+            else None
+        ),
     }
     _atomic_write_text(
         output / PROVENANCE_NAME, json.dumps(provenance, indent=2, sort_keys=True)

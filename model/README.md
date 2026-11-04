@@ -1638,6 +1638,15 @@ every sample-source construction -- is what says so. With JOB-light domains
 running from 2 (indicators) to six figures (`keyword_id`), a permutation applied
 to one artifact and not the other does not survive that check.
 
+`preparation_stats.json` is the one companion that does not survive a reorder
+unchanged: it records the schema hash, the factorization hash and the
+factorized columns in column order, all of the source's. A reordered arm keeps
+it as `source_preparation_stats.json`, named for what it describes, rather than
+publishing provenance that contradicts its own manifest; it cannot be
+regenerated faithfully, since its figures come from the encoding pass and the
+factorization config and neither survives in the directory. An identity rewrite
+changes no hash and keeps the original name.
+
 Two properties are worth knowing. Permuting a directory by its own current order
 is a no-op: the schema hash is unchanged, so the control arm needs no rewrite and
 an arm cannot differ from it by the act of having been rewritten. And a real
@@ -1667,12 +1676,20 @@ python3 -m model.scripts.compute_column_ordering \
 
 It writes one ordering file per criterion plus `column_statistics.json`, so an
 arm can be read back to the figures that chose it. The criteria are `coupling`
-(descending total mutual information with the other DATA columns -- the model
-conditions each column on the predicates of the columns before it, so the
-column that says most about the rest goes first), `coupling_reversed` (that
-order inverted, as the falsification arm), `entropy` (descending marginal
-entropy) and `domain_size` (descending domain size, needing no sample at all
-and serving as the baseline the others have to beat).
+(descending total mutual information with the other DATA columns), its
+inversion `coupling_reversed`, `entropy` (descending marginal entropy), its
+inversion `entropy_reversed`, and `domain_size` (descending domain size,
+needing no sample at all and serving as the baseline the others have to beat).
+
+Both statistics are generated in both directions on purpose, because the
+mechanism reads two ways and the wording cannot settle which wins. An early
+column's own factor is an unconditioned marginal while its predicate conditions
+every later factor, so the column carrying the most information is the one
+whose predicate is worth conditioning the rest on -- that is the descending
+arm, and the direction the trajectory benchmark's "harder columns first" result
+points to. The competing reading is that the column with most to predict is the
+one that most needs conditioning itself, which argues for placing it last. The
+runs decide.
 
 Two details decide whether the numbers mean anything. Columns are binned by
 frequency rank before mutual information is estimated, because
@@ -1690,6 +1707,15 @@ Only the DATA columns move. The indicator and fanout blocks keep their
 positions, so an arm differs from the control in the DATA order alone. A
 statistic that says nothing reproduces the control exactly, because ties break
 on current position.
+
+Each batch is drawn with its own seed. The fixture and synthetic sources build
+a fresh `default_rng(seed)` per call, so one seed for every batch would make a
+two-million-row sample thirty-one copies of one sixty-five-thousand-row draw
+while the report still said two million; the live NeuroCard source ignores the
+argument and advances its own sampler. `column_statistics.json` also records
+how many rows were drawn fresh against how many were resampled from a fixture,
+because a fixture resamples a fixed set with replacement and a large sample is
+then not a large number of distinct rows.
 
 Note that `sample_rows.npy` in a live-sampling directory is a small validation
 sample -- 2,000 rows for JOB-light-ranges -- and is far too small for this. The
