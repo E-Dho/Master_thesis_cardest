@@ -63,7 +63,7 @@ import numpy as np
 
 from ..temporal import BucketCounts, Occurrences, TemporalDistinct, TimeBuckets
 from .base import Estimate, InProcessTrajectoryAdapter
-from .exact_mbr import _bound_us
+from .space_time import parse_space_time
 
 TRIP_TIME_DIAGNOSTIC = "approx:trip_time_as_point_time"
 UNIT_BYTES = 8  # upstream's theoretical memory unit (S_UNIT_BYTES)
@@ -153,33 +153,12 @@ class TraHistModel:
 
     def _parse(self, record: Any) -> Tuple[Optional[Estimate], Optional[Tuple[float, ...]], Any, str]:
         """(early result, window, interval, diagnostic); interval: None = no time predicate."""
-        if record.relation != "multi":
-            return ("unsupported", None, "single-table query (TraHist answers distinct-trajectory queries)"), None, None, ""
-        window = interval = None
-        diagnostic = ""
-        for predicate in record.predicates:
-            table, kind, attribute = predicate["table"], predicate["kind"], predicate["attribute"]
-            spatial = table == self.segments.table and kind in ("spatial", "spatio_temporal")
-            segment_time = (table == self.segments.table and kind in ("temporal", "spatio_temporal")
-                            and (kind == "spatio_temporal" or attribute == self.segments.temporal_attribute))
-            trip_time = (kind == "temporal" and table == self.entity
-                         and self.settings.attr(table, attribute)["type"] == "temporal_interval")
-            if not (spatial or segment_time or trip_time):
-                return ("unsupported", None,
-                        f"attribute predicate on {table}.{attribute} (TraHist covers space and time only)"), None, None, ""
-            if spatial:
-                if window is not None:
-                    return ("unsupported", None, "more than one spatial window"), None, None, ""
-                window = tuple(float(predicate[key]) for key in ("min_x", "min_y", "max_x", "max_y"))
-            if segment_time or trip_time:
-                if interval is not None:
-                    return ("unsupported", None, "more than one time interval"), None, None, ""
-                interval = (_bound_us(predicate.get("lower")), _bound_us(predicate.get("upper")))
-                if trip_time:
-                    diagnostic = TRIP_TIME_DIAGNOSTIC
-        if interval is not None and not self.temporal:
+        query, reason = parse_space_time(self.settings, record, "TraHist")
+        if query is None:
+            return ("unsupported", None, reason), None, None, ""
+        if query.interval is not None and not self.temporal:
             return ("unsupported", None, "time predicate (TraHist is spatial only; see TraHist-Temporal)"), None, None, ""
-        return None, window, interval, diagnostic
+        return None, query.window, query.interval, TRIP_TIME_DIAGNOSTIC if query.trip_time else ""
 
     def _query_box(self, window: Optional[Tuple[float, ...]]) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """The window clipped to the grid's extent (full extent without a window); None: no data there.

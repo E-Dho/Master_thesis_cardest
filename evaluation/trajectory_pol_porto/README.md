@@ -19,13 +19,12 @@ different. The plan behind it is the project doc
 | P4 | MobilityDB / PostgreSQL planner (three variants) | done, timed |
 | P5 | DeepDB-MBR | done, timed |
 | P8b | MSCN | done, timed |
-| P6 | TraHist and TraHist-Temporal (shared temporal module, tuning on validation) | implemented; cluster runs pending |
-| P6 | CASE+ and CASE+-Temporal | waits for the CASE paper (no public code) |
+| P6 | TraHist, TraHist-Temporal, CASE+, CASE+-Temporal (shared temporal module, tuning on validation) | implemented; cluster runs pending |
 | P7, P9 | own model, Porto | open (RIS: no-go for now) |
 
 `traj_eval/plugin.py` registers the in-process adapters: `traj_exact_mbr` and
 `traj_sampling` (P3), `traj_mobilitydb` (P4), `traj_mscn` (P8b),
-`traj_trahist` (P6). DeepDB-MBR
+`traj_trahist` and `traj_case_plus` (P6). DeepDB-MBR
 (P5) uses the core's `external` adapter with
 `scripts/deepdb_mbr_bridge.py`.
 
@@ -388,6 +387,38 @@ Unsupported: single-table queries, attribute predicates (decided), segment
 attribute predicates. Deterministic, one seed. `model_meta.json` reports the
 upstream theoretical size `(cells + 2 buckets) x 8` bytes plus the temporal
 entries, next to the serialized size.
+
+**`traj_case_plus`** (`traj_eval/adapters/case_plus.py`), re-implemented from
+the CASE paper (Fanaeepour et al., GeoInformatica 2015, Algorithms 1-3 and
+Fig. 12; no public code):
+
+- construction: exact grid traversal of every segment (cells intersected,
+  edges crossed, once per trajectory; a vertex crossing goes x first, the
+  paper's perturbation); Stage 2 flags a trajectory when two of its cells in
+  one row (column) are not joined by a straight run of visited cells with
+  crossed edges (our reading of "same row or column, not neighbours, no
+  connection edge"); a flagged trajectory is planarized to the MBR of its
+  cells: unvisited MBR cells, uncrossed interior MBR edges and all interior
+  MBR vertices become virtual counts (Fig. 12: real edges are the crossed
+  ones), so every planarized trajectory is one convex body;
+- query (Algorithm 2) on the cells the query rectangle intersects:
+  0 without real faces, else `(F+F') - (E+E') + V'` (no `V'` for one row or
+  column); CASE+ (Algorithm 3) subtracts `min(min F', min E', min V')`;
+- `case_plus_temporal.yaml` (extension by us): real face/edge counts per time
+  bucket (a segment occupies every bucket its time span intersects) with
+  `F`/`L` links, so time-restricted real counts are exact per cell/edge; a
+  planarized trajectory's virtual counts are kept per trajectory time span
+  `[i, j]` and apply when the query buckets contain it (`a <= i`, `j <= b`),
+  in which case all its real counts are present too and the restricted
+  counts are exactly CASE's planar body; a trajectory cut by the interval
+  keeps only its real counts inside the interval. Full time range = base
+  exactly (gate); restricted counts = brute-force recount (test).
+
+Storage: real counts per time bucket (dense), links, virtual counts per
+distinct trajectory span (dense); `theoretical_bytes` counts each histogram
+dense or as (index, value) pairs, whichever is smaller. The temporal
+variant's virtual counts grow with the number of distinct spans (about the
+number of buckets), so its size depends strongly on the grid.
 
 **Tuning on the validation workload** (`traj_eval/tune.py`, never the test
 set): every grid point re-runs the method on the validation benchmark's multi

@@ -1,5 +1,5 @@
 #!/bin/bash
-# P6: TraHist and TraHist-Temporal on POL v3 (CASE+ follows). No database.
+# P6: TraHist, TraHist-Temporal, CASE+ and CASE+-Temporal on POL v3. No database.
 #   STAGE=tune ./submit_p6.sh   sweeps on the validation workload (1,800 multi queries):
 #                               base: unit_size_m; temporal: unit_size_m x time_buckets
 #   STAGE=run  ./submit_p6.sh   test runs with the committed configs, then aggregate and
@@ -7,13 +7,14 @@
 #   CONFIG_NAMES="trahist_temporal" ...   a subset
 #   UNIT_SIZES / TIME_BUCKETS             override the sweep grids (values separated by /)
 #   AFTER_JOB=<id>                        start after that job succeeded
-# The cpu_1core timing follows with submit_timing.sh (CPU_CONFIGS="trahist trahist_temporal").
+# The cpu_1core timing follows with submit_timing.sh
+# (CPU_CONFIGS="trahist trahist_temporal case_plus case_plus_temporal").
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
 CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
 STAGE=${STAGE:?set STAGE=tune or STAGE=run}
-CONFIG_NAMES=${CONFIG_NAMES:-"trahist trahist_temporal"}
+CONFIG_NAMES=${CONFIG_NAMES:-"trahist trahist_temporal case_plus case_plus_temporal"}
 UNIT_SIZES=${UNIT_SIZES:-"25/50/100/200/400"}
 TIME_BUCKETS=${TIME_BUCKETS:-"25/50/100/200/400"}
 VALIDATION_JSONL=${VALIDATION_JSONL:-/work_beegfs/sunip956/master_thesis_trajectories/mobilitydb/query_runs/qgen_pol_v3_validation_seed20261026/benchmark.jsonl}

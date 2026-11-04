@@ -1,0 +1,256 @@
+"""P6 CASE+ and CASE+-Temporal.
+
+- grid traversal = dense sampling of every segment;
+- a planarized trajectory counts exactly once in every query region with a
+  real face count, and Example 9/10 of the paper (a trajectory outside the
+  region whose virtual counts cover it) gives CASE 2 and CASE+ 1;
+- CASE+-Temporal with the full time range equals the base exactly (gate 6),
+  and its time-restricted counts equal a brute-force recount per trajectory
+  (real elements in the interval; virtual body when the span is inside);
+- coverage rules and a pipeline run.
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from itertools import product
+from pathlib import Path
+
+import numpy as np
+
+from evaluation.eval_core.config import load_experiment_config
+from evaluation.eval_core.runner import run_seed
+from evaluation.trajectory_pol_porto.traj_eval import snapshot as snapshot_module
+from evaluation.trajectory_pol_porto.traj_eval.adapters import case_plus
+from evaluation.trajectory_pol_porto.traj_eval.adapters.case_plus import CaseModel, Grid, build_case, traverse
+from evaluation.trajectory_pol_porto.traj_eval.workloads import load_traj_workload
+
+from ._fixture import synthetic_settings, write_benchmark, write_synthetic_snapshot
+from .test_p3_adapters import _config
+
+UNIT = 200.0
+
+
+def _trajectories(paths, times=None):
+    """Segments and trip offsets from lists of (x, y) vertices (unit-time segments by default)."""
+    sx, sy, ex, ey, ts, te, offsets = [], [], [], [], [], [], [0]
+    clock = 0
+    for index, path in enumerate(paths):
+        for (x0, y0), (x1, y1) in zip(path[:-1], path[1:]):
+            sx.append(x0); sy.append(y0); ex.append(x1); ey.append(y1)
+            start = clock if times is None else times[index]
+            ts.append(start); te.append(start + 1)
+            clock += 1
+        offsets.append(len(sx))
+    segments = {k: np.asarray(v, dtype=np.float64) for k, v in (("sx", sx), ("sy", sy), ("ex", ex), ("ey", ey))}
+    segments.update(ts=np.asarray(ts, dtype=np.int64), te=np.asarray(te, dtype=np.int64))
+    return segments, {"offset": np.asarray(offsets, dtype=np.int64)}
+
+
+def _model(segments, trips, unit=1.0, plus=True, temporal=False, buckets=1, extent=None):
+    arrays, meta = build_case(segments, trips, unit_size_m=unit, temporal=temporal, time_buckets=buckets,
+                              extent=extent)
+    meta["plus"] = plus
+    return CaseModel(synthetic_settings(), arrays, meta), arrays, meta
+
+
+class TraversalTest(unittest.TestCase):
+    def test_cells_equal_dense_sampling(self) -> None:
+        rng = np.random.default_rng(4)
+        grid = Grid(np.array([0.0, 0.0]), 1.0, (12, 15))
+        sx, sy = rng.uniform(0, 15, 300), rng.uniform(0, 12, 300)
+        ex, ey = np.clip(sx + rng.normal(0, 4, 300), 0, 14.999), np.clip(sy + rng.normal(0, 4, 300), 0, 11.999)
+        result = traverse(grid, sx, sy, ex, ey)
+        for seg in range(300):
+            t = np.linspace(0.0, 1.0, 200_001)
+            cols = grid.column(sx[seg] + t * (ex[seg] - sx[seg]))
+            rows = grid.row(sy[seg] + t * (ey[seg] - sy[seg]))
+            sampled = set((rows * grid.nx + cols).tolist())
+            got = set(result["cell"][result["cell_seg"] == seg].tolist())
+            self.assertEqual(got, sampled, seg)
+            moves = np.flatnonzero((np.diff(rows) != 0) | (np.diff(cols) != 0))
+            vertical = sum(int(cols[m + 1] != cols[m]) for m in moves)
+            horizontal = sum(int(rows[m + 1] != rows[m]) for m in moves)
+            self.assertEqual(int(np.sum(result["vedge_seg"] == seg)), vertical, seg)
+            self.assertEqual(int(np.sum(result["hedge_seg"] == seg)), horizontal, seg)
+
+
+class CaseHistogramTest(unittest.TestCase):
+    def test_planarized_trajectory_counts_once_in_every_region(self) -> None:
+        # a U-shape: leaves and re-enters rows/columns, so Stage 2 planarizes it
+        path = [(0.5, 0.5), (0.5, 4.5), (4.5, 4.5), (4.5, 0.5)]
+        model, arrays, meta = _model(*_trajectories([path]), extent=(0, 0, 5, 5))
+        self.assertEqual(meta["planarized_trajectories"], 1)
+        real = arrays["real/cell"][0]
+        for r0, r1, c0, c1 in product(range(5), range(5), range(5), range(5)):
+            if r1 < r0 or c1 < c0:
+                continue
+            expected = 1.0 if real[r0:r1 + 1, c0:c1 + 1].sum() > 0 else 0.0
+            self.assertEqual(model.count((r0, r1, c0, c1), 0, 0), expected, (r0, r1, c0, c1))
+
+    def test_straight_trajectory_is_not_planarized(self) -> None:
+        model, arrays, meta = _model(*_trajectories([[(0.5, 0.5), (3.5, 0.5)]]), extent=(0, 0, 5, 5))
+        self.assertEqual(meta["planarized_trajectories"], 0)
+        self.assertEqual(int(arrays["virtual/cell"].sum()), 0)
+        self.assertEqual(model.count((0, 0, 0, 3), 0, 0), 1.0)
+        self.assertEqual(model.count((0, 0, 1, 2), 0, 0), 1.0)
+
+    def test_paper_example_virtual_object_outside_the_region(self) -> None:
+        # T2 runs around the region rows/cols 2..4 (its MBR covers it, it never enters);
+        # T1 lies inside it. CASE counts T2's virtual object, CASE+ removes it.
+        t2 = [(1.5, 1.5), (5.5, 1.5), (5.5, 5.5), (1.5, 5.5)]
+        t1 = [(3.2, 3.2), (3.8, 3.6)]
+        segments, trips = _trajectories([t2, t1])
+        region = (2, 4, 2, 4)
+        case, _, meta = _model(segments, trips, plus=False, extent=(0, 0, 7, 7))
+        plus, _, _ = _model(segments, trips, plus=True, extent=(0, 0, 7, 7))
+        self.assertEqual(meta["planarized_trajectories"], 1)
+        self.assertEqual(case.count(region, 0, 0), 2.0)
+        self.assertEqual(plus.count(region, 0, 0), 1.0)
+        # no real face count in the region: 0 (Algorithm 2, lines 1-3)
+        empty = _model(*_trajectories([t2]), plus=False, extent=(0, 0, 7, 7))[0]
+        self.assertEqual(empty.count(region, 0, 0), 0.0)
+
+
+class CaseTemporalTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        write_benchmark(cls.root / "benchmark.jsonl")
+        write_synthetic_snapshot(cls.root / "snapshot")
+        data = snapshot_module.load_snapshot(cls.root / "snapshot")
+        cls.segments = data["segments"]
+        cls.trips = snapshot_module.load_trip_index(cls.root / "snapshot")
+        cls.base, cls.base_arrays, cls.base_meta = _model(cls.segments, cls.trips, unit=UNIT)
+        cls.temporal, cls.temp_arrays, cls.temp_meta = _model(cls.segments, cls.trips, unit=UNIT, temporal=True,
+                                                              buckets=12)
+        cls.records = load_traj_workload(cls.root / "benchmark.jsonl", "w")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def test_full_range_equals_the_base(self) -> None:
+        self.assertGreater(self.base_meta["planarized_trajectories"], 0)
+        full = (0, self.temporal.time.count - 1)
+        rng = np.random.default_rng(8)
+        grid = self.base.grid
+        for _ in range(300):
+            r0, r1 = sorted(rng.integers(0, grid.ny, 2))
+            c0, c1 = sorted(rng.integers(0, grid.nx, 2))
+            rect = (int(r0), int(r1), int(c0), int(c1))
+            self.assertEqual(self.temporal.count(rect, *full), self.base.count(rect, 0, 0), rect)
+        spatial = [r for r in self.records if self.base.estimate(r)[0] == "ok"]
+        self.assertGreater(len(spatial), 5)
+        for record in spatial:
+            self.assertEqual(self.temporal.estimate(record), self.base.estimate(record), record.query_id)
+
+    def test_restricted_counts_match_a_brute_force_recount(self) -> None:
+        model, grid = self.temporal, self.temporal.grid
+        segments, offsets = self.segments, np.asarray(self.trips["offset"])
+        cells = traverse(grid, segments["sx"], segments["sy"], segments["ex"], segments["ey"])
+        first = model.time.assign(np.asarray(segments["ts"])).astype(int)
+        last = model.time.assign(np.asarray(segments["te"])).astype(int)
+        seg_traj = np.repeat(np.arange(offsets.size - 1), np.diff(offsets))
+        nx = grid.nx
+        whole_cells = {}
+        for seg, cell in zip(cells["cell_seg"].tolist(), cells["cell"].tolist()):
+            whole_cells.setdefault(int(seg_traj[seg]), set()).add(cell)
+        planar = np.zeros(offsets.size - 1, dtype=bool)
+        planar_meta = case_plus.detect_problem(grid, offsets.size - 1,
+                                               *(np.unique(seg_traj[cells[f"{k}_seg"]] * size + cells[k])
+                                                 for k, size in (("cell", grid.ny * nx), ("vedge", grid.ny * max(nx - 1, 1)),
+                                                                 ("hedge", max(grid.ny - 1, 1) * nx))))
+        planar[:] = planar_meta
+        span = {t: (int(first[offsets[t]:offsets[t + 1]].min()), int(last[offsets[t]:offsets[t + 1]].max()))
+                for t in range(offsets.size - 1)}
+
+        def brute(rect, a, b):
+            r0, r1, c0, c1 = rect
+            faces = edges = vfaces = vedges = vvertices = 0
+            for t in range(offsets.size - 1):
+                segs = [s for s in range(offsets[t], offsets[t + 1]) if first[s] <= b and last[s] >= a]
+                inside = lambda r, c: r0 <= r <= r1 and c0 <= c <= c1  # noqa: E731
+                cell_set = {c for s in segs for c in cells["cell"][cells["cell_seg"] == s].tolist()}
+                v_set = {e for s in segs for e in cells["vedge"][cells["vedge_seg"] == s].tolist()}
+                h_set = {e for s in segs for e in cells["hedge"][cells["hedge_seg"] == s].tolist()}
+                faces += sum(inside(c // nx, c % nx) for c in cell_set)
+                edges += sum(inside(e // max(nx - 1, 1), e % max(nx - 1, 1)) and e % max(nx - 1, 1) + 1 <= c1
+                             for e in v_set)
+                edges += sum(inside(e // nx, e % nx) and e // nx + 1 <= r1 for e in h_set)
+                if planar[t] and a <= span[t][0] and span[t][1] <= b:
+                    rows = [c // nx for c in whole_cells[t]]
+                    cols = [c % nx for c in whole_cells[t]]
+                    R0, R1, C0, C1 = max(min(rows), r0), min(max(rows), r1), max(min(cols), c0), min(max(cols), c1)
+                    if R1 >= R0 and C1 >= C0:
+                        whole_v = {e for s in range(offsets[t], offsets[t + 1])
+                                   for e in cells["vedge"][cells["vedge_seg"] == s].tolist()}
+                        whole_h = {e for s in range(offsets[t], offsets[t + 1])
+                                   for e in cells["hedge"][cells["hedge_seg"] == s].tolist()}
+                        vfaces += sum((r * nx + c) not in whole_cells[t] for r in range(R0, R1 + 1) for c in range(C0, C1 + 1))
+                        vedges += sum((r * max(nx - 1, 1) + c) not in whole_v for r in range(R0, R1 + 1) for c in range(C0, C1))
+                        vedges += sum((r * nx + c) not in whole_h for r in range(R0, R1) for c in range(C0, C1 + 1))
+                        if r1 > r0 and c1 > c0:
+                            vvertices += (R1 - R0) * (C1 - C0)
+            if faces == 0:
+                return 0.0
+            return float(max((faces + vfaces) - (edges + vedges) + vvertices, 0))
+
+        no_plus = CaseModel(synthetic_settings(), self.temp_arrays, {**self.temp_meta, "plus": False})
+        rng = np.random.default_rng(9)
+        for _ in range(40):
+            r0, r1 = sorted(rng.integers(0, grid.ny, 2))
+            c0, c1 = sorted(rng.integers(0, grid.nx, 2))
+            a, b = sorted(rng.integers(0, model.time.count, 2))
+            rect = (int(r0), int(r1), int(c0), int(c1))
+            self.assertEqual(no_plus.count(rect, int(a), int(b)), brute(rect, int(a), int(b)), (rect, a, b))
+
+    def test_coverage_rules(self) -> None:
+        for record in self.records:
+            kinds = {(p["table"], p["kind"]) for p in record.predicates}
+            base, temporal = self.base.estimate(record), self.temporal.estimate(record)
+            if record.relation == "single":
+                self.assertEqual(temporal[0], "unsupported")
+                continue
+            space_time_only = kinds <= {("segments", "spatial"), ("segments", "spatio_temporal"),
+                                        ("segments", "temporal"), ("trips", "temporal")}
+            has_time = bool(kinds & {("segments", "spatio_temporal"), ("segments", "temporal"), ("trips", "temporal")})
+            self.assertEqual(temporal[0] == "ok", space_time_only, record.query_id)
+            self.assertEqual(base[0] == "ok", space_time_only and not has_time, record.query_id)
+            if temporal[0] == "ok":
+                self.assertGreaterEqual(temporal[1], 0.0)
+                self.assertEqual(temporal[2] == case_plus.TRIP_TIME_DIAGNOSTIC, ("trips", "temporal") in kinds)
+
+    def test_pipeline_runs_both_variants(self) -> None:
+        for variant, temporal in (("base", "false"), ("temporal", "true")):
+            path = _config(self.root, "case_plus", "traj_case_plus", variant, unit_size_m=UNIT, temporal=temporal,
+                           time_buckets=12, plus="true")
+            run = run_seed(load_experiment_config(path), 0, run_id=variant)
+            summary = json.loads((run / "summary.json").read_text())
+            self.assertGreater(summary["workloads"]["pol_v3_multi"]["extension"]["coverage"]["scored_count"], 0)
+            self.assertEqual(summary["workloads"]["pol_v3_single"]["extension"]["coverage"]["scored_count"], 0)
+            meta = json.loads((run / "model" / "model_meta.json").read_text())
+            self.assertGreater(meta["theoretical_bytes"], 0)
+
+
+class ShippedCaseConfigTest(unittest.TestCase):
+    def test_configs(self) -> None:
+        from evaluation.eval_core.config import load_simple_yaml
+
+        configs = Path(__file__).resolve().parents[1] / "configs" / "pol_v3"
+        base = load_simple_yaml(configs / "case_plus.yaml")
+        temporal = load_simple_yaml(configs / "case_plus_temporal.yaml")
+        for raw in (base, temporal):
+            self.assertEqual(raw["adapter"]["type"], "traj_case_plus")
+            self.assertIs(raw["adapter"]["plus"], True)
+            self.assertEqual(raw["experiment"]["seeds"], [0])
+        self.assertIs(base["adapter"]["temporal"], False)
+        self.assertIs(temporal["adapter"]["temporal"], True)
+        self.assertEqual(base["adapter"]["unit_size_m"], temporal["adapter"]["unit_size_m"])
+
+
+if __name__ == "__main__":
+    unittest.main()
