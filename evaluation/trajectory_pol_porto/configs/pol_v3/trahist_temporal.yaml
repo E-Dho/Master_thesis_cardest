@@ -1,0 +1,28 @@
+# P6: TraHist-Temporal (extension by us, spec "Temporal extension for CASE+ and
+# TraHist") on POL v3: TraHist's grid and LabelMap plus per-bucket point counts
+# and F/L distinct statistics over equi-depth time buckets (segments by time
+# midpoint). unit_size_m and time_buckets are tuned on the validation workload
+# (slurm/submit_p6.sh STAGE=tune) before the test runs.
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_pol_v3
+  method_id: trahist
+  variant_id: temporal
+  display_name: TraHist-Temporal (extended by us)
+  protocol: adapted
+  adaptation: Project-defined temporal extension of upstream TraHist (YJ960/TraHist 870e8ce) - per spatial bucket, point counts and the sum of its cells' distinct-trajectory statistics F/L per equi-depth time bucket (D = sum F - sum L, exact per cell over bucket-aligned intervals), plugged into TraHist's own ratio estimator; all time buckets intersecting the query interval; trip-time predicates answered with the point times (approx); attribute predicates and single-table queries unsupported. With the full time range it reproduces TraHist exactly.
+  seeds: [0]
+adapter:
+  type: traj_trahist
+  benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json
+  trahist_source: /work_beegfs/sunip956/master_thesis_trajectories/external/trahist
+  trahist_revision: 870e8ce6db0e6363eeca80dce193623034c858ab
+  temporal: true
+  time_buckets: 100
+  unit_size_m: 100
+  alpha: 0.5
+  beta: 1.0
+  kappa: 3
+  connectivity: axis
+  agg_mode: mean
+  ratio_eps: 1.0

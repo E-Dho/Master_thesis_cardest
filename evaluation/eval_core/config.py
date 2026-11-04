@@ -76,7 +76,8 @@ class ExperimentConfig:
     accuracy_config_hash: str = ""
 
 
-def load_experiment_config(path: str | Path) -> ExperimentConfig:
+def load_raw_config(path: str | Path) -> dict[str, Any]:
+    """The config file with its ``extends`` base merged in (one level)."""
     source_path = Path(path).resolve()
     raw = load_simple_yaml(source_path)
     extends = raw.pop("extends", None)
@@ -86,6 +87,17 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         if "extends" in base:
             raise ValueError("nested config inheritance is not supported")
         raw = _deep_merge(base, raw)
+    return raw
+
+
+def load_experiment_config(path: str | Path) -> ExperimentConfig:
+    source_path = Path(path).resolve()
+    return experiment_config_from_raw(load_raw_config(source_path), source_path)
+
+
+def experiment_config_from_raw(raw: dict[str, Any], source_path: str | Path) -> ExperimentConfig:
+    """Validated config from a merged mapping; relative paths resolve against ``source_path``'s directory."""
+    source_path = Path(source_path).resolve()
     if int(raw.get("schema_version", 0)) != 1:
         raise ValueError("evaluation config schema_version must be 1")
     identity = _mapping(raw, "experiment")

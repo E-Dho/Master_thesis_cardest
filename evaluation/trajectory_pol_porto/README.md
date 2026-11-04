@@ -17,12 +17,15 @@ different. The plan behind it is the project doc
 | P2 | Shared data snapshot + label-reproduction gate | done (all 10,400 labels reproduced) |
 | P3 | Exact-MBR and trajectory sampling, first end-to-end comparison | done, timed |
 | P4 | MobilityDB / PostgreSQL planner (three variants) | done, timed |
-| P5 | DeepDB-MBR | implemented; cluster run pending |
-| P8b | MSCN | implemented; cluster run pending |
-| P6, P7, P9 | CASE+/TraHist (+ temporal), own model, Porto | open (RIS: no-go for now) |
+| P5 | DeepDB-MBR | done, timed |
+| P8b | MSCN | done, timed |
+| P6 | TraHist and TraHist-Temporal (shared temporal module, tuning on validation) | implemented; cluster runs pending |
+| P6 | CASE+ and CASE+-Temporal | waits for the CASE paper (no public code) |
+| P7, P9 | own model, Porto | open (RIS: no-go for now) |
 
 `traj_eval/plugin.py` registers the in-process adapters: `traj_exact_mbr` and
-`traj_sampling` (P3), `traj_mobilitydb` (P4), `traj_mscn` (P8b). DeepDB-MBR
+`traj_sampling` (P3), `traj_mobilitydb` (P4), `traj_mscn` (P8b),
+`traj_trahist` (P6). DeepDB-MBR
 (P5) uses the core's `external` adapter with
 `scripts/deepdb_mbr_bridge.py`.
 
@@ -346,6 +349,64 @@ REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_p8b.sh
 One `run_inprocess.sbatch` task per seed with 8 CPUs, then aggregate and
 compare into `p8b_comparison/`.
 
+## P6 TraHist and the temporal extension
+
+**Temporal module** (`traj_eval/temporal.py`, spec "Temporal extension for
+CASE+ and TraHist"): equi-depth time buckets (segments by time midpoint,
+boundaries computed on the full data and stored), sparse per-statistic
+bucket counts `F_k` and links `L_ij` between consecutive occupied buckets of
+one trajectory, and `D([a, b]) = sum F - sum L` with the link term as a
+dominance count. A query interval selects every bucket it intersects. Exact
+per statistic for every bucket-aligned interval (brute-force test).
+
+**`traj_trahist`** (`traj_eval/adapters/trahist.py`), two configs:
+
+- `trahist.yaml` (base): upstream TraHist (`YJ960/TraHist` at `870e8ce`,
+  imported from its checkout `adapter.trahist_source`; the repository has no
+  licence, so nothing is copied). Construction and estimator unchanged:
+  CountGrid on the trajectory points (the polyline vertices: every segment
+  start plus each trip's last segment end), LabelMap partition, per-bucket
+  means `Sp`/`ST`, ratio estimator over the cell-resolution samples of the
+  query rectangle. Spatial only: queries with a time predicate are
+  unsupported.
+- `trahist_temporal.yaml` (extension by us): same grid and LabelMap; per
+  bucket and time bucket the point count and the `F`/`L` of its cells'
+  distinct-trajectory counts. `ST` upstream is the *mean of per-cell*
+  distinct counts, so a bucket's `F`/`L` are the sums of its cells' `F`/`L`
+  (the spec's note on a union over the bucket would not reproduce
+  upstream). The time-restricted `Sp`/`ST` go into TraHist's own estimator;
+  with the full time range the result equals the base estimate exactly
+  (gate, tested against upstream). Temporal-only queries use the full
+  extent; `trips.trip_time` predicates use the point times and carry
+  `approx:trip_time_as_point_time`.
+
+Adaptations: the query rectangle is clipped to the grid extent before
+upstream's sampling (upstream clips out-of-grid samples onto the border
+cells and would count them repeatedly; v3's one-sided windows reach 1,000 km
+past the data); points are float64 (the upstream runner rounds to float32).
+Unsupported: single-table queries, attribute predicates (decided), segment
+attribute predicates. Deterministic, one seed. `model_meta.json` reports the
+upstream theoretical size `(cells + 2 buckets) x 8` bytes plus the temporal
+entries, next to the serialized size.
+
+**Tuning on the validation workload** (`traj_eval/tune.py`, never the test
+set): every grid point re-runs the method on the validation benchmark's multi
+queries under the experiment id `<experiment>_tuning` and writes
+`tuning.csv` (coverage, smoothed Q-error, zero estimates, serialized and
+theoretical bytes, build seconds). The chosen `unit_size_m` / `time_buckets`
+are then committed to the configs.
+
+```bash
+# the pinned upstream checkout (once)
+git clone https://github.com/YJ960/TraHist /work_beegfs/sunip956/master_thesis_trajectories/external/trahist
+git -C /work_beegfs/sunip956/master_thesis_trajectories/external/trahist checkout 870e8ce6db0e6363eeca80dce193623034c858ab
+REPO_ROOT=$PWD STAGE=tune evaluation/trajectory_pol_porto/slurm/submit_p6.sh   # sweeps
+REPO_ROOT=$PWD STAGE=run  evaluation/trajectory_pol_porto/slurm/submit_p6.sh   # test runs + comparison
+```
+
+The in-process environment needs pandas and scipy (upstream imports them);
+`prepare` records their versions and fails early without them.
+
 ## Memory budget
 
 One level: 1× the own model's inference-only serialized size per dataset
@@ -408,6 +469,8 @@ with the IMDB timing package directory on `PYTHONPATH` (psycopg).
 
 ```bash
 python -m pytest -q evaluation/trajectory_pol_porto/tests
+# the TraHist gates need the pinned upstream checkout:
+TRAJ_EVAL_TRAHIST_SOURCE=/path/to/TraHist python -m pytest -q evaluation/trajectory_pol_porto/tests/test_p6_trahist.py
 ```
 
 The fixtures build a real v3 benchmark on the synthetic POL data with the v3

@@ -1,0 +1,26 @@
+# P6: TraHist (Jo et al., PACMMOD 2026) on POL v3, spatial only. Upstream code
+# (YJ960/TraHist, pinned below) runs from its checkout; see
+# traj_eval/adapters/trahist.py. unit_size_m and time_buckets are tuned on the
+# validation workload (slurm/submit_p6.sh STAGE=tune) before the test runs.
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_pol_v3
+  method_id: trahist
+  variant_id: base
+  display_name: TraHist (spatial only)
+  protocol: adapted
+  adaptation: Upstream TraHist (YJ960/TraHist 870e8ce, unchanged construction and estimator) on the trip polyline vertices; query rectangles clipped to the grid extent before upstream's cell-resolution sampling; spatial only, so queries with a time predicate, attribute predicates and single-table queries are unsupported.
+  seeds: [0]
+adapter:
+  type: traj_trahist
+  benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json
+  trahist_source: /work_beegfs/sunip956/master_thesis_trajectories/external/trahist
+  trahist_revision: 870e8ce6db0e6363eeca80dce193623034c858ab
+  temporal: false
+  unit_size_m: 100
+  alpha: 0.5
+  beta: 1.0
+  kappa: 3
+  connectivity: axis
+  agg_mode: mean
+  ratio_eps: 1.0
