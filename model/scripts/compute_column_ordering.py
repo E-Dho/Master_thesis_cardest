@@ -81,11 +81,22 @@ CRITERIA = (
 
 @dataclass(frozen=True)
 class DrawnRows:
-    """The sample, plus how much of it the sampler actually drew fresh."""
+    """The sample, how its rows were obtained, and what the sampler produced.
+
+    ``fresh_rows_used`` and ``fixture_rows_reused`` partition ``rows``: every
+    row in the sample was either newly sampled or drawn again from a fixture.
+    ``sampler_rows_generated`` is a different quantity and is not a row count
+    of this sample -- the live source refills an internal buffer in whole
+    NeuroCard batches and reports the refill, so rows still sitting in that
+    buffer for the next call are generated but never used.  At the documented
+    settings, two million rows at an ordering batch of 65,536 over a sampler
+    batch of 16,384 generates 2,015,232 and uses 2,000,000.
+    """
 
     rows: np.ndarray
-    fresh_rows_drawn: int
+    fresh_rows_used: int
     fixture_rows_reused: int
+    sampler_rows_generated: int
 
 
 def resolve_sampler_seed(config: dict[str, Any], requested: int | None) -> int:
@@ -132,6 +143,7 @@ def draw_rows(
     seen = 0
     fresh = 0
     reused = 0
+    generated = 0
     while seen < total_rows:
         batch = source.batches(
             min(batch_size, total_rows - seen), seed=int(base_seed) + len(collected)
@@ -141,27 +153,26 @@ def draw_rows(
         if returned == 0:
             raise SystemExit("the sampler returned no rows")
         kept = min(returned, total_rows - seen)
-        batch_fresh = int(getattr(batch, "fresh_rows_drawn", 0) or 0)
+        # How the kept rows were obtained is read off the reuse counter alone.
+        # The source's fresh counter cannot be used for this: the live source
+        # reports whole buffer refills, so it counts rows it generated for a
+        # later call, and it exceeds the rows it returned.  Reuse is reported
+        # per returned row by every source that reports it at all, and what is
+        # not reused is new, so the two always add up to the sample.
         batch_reused = int(getattr(batch, "fixture_rows_reused", 0) or 0)
-        if kept < returned:
-            # Only rows that stay in the sample are counted.  The two counters
-            # partition a batch for both shipped sources -- every row is either
-            # freshly drawn or resampled from the fixture -- so the kept part
-            # is split in that same proportion.  A source that accounts for its
-            # batch some other way is capped rather than rescaled, which
-            # understates rather than invents.
-            if batch_fresh + batch_reused == returned:
-                batch_fresh = round(batch_fresh * kept / returned)
-                batch_reused = kept - batch_fresh
-            else:
-                batch_fresh = min(batch_fresh, kept)
-                batch_reused = min(batch_reused, kept)
+        if batch_reused >= returned:
+            reused_here = kept
+        elif batch_reused <= 0:
+            reused_here = 0
+        else:
+            reused_here = round(batch_reused * kept / returned)
         collected.append(values[:kept].astype(np.int32, copy=False))
         seen += kept
-        fresh += batch_fresh
-        reused += batch_reused
+        reused += reused_here
+        fresh += kept - reused_here
+        generated += int(getattr(batch, "fresh_rows_drawn", 0) or 0)
     rows = np.concatenate(collected, axis=0) if len(collected) > 1 else collected[0]
-    return DrawnRows(rows, fresh, reused)
+    return DrawnRows(rows, fresh, reused, generated)
 
 
 def build_orderings(metadata: Any, rows: np.ndarray, max_bins: int) -> dict[str, Any]:
@@ -262,8 +273,11 @@ def main() -> None:
         # A fixture source resamples a fixed set of rows with replacement, so a
         # large sample is not a large number of distinct rows.  Saying which it
         # was keeps the figures honest about what they were estimated from.
-        "fresh_rows_drawn": drawn.fresh_rows_drawn,
+        # These two partition the sample; the third does not belong to it, and
+        # is reported because the gap says how much sampling the draw cost.
+        "fresh_rows_used": drawn.fresh_rows_used,
         "fixture_rows_reused": drawn.fixture_rows_reused,
+        "sampler_rows_generated": drawn.sampler_rows_generated,
     }
     for criterion in CRITERIA:
         payload = {

@@ -1719,11 +1719,18 @@ batch size as well as the seed, and both are recorded. The seed itself is
 resolved once -- `--sampler-seed`, else `dataset.sampler_seed`, else
 `training.seed`, the same chain `sample_source_from_config` uses -- and written
 back into the config, so the sampler and the batch sequence cannot be built
-from different numbers. `column_statistics.json` also records how many rows
-were drawn fresh against how many were resampled from a fixture, counting only
-the rows that stayed in the sample, because a fixture resamples a fixed set
-with replacement and a large sample is then not a large number of distinct
-rows.
+from different numbers. `column_statistics.json` also records how the sample's
+rows were obtained: `fresh_rows_used` and `fixture_rows_reused` partition it,
+because a fixture resamples a fixed set with replacement and a large sample is
+then not a large number of distinct rows.
+
+`sampler_rows_generated` is a third figure and is deliberately not a row count
+of the sample. The live source refills an internal buffer in whole NeuroCard
+batches and reports the refill, so rows it holds back for the next call were
+generated but never used: at the settings above, two million rows at an
+ordering batch of 65,536 over a sampler batch of 16,384 generates 2,015,232 and
+uses 2,000,000. The gap is what the draw cost, not what it measured, and the
+two are kept apart.
 
 Note that `sample_rows.npy` in a live-sampling directory is a small validation
 sample -- 2,000 rows for JOB-light-ranges -- and is far too small for this. The

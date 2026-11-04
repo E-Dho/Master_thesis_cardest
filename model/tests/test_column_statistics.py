@@ -329,8 +329,55 @@ class DrawRowsTest(unittest.TestCase):
         # sample is not a large number of distinct rows, and the statistics
         # should say which they were estimated from.
         drawn = compute_column_ordering.draw_rows(self.source(3, 10), 30, 10)
-        self.assertEqual(drawn.fresh_rows_drawn, 0)
+        self.assertEqual(drawn.fresh_rows_used, 0)
         self.assertEqual(drawn.fixture_rows_reused, 30)
+
+    def test_a_buffered_source_does_not_count_its_buffer_as_the_sample(self) -> None:
+        # The live source refills an internal buffer in whole NeuroCard
+        # batches and reports the refill, so rows held back for the next call
+        # were being counted as rows of this sample.  It returns exactly what
+        # it is asked for, so the over-delivery trimming never saw it.  Scaled
+        # down from the documented settings, where two million rows at an
+        # ordering batch of 65,536 over a sampler batch of 16,384 generate
+        # 2,015,232 and use 2,000,000.
+        class Buffered:
+            def __init__(self, width, refill):
+                self.width = width
+                self.refill = refill
+                self.available = 0
+
+            def batches(self, batch_size, *, seed=0):
+                generated = 0
+                remaining = batch_size
+                while remaining > 0:
+                    if self.available <= 0:
+                        self.available = self.refill
+                        generated += self.refill
+                    take = min(remaining, self.available)
+                    self.available -= take
+                    remaining -= take
+                return types.SimpleNamespace(
+                    encoded_values=np.zeros((batch_size, self.width), dtype=np.int64),
+                    fresh_rows_drawn=generated,
+                    fixture_rows_reused=0,
+                )
+
+        drawn = compute_column_ordering.draw_rows(Buffered(3, 16), 200, 64)
+        self.assertEqual(drawn.rows.shape, (200, 3))
+        self.assertEqual(drawn.fresh_rows_used, 200)
+        self.assertEqual(drawn.fixture_rows_reused, 0)
+        self.assertEqual(drawn.sampler_rows_generated, 208)
+
+    def test_the_two_row_counters_always_partition_the_sample(self) -> None:
+        for source, total, batch in (
+            (self.source(3, 10), 30, 10),
+            (self.source(3, 40), 100, 32),
+        ):
+            drawn = compute_column_ordering.draw_rows(source, total, batch)
+            self.assertEqual(
+                drawn.fresh_rows_used + drawn.fixture_rows_reused,
+                drawn.rows.shape[0],
+            )
 
     def test_a_sampler_that_over_delivers_is_trimmed(self) -> None:
         # Both shipped sources return exactly what they are asked for, so
@@ -345,7 +392,7 @@ class DrawRowsTest(unittest.TestCase):
         # hundred-row sample made of a hundred and twenty rows.
         drawn = compute_column_ordering.draw_rows(self.source(3, 40), 100, 32)
         self.assertEqual(
-            drawn.fresh_rows_drawn + drawn.fixture_rows_reused, drawn.rows.shape[0]
+            drawn.fresh_rows_used + drawn.fixture_rows_reused, drawn.rows.shape[0]
         )
         self.assertEqual(drawn.fixture_rows_reused, 100)
 
@@ -360,25 +407,45 @@ class DrawRowsTest(unittest.TestCase):
 
         drawn = compute_column_ordering.draw_rows(HalfFresh(), 50, 40)
         self.assertEqual(drawn.rows.shape, (50, 3))
-        self.assertEqual(drawn.fresh_rows_drawn, 25)
+        self.assertEqual(drawn.fresh_rows_used, 25)
         self.assertEqual(drawn.fixture_rows_reused, 25)
 
-    def test_a_batch_that_accounts_for_itself_oddly_is_capped(self) -> None:
-        # Counters that do not partition the batch are not rescaled, because
-        # the proportion they would be rescaled by is not known to mean
-        # anything; capping understates rather than invents.
-        class Undercounts:
+    def test_a_source_that_reports_no_reuse_is_all_fresh(self) -> None:
+        # The fresh counter is never read for this, so a source whose fresh
+        # figure disagrees with what it returned cannot distort the sample's
+        # own accounting.
+        class Overcounts:
             def batches(self, batch_size, *, seed=0):
                 return types.SimpleNamespace(
                     encoded_values=np.zeros((40, 3), dtype=np.int64),
-                    fresh_rows_drawn=4,
+                    fresh_rows_drawn=4000,
                     fixture_rows_reused=0,
                 )
 
-        drawn = compute_column_ordering.draw_rows(Undercounts(), 10, 40)
+        drawn = compute_column_ordering.draw_rows(Overcounts(), 10, 40)
         self.assertEqual(drawn.rows.shape, (10, 3))
-        self.assertEqual(drawn.fresh_rows_drawn, 4)
+        self.assertEqual(drawn.fresh_rows_used, 10)
         self.assertEqual(drawn.fixture_rows_reused, 0)
+        self.assertEqual(drawn.sampler_rows_generated, 4000)
+
+    def test_a_nonsensical_reuse_count_is_read_as_no_reuse(self) -> None:
+        # Without the guard a negative count is rescaled like any other and
+        # comes back negative, which makes the fresh count exceed the sample
+        # and stops the two counters partitioning it.
+        class Nonsense:
+            def batches(self, batch_size, *, seed=0):
+                return types.SimpleNamespace(
+                    encoded_values=np.zeros((40, 3), dtype=np.int64),
+                    fresh_rows_drawn=0,
+                    fixture_rows_reused=-5,
+                )
+
+        drawn = compute_column_ordering.draw_rows(Nonsense(), 10, 40)
+        self.assertEqual(drawn.fixture_rows_reused, 0)
+        self.assertEqual(drawn.fresh_rows_used, 10)
+        self.assertEqual(
+            drawn.fresh_rows_used + drawn.fixture_rows_reused, drawn.rows.shape[0]
+        )
 
     def test_a_nonpositive_batch_size_is_refused(self) -> None:
         with self.assertRaisesRegex(SystemExit, "--batch-size"):
@@ -691,8 +758,9 @@ class ComputeOrderingCommandTest(unittest.TestCase):
             )
             self.assertEqual(statistics["rows"], 100)
             self.assertEqual(statistics["max_bins"], 8)
-            self.assertEqual(statistics["fresh_rows_drawn"], 0)
+            self.assertEqual(statistics["fresh_rows_used"], 0)
             self.assertEqual(statistics["fixture_rows_reused"], 100)
+            self.assertEqual(statistics["sampler_rows_generated"], 0)
             self.assertIn("title:production_year", statistics["marginal_entropy_bits"])
             self.assertIn(
                 "title:production_year", statistics["total_mutual_information_bits"]
