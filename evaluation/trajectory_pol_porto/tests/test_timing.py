@@ -157,10 +157,60 @@ class ShippedTimingConfigTest(unittest.TestCase):
             if expected:
                 self.assertEqual(timing["profiles"], [expected], path.name)
             self.assertNotIn("timing_repetitions", timing, f"{path.name} must inherit the timing passes")
+        # external timing commands run their passes themselves: they must run the declared counts
+        # (P5 2026-11-03: the summaries fell back to the accuracy keys, fixed by recorded_passes)
+        for path in configs.glob("*.yaml"):
+            if path.name.startswith("_"):
+                continue
+            raw = load_simple_yaml(path)
+            timing = {**base, **raw.get("timing", {})}
+            for profile, command in (raw.get("adapter", {}).get("timing_commands") or {}).items():
+                self.assertIn(f"--warmup-passes {timing['timing_warmup_passes']} ", command + " ", (path.name, profile))
+                self.assertIn(f"--repetitions {timing['timing_repetitions']} ", command + " ", (path.name, profile))
         spec = json.loads((configs.parent / "timing_hardware.json").read_text())
         # fixed to the CPU of the first POL timing table, so later methods share it
         self.assertEqual({spec["profiles"][p]["cpu_model"] for p in ("cpu_1core", "cpu_postgres_2core")},
                          {"AMD EPYC 7313 16-Core Processor"})
+
+
+
+class RecordedPassesTest(unittest.TestCase):
+    """What a timing summary records as its pass counts, and the cross-check with the rows."""
+
+    @staticmethod
+    def _make_config(**timing):
+        return type("Config", (), {"timing": timing})()
+
+    @staticmethod
+    def _make_outcome(detail=None):
+        return type("Outcome", (), {"detail": detail or {}})()
+
+    def test_precedence(self) -> None:
+        from evaluation.eval_core.timing import recorded_passes
+
+        trajectory = self._make_config(warmup_passes=0, repetitions=1, timing_warmup_passes=1, timing_repetitions=3)
+        # an external adapter reports no passes: the time-stage keys apply, not the accuracy keys
+        self.assertEqual(recorded_passes(trajectory, self._make_outcome()), {"warmup_passes": 1, "repetitions": 3})
+        # passes reported by the adapter win
+        reported = self._make_outcome({"passes": {"warmup_passes": 2, "repetitions": 5}})
+        self.assertEqual(recorded_passes(trajectory, reported), {"warmup_passes": 2, "repetitions": 5})
+        # IMDB-style config: one set of keys for both
+        imdb = self._make_config(warmup_passes=1, repetitions=10)
+        self.assertEqual(recorded_passes(imdb, self._make_outcome()), {"warmup_passes": 1, "repetitions": 10})
+
+    def test_observed_repetitions(self) -> None:
+        from evaluation.eval_core.records import LatencyRecord
+        from evaluation.eval_core.timing import observed_repetitions
+
+        def rows(spec):
+            return [LatencyRecord(workload="w", query_id=q, repetition=r, latency_ms=1.0) for q, r in spec]
+
+        self.assertIsNone(observed_repetitions([]))
+        self.assertEqual(observed_repetitions(rows([(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)])), 3)
+        irregular = observed_repetitions(rows([(0, 0), (0, 1), (0, 2), (1, 0)]))
+        self.assertIsInstance(irregular, str)
+        duplicated = observed_repetitions(rows([(0, 0), (0, 0), (1, 0), (1, 1)]))
+        self.assertIn("duplicate", duplicated)
 
 
 if __name__ == "__main__":

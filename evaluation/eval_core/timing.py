@@ -308,6 +308,13 @@ def run_timing_stage(
         write_predictions(directory / "predictions.csv", predictions)
         write_latencies(directory / "latency.csv", outcome.latencies)
         failures.extend(latency_coverage_failures(config.workloads, outcome.predictions, outcome.latencies))
+        recorded = recorded_passes(config, outcome)
+        observed = observed_repetitions(outcome.latencies)
+        if observed is not None and observed != recorded["repetitions"]:
+            failures.append(
+                f"latency rows show {observed} measured repetitions per answered query, "
+                f"but {recorded['repetitions']} are recorded"
+            )
         workloads: dict[str, Any] = {}
         for workload in config.workloads:
             records = [record for record in outcome.latencies if record.workload == workload.workload_id]
@@ -339,10 +346,10 @@ def run_timing_stage(
             "hardware_violations": hardware_problems,
             "estimate_consistency": consistency,
             "estimate_drift_allowed": bool(allow_estimate_drift),
-            # an adapter that runs its own pass counts reports them in
-            # detail["passes"]; otherwise the config's accuracy keys apply
-            "warmup_passes": int(_passes(outcome).get("warmup_passes", config.timing.get("warmup_passes", 1))),
-            "repetitions": int(_passes(outcome).get("repetitions", config.timing.get("repetitions", 10))),
+            # see recorded_passes; repetitions are cross-checked against the latency rows
+            "warmup_passes": recorded["warmup_passes"],
+            "repetitions": recorded["repetitions"],
+            "observed_repetitions": observed,
             "workloads": workloads,
             "adapter_detail": outcome.detail,
             "failures": failures,
@@ -365,6 +372,41 @@ def _passes(outcome: Any) -> dict[str, Any]:
     detail = getattr(outcome, "detail", None) or {}
     passes = detail.get("passes") if isinstance(detail, dict) else None
     return passes if isinstance(passes, dict) else {}
+
+
+def recorded_passes(config: Any, outcome: Any) -> dict[str, int]:
+    """Pass counts of a time-stage run.
+
+    An adapter that runs its own pass counts reports them in ``detail["passes"]``.
+    Otherwise the config's time-stage keys ``timing_warmup_passes`` /
+    ``timing_repetitions`` apply where present (configs whose accuracy pass
+    differs from the timed passes, e.g. the trajectory configs, whose external
+    timing commands run those counts), and else ``warmup_passes`` /
+    ``repetitions`` (IMDB, where both coincide).
+    """
+    passes, timing = _passes(outcome), config.timing
+    warmup = passes.get("warmup_passes", timing.get("timing_warmup_passes", timing.get("warmup_passes", 1)))
+    repetitions = passes.get("repetitions", timing.get("timing_repetitions", timing.get("repetitions", 10)))
+    return {"warmup_passes": int(warmup), "repetitions": int(repetitions)}
+
+
+def observed_repetitions(latencies) -> int | str | None:
+    """Measured rows per answered query in the latency records.
+
+    ``None`` without latency rows; the common count when every timed query has
+    the same number of rows with distinct repetition ids; otherwise a short
+    description of the irregularity (which never equals a recorded count).
+    """
+    per_query: dict[tuple[str, int], list[int]] = {}
+    for record in latencies:
+        per_query.setdefault((record.workload, record.query_id), []).append(int(record.repetition))
+    if not per_query:
+        return None
+    counts = {len(ids) for ids in per_query.values()}
+    duplicated = any(len(ids) != len(set(ids)) for ids in per_query.values())
+    if len(counts) == 1 and not duplicated:
+        return counts.pop()
+    return f"irregular (rows per query {sorted(counts)}{', duplicate repetition ids' if duplicated else ''})"
 
 
 def latency_coverage_failures(workloads, predictions, latencies) -> list[str]:
