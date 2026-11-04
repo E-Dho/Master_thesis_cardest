@@ -4,9 +4,11 @@
 - a planarized trajectory counts exactly once in every query region with a
   real face count, and Example 9/10 of the paper (a trajectory outside the
   region whose virtual counts cover it) gives CASE 2 and CASE+ 1;
+- every trajectory that is not a tree of cells and crossed edges (a cycle,
+  a jump between segments) is planarized too (review of f20c7d7);
 - CASE+-Temporal with the full time range equals the base exactly (gate 6),
-  and its time-restricted counts equal a brute-force recount per trajectory
-  (real elements in the interval; virtual body when the span is inside);
+  and over buckets a..b it equals CASE+ built on every trajectory cut to
+  a..b (a cut trajectory is planarized on its own);
 - coverage rules and a pipeline run.
 """
 
@@ -90,6 +92,23 @@ class CaseHistogramTest(unittest.TestCase):
             expected = 1.0 if real[r0:r1 + 1, c0:c1 + 1].sum() > 0 else 0.0
             self.assertEqual(model.count((r0, r1, c0, c1), 0, 0), expected, (r0, r1, c0, c1))
 
+    def test_cycles_and_jumps_are_planarized(self) -> None:
+        # around a 2x2 block: cells and crossed edges form a cycle (F - E = 0 without planarization)
+        loop = [(0.5, 0.5), (1.5, 0.5), (1.5, 1.5), (0.5, 1.5), (0.5, 0.6)]
+        model, _, meta = _model(*_trajectories([loop]), extent=(0, 0, 3, 3))
+        self.assertEqual(meta["planarized_trajectories"], 1)
+        self.assertEqual(meta["planarized_as_non_tree"], 1)
+        for r0, r1, c0, c1 in product(range(3), range(3), range(3), range(3)):
+            if r1 >= r0 and c1 >= c0 and r0 <= 1 and c0 <= 1:
+                self.assertEqual(model.count((r0, r1, c0, c1), 0, 0), 1.0, (r0, r1, c0, c1))
+        # two segments that do not join: the trajectory jumps from one cell to a distant one
+        segments, trips = _trajectories([[(0.5, 0.5), (0.6, 0.6)]])
+        jump = {k: np.concatenate((v, v)) for k, v in segments.items()}
+        jump["sx"][1], jump["ex"][1], jump["sy"][1], jump["ey"][1] = 2.5, 2.6, 0.5, 0.6
+        model, _, meta = _model(jump, {"offset": np.array([0, 2])}, extent=(0, 0, 3, 3))
+        self.assertEqual(meta["planarized_trajectories"], 1)
+        self.assertEqual(model.count((0, 0, 0, 2), 0, 0), 1.0)
+
     def test_straight_trajectory_is_not_planarized(self) -> None:
         model, arrays, meta = _model(*_trajectories([[(0.5, 0.5), (3.5, 0.5)]]), extent=(0, 0, 5, 5))
         self.assertEqual(meta["planarized_trajectories"], 0)
@@ -148,65 +167,54 @@ class CaseTemporalTest(unittest.TestCase):
         for record in spatial:
             self.assertEqual(self.temporal.estimate(record), self.base.estimate(record), record.query_id)
 
-    def test_restricted_counts_match_a_brute_force_recount(self) -> None:
-        model, grid = self.temporal, self.temporal.grid
+    def test_restricted_counts_are_case_on_the_restricted_trajectories(self) -> None:
+        """Gate: CASE+-Temporal over buckets a..b == CASE+ built on every trajectory cut to a..b."""
         segments, offsets = self.segments, np.asarray(self.trips["offset"])
-        cells = traverse(grid, segments["sx"], segments["sy"], segments["ex"], segments["ey"])
-        first = model.time.assign(np.asarray(segments["ts"])).astype(int)
-        last = model.time.assign(np.asarray(segments["te"])).astype(int)
-        seg_traj = np.repeat(np.arange(offsets.size - 1), np.diff(offsets))
-        nx = grid.nx
-        whole_cells = {}
-        for seg, cell in zip(cells["cell_seg"].tolist(), cells["cell"].tolist()):
-            whole_cells.setdefault(int(seg_traj[seg]), set()).add(cell)
-        planar = np.zeros(offsets.size - 1, dtype=bool)
-        planar_meta = case_plus.detect_problem(grid, offsets.size - 1,
-                                               *(np.unique(seg_traj[cells[f"{k}_seg"]] * size + cells[k])
-                                                 for k, size in (("cell", grid.ny * nx), ("vedge", grid.ny * max(nx - 1, 1)),
-                                                                 ("hedge", max(grid.ny - 1, 1) * nx))))
-        planar[:] = planar_meta
-        span = {t: (int(first[offsets[t]:offsets[t + 1]].min()), int(last[offsets[t]:offsets[t + 1]].max()))
-                for t in range(offsets.size - 1)}
-
-        def brute(rect, a, b):
-            r0, r1, c0, c1 = rect
-            faces = edges = vfaces = vedges = vvertices = 0
-            for t in range(offsets.size - 1):
-                segs = [s for s in range(offsets[t], offsets[t + 1]) if first[s] <= b and last[s] >= a]
-                inside = lambda r, c: r0 <= r <= r1 and c0 <= c <= c1  # noqa: E731
-                cell_set = {c for s in segs for c in cells["cell"][cells["cell_seg"] == s].tolist()}
-                v_set = {e for s in segs for e in cells["vedge"][cells["vedge_seg"] == s].tolist()}
-                h_set = {e for s in segs for e in cells["hedge"][cells["hedge_seg"] == s].tolist()}
-                faces += sum(inside(c // nx, c % nx) for c in cell_set)
-                edges += sum(inside(e // max(nx - 1, 1), e % max(nx - 1, 1)) and e % max(nx - 1, 1) + 1 <= c1
-                             for e in v_set)
-                edges += sum(inside(e // nx, e % nx) and e // nx + 1 <= r1 for e in h_set)
-                if planar[t] and a <= span[t][0] and span[t][1] <= b:
-                    rows = [c // nx for c in whole_cells[t]]
-                    cols = [c % nx for c in whole_cells[t]]
-                    R0, R1, C0, C1 = max(min(rows), r0), min(max(rows), r1), max(min(cols), c0), min(max(cols), c1)
-                    if R1 >= R0 and C1 >= C0:
-                        whole_v = {e for s in range(offsets[t], offsets[t + 1])
-                                   for e in cells["vedge"][cells["vedge_seg"] == s].tolist()}
-                        whole_h = {e for s in range(offsets[t], offsets[t + 1])
-                                   for e in cells["hedge"][cells["hedge_seg"] == s].tolist()}
-                        vfaces += sum((r * nx + c) not in whole_cells[t] for r in range(R0, R1 + 1) for c in range(C0, C1 + 1))
-                        vedges += sum((r * max(nx - 1, 1) + c) not in whole_v for r in range(R0, R1 + 1) for c in range(C0, C1))
-                        vedges += sum((r * nx + c) not in whole_h for r in range(R0, R1) for c in range(C0, C1 + 1))
-                        if r1 > r0 and c1 > c0:
-                            vvertices += (R1 - R0) * (C1 - C0)
-            if faces == 0:
-                return 0.0
-            return float(max((faces + vfaces) - (edges + vedges) + vvertices, 0))
-
-        no_plus = CaseModel(synthetic_settings(), self.temp_arrays, {**self.temp_meta, "plus": False})
+        sx, sy, ex, ey = (np.asarray(segments[k]) for k in ("sx", "sy", "ex", "ey"))
+        extent = (float(min(sx.min(), ex.min())), float(min(sy.min(), ey.min())),
+                  float(max(sx.max(), ex.max())), float(max(sy.max(), ey.max())))
+        first = self.temporal.time.assign(np.asarray(segments["ts"]))
+        last = self.temporal.time.assign(np.asarray(segments["te"]))
         rng = np.random.default_rng(9)
-        for _ in range(40):
-            r0, r1 = sorted(rng.integers(0, grid.ny, 2))
-            c0, c1 = sorted(rng.integers(0, grid.nx, 2))
-            a, b = sorted(rng.integers(0, model.time.count, 2))
-            rect = (int(r0), int(r1), int(c0), int(c1))
-            self.assertEqual(no_plus.count(rect, int(a), int(b)), brute(rect, int(a), int(b)), (rect, a, b))
+        grid = self.temporal.grid
+        checked = 0
+        for _ in range(12):
+            a, b = (int(v) for v in sorted(rng.integers(0, self.temporal.time.count, 2)))
+            keep = (first <= b) & (last >= a)
+            if not keep.any():
+                continue
+            seg_traj = np.repeat(np.arange(offsets.size - 1), np.diff(offsets))[keep]
+            cut_offsets = np.concatenate(([0], np.cumsum(np.bincount(seg_traj)[np.unique(seg_traj)])))
+            cut = {k: np.asarray(segments[k])[keep] for k in ("sx", "sy", "ex", "ey", "ts", "te")}
+            for plus in (False, True):
+                reference = _model(cut, {"offset": cut_offsets}, unit=UNIT, plus=plus, extent=extent)[0]
+                model = CaseModel(synthetic_settings(), self.temp_arrays, {**self.temp_meta, "plus": plus})
+                self.assertEqual((reference.grid.ny, reference.grid.nx), (grid.ny, grid.nx))
+                for _ in range(15):
+                    r0, r1 = (int(v) for v in sorted(rng.integers(0, grid.ny, 2)))
+                    c0, c1 = (int(v) for v in sorted(rng.integers(0, grid.nx, 2)))
+                    rect = (r0, r1, c0, c1)
+                    self.assertEqual(model.count(rect, a, b), reference.count(rect, 0, 0), (rect, a, b, plus))
+                    checked += 1
+        self.assertGreater(checked, 100)
+
+    def test_cut_trajectory_keeps_its_planarization(self) -> None:
+        # review case: a U-shape (time 0-30), then a stationary tail at time 3000; four short
+        # trajectories elsewhere at time 2000-2010 put the bucket boundary at 2005, so the U lies in
+        # bucket 0 and the tail in bucket 1. A bottom-row query over bucket 0 must count the U once.
+        u = [(0.5, 0.5), (0.5, 3.5), (3.5, 3.5), (3.5, 0.5), (3.5, 0.5)]
+        paths = [u] + [[(10.5, 10.5), (10.6, 10.6)]] * 4
+        segments, trips = _trajectories(paths)
+        segments["ts"] = np.array([0, 10, 20, 3000, 2000, 2000, 2000, 2000], dtype=np.int64)
+        segments["te"] = segments["ts"] + 10
+        model, _, meta = _model(segments, trips, temporal=True, buckets=2, extent=(0, 0, 12, 12))
+        self.assertEqual(model.time.boundaries.tolist()[1], 2005)
+        self.assertEqual(meta["longest_span_buckets"], 2)
+        bottom = (0, 0, 0, 3)
+        self.assertEqual(model.count(bottom, 0, 0), 1.0)  # the cut U is planarized on its own
+        self.assertEqual(model.count(bottom, 0, 1), 1.0)
+        self.assertEqual(model.count(bottom, 1, 1), 1.0)  # only the tail, in cell (0, 3)
+        self.assertEqual(model.count((0, 3, 0, 3), 0, 0), 1.0)
 
     def test_coverage_rules(self) -> None:
         for record in self.records:

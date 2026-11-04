@@ -397,28 +397,28 @@ Fig. 12; no public code):
   paper's perturbation); Stage 2 flags a trajectory when two of its cells in
   one row (column) are not joined by a straight run of visited cells with
   crossed edges (our reading of "same row or column, not neighbours, no
-  connection edge"); a flagged trajectory is planarized to the MBR of its
-  cells: unvisited MBR cells, uncrossed interior MBR edges and all interior
-  MBR vertices become virtual counts (Fig. 12: real edges are the crossed
-  ones), so every planarized trajectory is one convex body;
+  connection edge"), and every trajectory whose cells and crossed edges are
+  not a tree (a cycle, a jump between segments) is flagged too, since Euler
+  counting without planarization is only exact for a tree; a flagged
+  trajectory is planarized to the MBR of its cells: unvisited MBR cells,
+  uncrossed interior MBR edges and all interior MBR vertices become virtual
+  counts (Fig. 12: real edges are the crossed ones);
 - query (Algorithm 2) on the cells the query rectangle intersects:
   0 without real faces, else `(F+F') - (E+E') + V'` (no `V'` for one row or
   column); CASE+ (Algorithm 3) subtracts `min(min F', min E', min V')`;
-- `case_plus_temporal.yaml` (extension by us): real face/edge counts per time
-  bucket (a segment occupies every bucket its time span intersects) with
-  `F`/`L` links, so time-restricted real counts are exact per cell/edge; a
-  planarized trajectory's virtual counts are kept per trajectory time span
-  `[i, j]` and apply when the query buckets contain it (`a <= i`, `j <= b`),
-  in which case all its real counts are present too and the restricted
-  counts are exactly CASE's planar body; a trajectory cut by the interval
-  keeps only its real counts inside the interval. Full time range = base
-  exactly (gate); restricted counts = brute-force recount (test).
+- `case_plus_temporal.yaml` (extension by us): time-restricted CASE+ is
+  CASE+ on every trajectory cut to the query's time buckets. A trajectory
+  spanning buckets `i..j` gets the full CASE construction for each of its
+  `s(s+1)/2` restrictions `lo..hi`, summed per key `(i, j, lo, hi)`; a query
+  over `a..b` takes per span the key `lo = max(a, i)`, `hi = min(b, j)`.
+  Equal to CASE+ built on the cut trajectories (test) and, for the full
+  range, to the base (gate). Most trips lie in one or two buckets.
 
-Storage: real counts per time bucket (dense), links, virtual counts per
-distinct trajectory span (dense); `theoretical_bytes` counts each histogram
-dense or as (index, value) pairs, whichever is smaller. The temporal
-variant's virtual counts grow with the number of distinct spans (about the
-number of buckets), so its size depends strongly on the grid.
+Storage: real and virtual counts per key (dense); `theoretical_bytes` counts
+each histogram dense or as (index, value) pairs, whichever is smaller. The
+number of keys grows with the number of distinct trajectory spans (a few
+times the number of buckets), so the temporal variant's size depends strongly
+on the grid and the bucket count.
 
 **Tuning on the validation workload** (`traj_eval/tune.py`, never the test
 set): every grid point re-runs the method on the validation benchmark's multi

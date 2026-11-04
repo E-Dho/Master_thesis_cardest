@@ -28,22 +28,25 @@ edge" is not crossed. We read it as: two visited cells of one row (column)
 that are not joined by a straight run of visited cells whose shared edges the
 trajectory crossed. For adjacent cells this is exactly the edge condition;
 for cells further apart it is the condition under which a one-row (one-column)
-region containing both sees them disconnected.
+region containing both sees them disconnected. In addition (review of
+f20c7d7), every trajectory whose cells and crossed edges do not form a tree
+is planarized: a cycle (e.g. around a block) would give ``F - E = 0`` and a
+jump between non-adjacent segments ``F - E = 2``; Euler counting of an
+unplanarized trajectory is only exact for a tree.
 
 **CASE+-Temporal** (extension by us, spec "Temporal extension for CASE+ and
-TraHist", ``traj_eval/temporal.py``): every real count gets per-time-bucket
-occupancy (a segment occupies the equi-depth buckets its time span
-intersects) and the ``F``/``L`` statistics, so the time-restricted real
-counts are exact distinct counts per cell/edge over bucket-aligned intervals.
-The virtual counts of a planarized trajectory belong to its convex body as a
-whole and are kept per trajectory time span ``[i, j]`` (first and last
-bucket): they apply when the query buckets ``a..b`` contain the whole span
-(``a <= i`` and ``j <= b``, the same dominance test as a link). Then all of
-the trajectory's real counts are present as well, and the restricted counts
-are exactly CASE's planar body; when the interval cuts a trajectory, only
-its real counts inside the interval remain (Euler counting without
-planarization). With the full time range the counts equal the base exactly
-(gate). The query and CASE+ formulas are unchanged.
+TraHist", note 5): time-restricted CASE+ is CASE+ applied to every trajectory
+restricted to the query interval. A trajectory whose segments span the
+equi-depth time buckets ``i..j`` (a segment occupies every bucket its time
+span intersects) has ``s(s+1)/2`` possible restrictions ``lo..hi`` (``s =
+j - i + 1``); each is processed by the full CASE construction (Stage 2,
+tree check, planarization) at build time, and the counts are summed per key
+``(i, j, lo, hi)``. A query over buckets ``a..b`` takes, for every span it
+intersects, the key with ``lo = max(a, i)`` and ``hi = min(b, j)``, so the
+counts are exactly those of CASE built on the cut trajectories (tested), and
+a cut trajectory keeps its own planarization. Trips are much shorter than a
+bucket, so almost every trajectory has one or three restrictions. With the
+full time range the counts equal the base exactly (gate).
 
 Adaptations: the query rectangle selects every cell it intersects and is
 clipped to the grid; ``trips.trip_time`` predicates use the segment times
@@ -244,11 +247,41 @@ def _rect_add(shape: Tuple[int, int, int], pair: np.ndarray, r0, r1, c0, c1) -> 
     return np.cumsum(np.cumsum(diff, axis=1), axis=2)[:, :ny, :nx]
 
 
+def _piece_table(span_i: np.ndarray, span_j: np.ndarray, max_pieces: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Every bucket range ``lo..hi`` inside each trajectory's span: (owner, lo, hi, offsets per trajectory)."""
+    length = span_j - span_i + 1
+    counts = length * (length + 1) // 2
+    total = int(counts.sum())
+    if total > max_pieces:
+        raise MemoryError(f"{total} restricted trajectories (longest span {int(length.max())} buckets); "
+                          "use fewer time buckets")
+    owner = np.repeat(np.arange(span_i.size, dtype=np.int64), counts)
+    lo = np.empty(total, dtype=np.int64)
+    hi = np.empty(total, dtype=np.int64)
+    offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
+    for size in np.unique(length):
+        pairs = np.array([(a, b) for a in range(int(size)) for b in range(a, int(size))], dtype=np.int64)
+        trajectories = np.flatnonzero(length == size)
+        index = (offsets[trajectories][:, None] + np.arange(pairs.shape[0])[None, :]).ravel()
+        lo[index] = (span_i[trajectories][:, None] + pairs[None, :, 0]).ravel()
+        hi[index] = (span_i[trajectories][:, None] + pairs[None, :, 1]).ravel()
+    return owner, lo, hi, offsets
+
+
 def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarray], *, unit_size_m: float,
                temporal: bool, time_buckets: int, chunk_segments: int = 4_000_000,
-               extent: Optional[Tuple[float, float, float, float]] = None
-               ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-    """All CASE histograms (real per time bucket, links, virtual per trajectory span).
+               extent: Optional[Tuple[float, float, float, float]] = None,
+               max_pieces: int = 200_000_000) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    """All CASE histograms, per (trajectory span, restriction) key.
+
+    A trajectory spanning time buckets ``i..j`` is processed by CASE once for
+    every bucket range ``lo..hi`` inside its span (its segments whose time span
+    intersects ``lo..hi``): detection, planarization, real and virtual counts.
+    The counts are summed per key ``(i, j, lo, hi)``. A query over buckets
+    ``a..b`` takes, for every span ``i..j`` it intersects, the key with
+    ``lo = max(a, i)`` and ``hi = min(b, j)``: exactly CASE applied to every
+    trajectory restricted to the query interval. The base variant has one
+    bucket, one key and one restriction per trajectory (the whole trajectory).
 
     The grid covers ``extent`` (xmin, ymin, xmax, ymax), by default the data
     extent; points outside it fall into the border cells.
@@ -257,100 +290,120 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
     ts, te = np.asarray(segments["ts"], dtype=np.int64), np.asarray(segments["te"], dtype=np.int64)
     offsets = np.asarray(trips["offset"], dtype=np.int64)
     n_traj = int(offsets.size - 1)
+    n_seg = sx.size
     seg_traj = np.repeat(np.arange(n_traj, dtype=np.int64), np.diff(offsets))
     if extent is None:
         extent = (float(min(sx.min(), ex.min())), float(min(sy.min(), ey.min())),
                   float(max(sx.max(), ex.max())), float(max(sy.max(), ey.max())))
     grid = Grid.covering(*(float(v) for v in extent), float(unit_size_m))
     ny, nx = grid.ny, grid.nx
-    sizes = {"cell": ny * nx, "vedge": ny * max(nx - 1, 1), "hedge": max(ny - 1, 1) * nx}
+    shapes = {"cell": (ny, nx), "vedge": (ny, max(nx - 1, 1)), "hedge": (max(ny - 1, 1), nx)}
+    sizes = {kind: shape[0] * shape[1] for kind, shape in shapes.items()}
     if temporal:
         buckets = TimeBuckets.equi_depth(ts + (te - ts) // 2, int(time_buckets), int(ts.min()), int(te.max()))
     else:
         buckets = TimeBuckets(np.array([int(ts.min()), int(te.max()) + 1], dtype=np.int64))
     B = buckets.count
     seg_first, seg_last = buckets.assign(ts).astype(np.int64), buckets.assign(te).astype(np.int64)
+    span_i = np.full(n_traj, B, dtype=np.int64)
+    span_j = np.full(n_traj, -1, dtype=np.int64)
+    np.minimum.at(span_i, seg_traj, seg_first)
+    np.maximum.at(span_j, seg_traj, seg_last)
 
-    # real occurrences (trajectory, element, bucket), deduplicated, chunk by chunk
-    occurrences: Dict[str, list] = {kind: [] for kind in sizes}
-    for start in range(0, sx.size, chunk_segments):
-        stop = min(start + chunk_segments, sx.size)
-        cells = traverse(grid, sx[start:stop], sy[start:stop], ex[start:stop], ey[start:stop])
+    # restricted trajectories ("pieces") and the segments of each
+    owner, lo, hi, piece_offsets = _piece_table(span_i, span_j, max_pieces)
+    n_pieces = owner.size
+    per_traj = np.diff(piece_offsets)
+    candidates = per_traj[seg_traj]
+    cand_seg = np.repeat(np.arange(n_seg, dtype=np.int64), candidates)
+    cand_piece = (piece_offsets[seg_traj][cand_seg]
+                  + np.arange(cand_seg.size, dtype=np.int64) - np.repeat(np.cumsum(candidates) - candidates, candidates))
+    keep = (lo[cand_piece] <= seg_last[cand_seg]) & (hi[cand_piece] >= seg_first[cand_seg])
+    member_seg, member_piece = cand_seg[keep], cand_piece[keep]
+    del cand_seg, cand_piece, keep
+    pieces_of_seg = np.bincount(member_seg, minlength=n_seg)
+    seg_member_offset = np.concatenate(([0], np.cumsum(pieces_of_seg))).astype(np.int64)
+
+    # elements of every piece (deduplicated), chunk by chunk over segments
+    found: Dict[str, list] = {kind: [] for kind in sizes}
+    for start in range(0, n_seg, chunk_segments):
+        stop = min(start + chunk_segments, n_seg)
+        visited = traverse(grid, sx[start:stop], sy[start:stop], ex[start:stop], ey[start:stop])
         for kind in sizes:
-            seg = cells[f"{kind}_seg"] + start
-            element = cells[kind]
-            first, last = seg_first[seg], seg_last[seg]
-            span = last - first + 1  # a segment occupies every bucket its time span intersects
-            if np.any(span > 1):
-                repeat = np.repeat(np.arange(seg.size), span)
-                bucket = first[repeat] + (np.arange(repeat.size) - np.repeat(np.cumsum(span) - span, span))
-                seg, element = seg[repeat], element[repeat]
-            else:
-                bucket = first
-            occurrences[kind].append(_unique_keys((seg_traj[seg], n_traj), (element, sizes[kind]), (bucket, B)))
-    real: Dict[str, Tuple[np.ndarray, ...]] = {}
-    for kind, parts in occurrences.items():
-        keys = np.unique(np.concatenate(parts)) if parts else np.zeros(0, dtype=np.int64)
-        real[kind] = _split(keys, sizes[kind], B)  # traj, element, bucket (sorted)
-    del occurrences
+            seg = visited[f"{kind}_seg"] + start
+            element = visited[kind]
+            repeat = pieces_of_seg[seg]
+            index = np.repeat(np.arange(seg.size), repeat)
+            local = np.arange(index.size, dtype=np.int64) - np.repeat(np.cumsum(repeat) - repeat, repeat)
+            piece = member_piece[seg_member_offset[seg[index]] + local]
+            found[kind].append(_unique_keys((piece, n_pieces), (element[index], sizes[kind])))
+    elements = {kind: (np.unique(np.concatenate(parts)) if parts else np.zeros(0, dtype=np.int64))
+                for kind, parts in found.items()}
+    del found
 
-    # whole-trajectory element sets, problem detection, MBRs, spans
-    whole = {kind: np.unique(t * sizes[kind] + e) for kind, (t, e, _) in real.items()}
-    problem = detect_problem(grid, n_traj, whole["cell"], whole["vedge"], whole["hedge"])
-    traj_of_cell, cell = whole["cell"] // sizes["cell"], whole["cell"] % sizes["cell"]
-    row, col = cell // nx, cell % nx
-    big = np.iinfo(np.int64).max
-    r_min = np.full(n_traj, big); r_max = np.full(n_traj, -1); c_min = np.full(n_traj, big); c_max = np.full(n_traj, -1)
-    np.minimum.at(r_min, traj_of_cell, row); np.maximum.at(r_max, traj_of_cell, row)
-    np.minimum.at(c_min, traj_of_cell, col); np.maximum.at(c_max, traj_of_cell, col)
-    span_i = np.full(n_traj, B, dtype=np.int64); span_j = np.full(n_traj, -1, dtype=np.int64)
-    np.minimum.at(span_i, seg_traj, seg_first); np.maximum.at(span_j, seg_traj, seg_last)
+    # Stage 2 per piece, plus the Euler preconditions of an unplanarized trajectory:
+    # its cells and crossed edges must form a tree (connected, E = F - 1)
+    problem = detect_problem(grid, n_pieces, elements["cell"], elements["vedge"], elements["hedge"])
+    faces = np.bincount(elements["cell"] // sizes["cell"], minlength=n_pieces)
+    edges = (np.bincount(elements["vedge"] // sizes["vedge"], minlength=n_pieces)
+             + np.bincount(elements["hedge"] // sizes["hedge"], minlength=n_pieces))
+    end_cell = grid.row(ey) * nx + grid.column(ex)
+    start_cell = grid.row(sy) * nx + grid.column(sx)
+    broken = np.zeros(n_seg, dtype=np.int64)  # junction k -> k+1 inside one trajectory jumps cells
+    if n_seg > 1:
+        broken[:-1] = (seg_traj[1:] == seg_traj[:-1]) & (end_cell[:-1] != start_cell[1:])
+    broken_prefix = np.concatenate(([0], np.cumsum(broken)))
+    seg_lo = np.full(n_pieces, n_seg, dtype=np.int64)
+    seg_hi = np.full(n_pieces, -1, dtype=np.int64)
+    np.minimum.at(seg_lo, member_piece, member_seg)
+    np.maximum.at(seg_hi, member_piece, member_seg)
+    jumps = broken_prefix[np.maximum(seg_hi, seg_lo)] - broken_prefix[seg_lo]
+    tree = (edges == faces - 1) & (jumps == 0)
+    stage2 = problem.copy()
+    problem |= ~tree
+
+    # keys (trajectory span, restriction)
+    key_values, key_of_piece = np.unique(((span_i[owner] * B + span_j[owner]) * B + lo) * B + hi,
+                                         return_inverse=True)
+    K = key_values.size
+    keys = np.column_stack(_split(key_values, B, B, B)).astype(np.int32).reshape(K, 4)
+    if K * (3 * ny * nx + 4 * ny * nx) * 4 > 4_000_000_000:
+        raise MemoryError(f"{K} keys x {ny * nx} cells is too large; use a coarser grid or fewer buckets")
 
     arrays: Dict[str, np.ndarray] = {
         "grid/origin": grid.origin, "grid/unit": np.array([grid.unit]), "grid/shape": np.array([ny, nx]),
-        "time/boundaries": buckets.boundaries,
+        "time/boundaries": buckets.boundaries, "keys": keys,
     }
-    # real counts per bucket (dense) and links
-    shapes = {"cell": (ny, nx), "vedge": (ny, max(nx - 1, 1)), "hedge": (max(ny - 1, 1), nx)}
-    link_total = 0
-    for kind, (t, element, bucket) in real.items():
-        counts = np.bincount(bucket * sizes[kind] + element, minlength=B * sizes[kind])
-        arrays[f"real/{kind}"] = counts.reshape((B,) + shapes[kind]).astype(np.int32)
-        same = (t[1:] == t[:-1]) & (element[1:] == element[:-1])
-        keys, multiplicity = np.unique((element[:-1][same] * B + bucket[:-1][same]) * B + bucket[1:][same],
-                                       return_counts=True)
-        e, i, j = _split(keys, B, B)
-        arrays.update({f"links/{kind}/row": (e // shapes[kind][1]).astype(np.int32),
-                       f"links/{kind}/col": (e % shapes[kind][1]).astype(np.int32),
-                       f"links/{kind}/i": i.astype(np.int32), f"links/{kind}/j": j.astype(np.int32),
-                       f"links/{kind}/count": multiplicity.astype(np.int32)})
-        link_total += int(multiplicity.sum())
+    for kind in sizes:
+        piece, element = elements[kind] // sizes[kind], elements[kind] % sizes[kind]
+        counts = np.bincount(key_of_piece[piece] * sizes[kind] + element, minlength=K * sizes[kind])
+        arrays[f"real/{kind}"] = counts.reshape((K,) + shapes[kind]).astype(np.int32)
 
-    # virtual counts of planarized trajectories, per distinct trajectory span (i, j)
-    planar = np.flatnonzero(problem)
-    span_keys, pair_of = np.unique(span_i[planar] * B + span_j[planar], return_inverse=True)
-    P = span_keys.size
-    arrays["virtual/pairs"] = np.column_stack((span_keys // B, span_keys % B)).astype(np.int32).reshape(P, 2)
-    rp0, rp1, cp0, cp1 = r_min[planar], r_max[planar], c_min[planar], c_max[planar]
-    if P * ny * nx * 4 > 4_000_000_000:
-        raise MemoryError(f"{P} trajectory spans x {ny * nx} cells is too large; use a coarser grid or fewer buckets")
+    # virtual counts of the planarized pieces: their cell MBR minus their real elements
+    piece_of_cell = elements["cell"] // sizes["cell"]
+    cell = elements["cell"] % sizes["cell"]
+    big = np.iinfo(np.int64).max
+    r0 = np.full(n_pieces, big); r1 = np.full(n_pieces, -1); c0 = np.full(n_pieces, big); c1 = np.full(n_pieces, -1)
+    np.minimum.at(r0, piece_of_cell, cell // nx); np.maximum.at(r1, piece_of_cell, cell // nx)
+    np.minimum.at(c0, piece_of_cell, cell % nx); np.maximum.at(c1, piece_of_cell, cell % nx)
+    planar = np.flatnonzero(problem & (faces > 0))
+    kp = key_of_piece[planar]
     cover = {
-        "cell": _rect_add((P, ny, nx), pair_of, rp0, rp1, cp0, cp1),
-        "vedge": _rect_add((P,) + shapes["vedge"], pair_of, rp0, rp1, cp0, cp1 - 1),
-        "hedge": _rect_add((P,) + shapes["hedge"], pair_of, rp0, rp1 - 1, cp0, cp1),
-        "vertex": _rect_add((P, max(ny - 1, 1), max(nx - 1, 1)), pair_of, rp0, rp1 - 1, cp0, cp1 - 1),
+        "cell": _rect_add((K, ny, nx), kp, r0[planar], r1[planar], c0[planar], c1[planar]),
+        "vedge": _rect_add((K,) + shapes["vedge"], kp, r0[planar], r1[planar], c0[planar], c1[planar] - 1),
+        "hedge": _rect_add((K,) + shapes["hedge"], kp, r0[planar], r1[planar] - 1, c0[planar], c1[planar]),
+        "vertex": _rect_add((K, max(ny - 1, 1), max(nx - 1, 1)), kp, r0[planar], r1[planar] - 1, c0[planar], c1[planar] - 1),
     }
-    pair_of_traj = np.full(n_traj, -1, dtype=np.int64)
-    pair_of_traj[planar] = pair_of
-    for kind in sizes:  # real elements of planarized trajectories are not virtual
-        t = whole[kind] // sizes[kind]
-        e = whole[kind] % sizes[kind]
-        keep = pair_of_traj[t] >= 0
-        flat = cover[kind].reshape(P, -1) if P else cover[kind].reshape(0, sizes[kind])
-        np.subtract.at(flat, (pair_of_traj[t[keep]], e[keep]), 1)
-        cover[kind] = flat.reshape(cover[kind].shape)
-        if np.any(cover[kind] < 0):
+    is_planar = np.zeros(n_pieces, dtype=bool)
+    is_planar[planar] = True
+    for kind in sizes:
+        piece, element = elements[kind] // sizes[kind], elements[kind] % sizes[kind]
+        keep = is_planar[piece]
+        flat = np.ascontiguousarray(cover[kind]).reshape(K, -1)  # a copy for a strided slice
+        np.subtract.at(flat, (key_of_piece[piece[keep]], element[keep]), 1)
+        if np.any(flat < 0):
             raise AssertionError(f"negative virtual {kind} counts")
+        cover[kind] = flat.reshape(cover[kind].shape)
     if nx == 1:
         cover["vedge"][:] = 0
         cover["vertex"][:] = 0
@@ -364,17 +417,23 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
         return int(min(array.size, 2 * np.count_nonzero(array)))
 
     units = sum(stored(arrays[f"real/{k}"]) for k in sizes) + sum(stored(v) for v in cover.values())
-    units += 5 * int(sum(arrays[f"links/{k}/count"].size for k in sizes)) + 2 * P + buckets.boundaries.size
+    units += 4 * K + buckets.boundaries.size
+    whole = (lo == span_i[owner]) & (hi == span_j[owner])
     meta = {
         "method": "case_plus_temporal" if temporal else "case_plus", "temporal": bool(temporal),
         "unit_size_m": float(unit_size_m), "grid_shape": [ny, nx], "grid_cells": ny * nx,
-        "trajectories": n_traj, "planarized_trajectories": int(planar.size),
+        "trajectories": n_traj, "restricted_trajectories": int(n_pieces),
+        "planarized_trajectories": int(np.count_nonzero(problem[whole] & (faces[whole] > 0))),
+        "planarized_by_stage2": int(np.count_nonzero(stage2[whole])),
+        "planarized_as_non_tree": int(np.count_nonzero(~tree[whole] & ~stage2[whole])),
         "time_buckets_requested": int(time_buckets) if temporal else 1, "time_buckets": B,
         "time_bucket_depth": "segments by time midpoint (equi-depth)" if temporal else None,
-        "trajectory_spans": P, "links": link_total,
-        "stage2_rule": "two visited cells of one row/column not joined by a straight run of visited cells with crossed edges",
+        "longest_span_buckets": int((span_j - span_i).max() + 1), "keys": int(K),
+        "stage2_rule": ("two visited cells of one row/column not joined by a straight run of visited cells with "
+                        "crossed edges; additionally every trajectory whose cells and crossed edges are not a tree "
+                        "(a cycle, or a jump between segments) is planarized"),
         "theoretical_bytes": int(units * UNIT_BYTES),
-        "theoretical_bytes_rule": "8 bytes per entry; each histogram dense or as (index, value) pairs, whichever is smaller; 5 per link entry",
+        "theoretical_bytes_rule": "8 bytes per entry; each histogram dense or as (index, value) pairs, whichever is smaller",
     }
     return arrays, meta
 
@@ -406,72 +465,49 @@ class CaseModel:
         self.grid = Grid(np.asarray(arrays["grid/origin"]), float(np.asarray(arrays["grid/unit"])[0]),
                          (int(shape[0]), int(shape[1])))
         self.time = TimeBuckets(np.asarray(arrays["time/boundaries"], dtype=np.int64))
-        self.kinds = ("cell", "vedge", "hedge")
-        # real: cumulative over buckets, then 2D prefix -> any bucket range and rectangle in O(1)
-        self.real = {}
-        for kind in self.kinds:
-            values = np.asarray(arrays[f"real/{kind}"], dtype=np.int64)
-            cumulative = np.concatenate((np.zeros((1,) + values.shape[1:], dtype=np.int64), np.cumsum(values, axis=0)))
-            self.real[kind] = _prefix(cumulative)
-        self.links = {kind: {part: np.asarray(arrays[f"links/{kind}/{part}"], dtype=np.int64)
-                             for part in ("row", "col", "i", "j", "count")} for kind in self.kinds}
-        self.pairs = np.asarray(arrays["virtual/pairs"], dtype=np.int64).reshape(-1, 2)
-        self.virtual = {kind: np.asarray(arrays[f"virtual/{kind}"], dtype=np.int64)
-                        for kind in ("cell", "vedge", "hedge", "vertex")}
-        self.virtual_prefix = {kind: _prefix(values) for kind, values in self.virtual.items()}
+        self.keys = np.asarray(arrays["keys"], dtype=np.int64).reshape(-1, 4)
+        self.raw = {f"real/{k}": np.asarray(arrays[f"real/{k}"]) for k in ("cell", "vedge", "hedge")}
+        self.raw.update({f"virtual/{k}": np.asarray(arrays[f"virtual/{k}"]) for k in ("cell", "vedge", "hedge", "vertex")})
+        self.prefix = {name: _prefix(values) for name, values in self.raw.items()}
 
-    # -- restricted counts --------------------------------------------------
+    def selected(self, a: int, b: int) -> np.ndarray:
+        """Per trajectory span intersecting ``a..b``, the key of its restriction to ``a..b``."""
+        i, j, lo, hi = self.keys.T
+        return np.flatnonzero((i <= b) & (j >= a) & (lo == np.maximum(a, i)) & (hi == np.minimum(b, j)))
 
-    def _real_sum(self, kind: str, a: int, b: int, r0: int, r1: int, c0: int, c1: int) -> int:
-        if r1 < r0 or c1 < c0:
+    def _sum(self, name: str, keys: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> int:
+        if keys.size == 0 or r1 < r0 or c1 < c0:
             return 0
-        prefix = self.real[kind]
-        total = int(_rect_sum(prefix[b + 1], r0, r1, c0, c1) - _rect_sum(prefix[a], r0, r1, c0, c1))
-        links = self.links[kind]
-        if links["count"].size:
-            keep = ((links["i"] >= a) & (links["j"] <= b) & (links["row"] >= r0) & (links["row"] <= r1)
-                    & (links["col"] >= c0) & (links["col"] <= c1))
-            total -= int(links["count"][keep].sum())
-        return total
+        return int(_rect_sum(self.prefix[name][keys], r0, r1, c0, c1).sum())
 
-    def _pairs_in(self, a: int, b: int) -> np.ndarray:
-        if self.pairs.size == 0:
-            return np.zeros(0, dtype=np.int64)
-        return np.flatnonzero((self.pairs[:, 0] >= a) & (self.pairs[:, 1] <= b))
-
-    def _virtual_sum(self, kind: str, pairs: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> int:
-        if pairs.size == 0 or r1 < r0 or c1 < c0:
-            return 0
-        return int(_rect_sum(self.virtual_prefix[kind][pairs], r0, r1, c0, c1).sum())
-
-    def _virtual_min(self, kind: str, pairs: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> Optional[int]:
+    def _min(self, name: str, keys: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> Optional[int]:
         if r1 < r0 or c1 < c0:
             return None  # no such elements in the region
-        if pairs.size == 0:
+        if keys.size == 0:
             return 0
-        return int(self.virtual[kind][pairs, r0:r1 + 1, c0:c1 + 1].sum(axis=0).min())
+        return int(self.raw[name][keys, r0:r1 + 1, c0:c1 + 1].sum(axis=0).min())
 
     def count(self, rect: Tuple[int, int, int, int], a: int, b: int) -> float:
         r0, r1, c0, c1 = rect
-        faces = self._real_sum("cell", a, b, r0, r1, c0, c1)
+        keys = self.selected(a, b)
+        faces = self._sum("real/cell", keys, r0, r1, c0, c1)
         if faces == 0:
             return 0.0
-        pairs = self._pairs_in(a, b)
-        edges = self._real_sum("vedge", a, b, r0, r1, c0, c1 - 1) + self._real_sum("hedge", a, b, r0, r1 - 1, c0, c1)
-        vfaces = self._virtual_sum("cell", pairs, r0, r1, c0, c1)
-        vedges = (self._virtual_sum("vedge", pairs, r0, r1, c0, c1 - 1)
-                  + self._virtual_sum("hedge", pairs, r0, r1 - 1, c0, c1))
+        edges = self._sum("real/vedge", keys, r0, r1, c0, c1 - 1) + self._sum("real/hedge", keys, r0, r1 - 1, c0, c1)
+        vfaces = self._sum("virtual/cell", keys, r0, r1, c0, c1)
+        vedges = (self._sum("virtual/vedge", keys, r0, r1, c0, c1 - 1)
+                  + self._sum("virtual/hedge", keys, r0, r1 - 1, c0, c1))
         line = r1 == r0 or c1 == c0
-        vvertices = 0 if line else self._virtual_sum("vertex", pairs, r0, r1 - 1, c0, c1 - 1)
+        vvertices = 0 if line else self._sum("virtual/vertex", keys, r0, r1 - 1, c0, c1 - 1)
         n = (faces + vfaces) - (edges + vedges) + vvertices
         if self.plus:
-            minima = [self._virtual_min("cell", pairs, r0, r1, c0, c1)]
-            edge_minima = [m for m in (self._virtual_min("vedge", pairs, r0, r1, c0, c1 - 1),
-                                       self._virtual_min("hedge", pairs, r0, r1 - 1, c0, c1)) if m is not None]
+            minima = [self._min("virtual/cell", keys, r0, r1, c0, c1)]
+            edge_minima = [m for m in (self._min("virtual/vedge", keys, r0, r1, c0, c1 - 1),
+                                       self._min("virtual/hedge", keys, r0, r1 - 1, c0, c1)) if m is not None]
             if edge_minima:
                 minima.append(min(edge_minima))
             if not line:
-                minima.append(self._virtual_min("vertex", pairs, r0, r1 - 1, c0, c1 - 1))
+                minima.append(self._min("virtual/vertex", keys, r0, r1 - 1, c0, c1 - 1))
             n -= min(m for m in minima if m is not None)
         return float(max(n, 0))
 
