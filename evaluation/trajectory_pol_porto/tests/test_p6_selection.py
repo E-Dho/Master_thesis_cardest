@@ -24,8 +24,11 @@ def _write(path: Path, rows, coverage="c" * 64, run_directory="r"):
                              "coverage_sha256": coverage, "run_directory": run_directory})
 
 
-def _predictions(run: Path, statuses):
+def _predictions(run: Path, statuses, benchmark_sha="b" * 64):
     run.mkdir(parents=True, exist_ok=True)
+    (run / "run_manifest.json").write_text(json.dumps({"workloads": {"validation_multi": {
+        "queries_jsonl_sha256": benchmark_sha, "select": {"relation": "multi"},
+        "query_id_rule": "0-based position within the selection, in file order", "query_count": len(statuses)}}}))
     lines = ["workload,query_id,status,true_cardinality,estimated_cardinality,raw_q_error,smoothed_q_error,diagnostic"]
     lines += [f"validation_multi,{i},{status},1,,,," for i, status in enumerate(statuses)]
     (run / "predictions.csv").write_text("\n".join(lines) + "\n")
@@ -69,6 +72,14 @@ class SelectionTest(unittest.TestCase):
             _predictions(root / "r1", ["ok", "unsupported", "ok"])
             _predictions(root / "r2", ["ok", "ok", "unsupported"])  # same count, other queries
             self.assertNotEqual(coverage_sha256(root / "r1"), coverage_sha256(root / "r2"))
+            # same ids and statuses, but another benchmark file: other queries
+            _predictions(root / "r3", ["ok", "unsupported", "ok"], benchmark_sha="e" * 64)
+            self.assertNotEqual(coverage_sha256(root / "r1"), coverage_sha256(root / "r3"))
+            _predictions(root / "r4", ["ok", "unsupported", "ok"])
+            self.assertEqual(coverage_sha256(root / "r1"), coverage_sha256(root / "r4"))
+            (root / "r4" / "run_manifest.json").write_text(json.dumps({"workloads": {}}))
+            with self.assertRaisesRegex(ValueError, "queries_jsonl_sha256"):
+                coverage_sha256(root / "r4")
             # files written before the column existed: recomputed from the run directories
             a, b = root / "a.csv", root / "b.csv"
             _write(a, [({"u": 1}, 1.0, 2.0, 3.0, 100)], coverage="", run_directory=str(root / "r1"))

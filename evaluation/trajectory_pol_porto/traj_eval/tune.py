@@ -88,10 +88,26 @@ def tuning_raw(raw: Dict[str, Any], parameters: Dict[str, Any], validation_jsonl
     return raw
 
 
+BENCHMARK_FIELDS = ("queries_jsonl_sha256", "select", "query_id_rule", "query_count")
+
+
 def coverage_sha256(run: Path, workload: str = "validation_multi") -> str:
-    """Fingerprint of which queries a run answered: sha256 over sorted ``query_id:status`` lines."""
+    """Fingerprint of which queries a run answered, bound to the benchmark they come from.
+
+    Query ids are positions within the workload selection, so the same ids of
+    another benchmark file (or selection) are other queries. The fingerprint
+    hashes the workload's identity from ``run_manifest.json`` (benchmark file
+    sha256, selection, id rule, query count) followed by the sorted
+    ``query_id:status`` lines of ``predictions.csv``.
+    """
     import hashlib
 
+    manifest = json.loads((Path(run) / "run_manifest.json").read_text(encoding="utf-8"))
+    identity = (manifest.get("workloads") or {}).get(workload) or {}
+    missing = [key for key in BENCHMARK_FIELDS if identity.get(key) in (None, "")]
+    if missing:
+        raise ValueError(f"{run}: run_manifest.json has no {missing} for workload {workload}")
+    header = json.dumps({key: identity[key] for key in BENCHMARK_FIELDS}, sort_keys=True)
     lines = []
     with (Path(run) / "predictions.csv").open(encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
@@ -99,7 +115,9 @@ def coverage_sha256(run: Path, workload: str = "validation_multi") -> str:
                 lines.append((int(row["query_id"]), row["status"]))
     if not lines:
         raise ValueError(f"no {workload} predictions in {run}")
-    text = "".join(f"{query_id}:{status}\n" for query_id, status in sorted(lines))
+    if len(lines) != int(identity["query_count"]):
+        raise ValueError(f"{run}: {len(lines)} predictions for {identity['query_count']} queries")
+    text = header + "\n" + "".join(f"{query_id}:{status}\n" for query_id, status in sorted(lines))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 

@@ -55,9 +55,9 @@ def read_rows(paths: Iterable[Path]) -> List[Dict[str, Any]]:
                 row["source"] = str(path)
                 if not row.get("coverage_sha256"):
                     run = Path(row.get("run_directory") or "")
-                    if not (run / "predictions.csv").is_file():
-                        raise ValueError(f"{path}: no coverage_sha256 and no predictions.csv for "
-                                         f"{row['parameters']} (run directory {run})")
+                    if not ((run / "predictions.csv").is_file() and (run / "run_manifest.json").is_file()):
+                        raise ValueError(f"{path}: no coverage_sha256 and no predictions.csv / run_manifest.json "
+                                         f"for {row['parameters']} (run directory {run})")
                     row["coverage_sha256"] = coverage_sha256(run)
                 key = json.dumps(row["parameters"], sort_keys=True)
                 if key in rows:
