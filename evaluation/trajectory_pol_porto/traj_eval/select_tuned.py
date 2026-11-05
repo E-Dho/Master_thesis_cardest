@@ -28,11 +28,22 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from .tune import coverage_sha256
+
 NUMERIC = ("query_count", "scored_count", "coverage_fraction", "q_p50", "q_p90", "q_p95", "q_p99", "q_max",
            "zero_estimate_count", "serialized_bytes", "theoretical_bytes", "build_seconds")
 
 
+COMPARED = NUMERIC + ("variant_id", "coverage_sha256")
+
+
 def read_rows(paths: Iterable[Path]) -> List[Dict[str, Any]]:
+    """Rows of all files, one per setting; a setting repeated with any differing field is an error.
+
+    ``coverage_sha256`` (which queries a run answered) is taken from the file,
+    or recomputed from the run's ``predictions.csv`` for files written before
+    the column existed; a row whose coverage cannot be established is refused.
+    """
     rows: Dict[str, Dict[str, Any]] = {}
     for path in paths:
         with Path(path).open(encoding="utf-8", newline="") as handle:
@@ -42,9 +53,17 @@ def read_rows(paths: Iterable[Path]) -> List[Dict[str, Any]]:
                         row[key] = float(row[key])
                 row["parameters"] = json.loads(row["parameters"])
                 row["source"] = str(path)
+                if not row.get("coverage_sha256"):
+                    run = Path(row.get("run_directory") or "")
+                    if not (run / "predictions.csv").is_file():
+                        raise ValueError(f"{path}: no coverage_sha256 and no predictions.csv for "
+                                         f"{row['parameters']} (run directory {run})")
+                    row["coverage_sha256"] = coverage_sha256(run)
                 key = json.dumps(row["parameters"], sort_keys=True)
-                if key in rows and rows[key]["q_p90"] != row["q_p90"]:
-                    raise ValueError(f"setting {key} appears twice with different results")
+                if key in rows:
+                    differing = [k for k in COMPARED if rows[key].get(k) != row.get(k)]
+                    if differing:
+                        raise ValueError(f"setting {key} appears twice with different {differing}")
                 rows[key] = row
     return list(rows.values())
 
@@ -56,9 +75,9 @@ def _rank(row: Dict[str, Any]):
 def select(rows: Sequence[Dict[str, Any]], budget_bytes: Optional[float]) -> Dict[str, Any]:
     if not rows:
         raise ValueError("no tuning rows")
-    coverage = {row["scored_count"] for row in rows}
+    coverage = {(row["scored_count"], row["coverage_sha256"]) for row in rows}
     if len(coverage) != 1:
-        raise ValueError(f"settings answer different query sets: scored counts {sorted(coverage)}")
+        raise ValueError(f"settings answer different query sets: {sorted(coverage)}")
     best = min(rows, key=_rank)
     fitting = [row for row in rows if budget_bytes is not None and row["serialized_bytes"] <= budget_bytes]
     budget = min(fitting, key=_rank) if fitting else None
@@ -69,7 +88,7 @@ def select(rows: Sequence[Dict[str, Any]], budget_bytes: Optional[float]) -> Dic
             return None
         return {key: row[key] for key in ("parameters", "variant_id", "scored_count", "coverage_fraction", "q_p50",
                                           "q_p90", "q_p99", "q_max", "zero_estimate_count", "serialized_bytes",
-                                          "theoretical_bytes", "source")}
+                                          "theoretical_bytes", "coverage_sha256", "source")}
 
     return {"settings": len(rows), "budget_bytes": budget_bytes, "budget": brief(budget), "best": brief(best),
             "smallest": brief(smallest), "best_over_budget_factor":

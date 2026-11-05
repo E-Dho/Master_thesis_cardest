@@ -19,7 +19,12 @@ import io
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:  # the ResMADE classes live in model/src
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 def _sha256(path: Path) -> str:
@@ -30,7 +35,23 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def measure(path: Path) -> Dict[str, Any]:
+def _resmade(payload: Dict[str, Any]) -> Any:
+    """The ResMADE module of a checkpoint payload (to tell parameters from buffers)."""
+    from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
+
+    model = PredicateResMADE(PredicateResMADEConfig.from_json_dict(payload["resmade_config"]))
+    model.load_state_dict(payload["model_state_dict"])
+    return model
+
+
+def measure(path: Path, build_module: Optional[Callable[[Dict[str, Any]], Any]] = None) -> Dict[str, Any]:
+    """Sizes of one checkpoint; ``build_module`` rebuilds the module (default: ResMADE).
+
+    The state dict holds learnable parameters *and* buffers (MADE masks, lookup
+    tables); ``parameters`` / ``parameter_bytes`` count only ``module.parameters()``,
+    ``buffers`` / ``buffer_bytes`` the rest. All of it is part of the
+    inference-only size.
+    """
     import torch
 
     try:
@@ -41,6 +62,9 @@ def measure(path: Path) -> Dict[str, Any]:
         raise ValueError(f"{path} is not a ResMADE training checkpoint (no model_state_dict)")
     state = payload["model_state_dict"]
     tensors = [value for value in state.values() if hasattr(value, "numel")]
+    module = (build_module or _resmade)(payload)
+    parameters = list(module.parameters())
+    buffers = list(module.buffers())
     reduced = dict(payload)
     reduced["optimizer_state_dict"] = None
     buffer = io.BytesIO()
@@ -53,8 +77,11 @@ def measure(path: Path) -> Dict[str, Any]:
         "checkpoint_sha256": _sha256(path),
         "has_optimizer_state": payload.get("optimizer_state_dict") is not None,
         "inference_only_bytes": buffer.getbuffer().nbytes,
-        "parameters": int(sum(t.numel() for t in tensors)),
-        "parameter_bytes": int(sum(t.numel() * t.element_size() for t in tensors)),
+        "parameters": int(sum(t.numel() for t in parameters)),
+        "parameter_bytes": int(sum(t.numel() * t.element_size() for t in parameters)),
+        "buffers": int(sum(t.numel() for t in buffers)),
+        "buffer_bytes": int(sum(t.numel() * t.element_size() for t in buffers)),
+        "state_dict_tensor_bytes": int(sum(t.numel() * t.element_size() for t in tensors)),
         "step": payload.get("step"),
         "epoch": payload.get("epoch"),
         "trajectory_distinct_enabled": bool(trajectory.get("enabled", False)),

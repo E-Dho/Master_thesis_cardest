@@ -6,7 +6,8 @@ validation benchmark's multi queries only, under the experiment id
 ``<experiment>_tuning`` (so tuning runs never mix with the test runs), and one
 row per combination is written to ``tuning.csv`` / ``tuning.json``:
 coverage, smoothed Q-error p50/p90/p95/p99/max on the supported queries
-(zero estimates included), the zero-estimate count, the
+(zero estimates included), the zero-estimate count, a fingerprint of the
+answered query set (``coverage_sha256``), the
 serialized model size and the method's theoretical size, and build seconds.
 Choosing a configuration (under the memory budget) is a separate, documented
 decision.
@@ -36,7 +37,7 @@ from evaluation.eval_core.runner import run_seed
 
 COLUMNS = ("variant_id", "parameters", "query_count", "scored_count", "coverage_fraction",
            "q_p50", "q_p90", "q_p95", "q_p99", "q_max", "zero_estimate_count", "serialized_bytes",
-           "theoretical_bytes", "build_seconds", "run_directory")
+           "theoretical_bytes", "build_seconds", "coverage_sha256", "run_directory")
 
 
 def _parse_value(text: str) -> Any:
@@ -87,6 +88,21 @@ def tuning_raw(raw: Dict[str, Any], parameters: Dict[str, Any], validation_jsonl
     return raw
 
 
+def coverage_sha256(run: Path, workload: str = "validation_multi") -> str:
+    """Fingerprint of which queries a run answered: sha256 over sorted ``query_id:status`` lines."""
+    import hashlib
+
+    lines = []
+    with (Path(run) / "predictions.csv").open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row["workload"] == workload:
+                lines.append((int(row["query_id"]), row["status"]))
+    if not lines:
+        raise ValueError(f"no {workload} predictions in {run}")
+    text = "".join(f"{query_id}:{status}\n" for query_id, status in sorted(lines))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def row_of(run: Path, parameters: Dict[str, Any], variant_id: str) -> Dict[str, Any]:
     summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
     accuracy = summary["workloads"]["validation_multi"]["accuracy"]
@@ -102,6 +118,7 @@ def row_of(run: Path, parameters: Dict[str, Any], variant_id: str) -> Dict[str, 
         "serialized_bytes": artifacts.get("serialized_bytes"),
         "theoretical_bytes": artifacts.get("theoretical_bytes"),
         "build_seconds": build.get("total_build_seconds"),
+        "coverage_sha256": coverage_sha256(run),
         "run_directory": str(run),
     }
 
