@@ -435,6 +435,16 @@ REPO_ROOT=$PWD STAGE=tune evaluation/trajectory_pol_porto/slurm/submit_p6.sh   #
 REPO_ROOT=$PWD STAGE=run  evaluation/trajectory_pol_porto/slurm/submit_p6.sh   # test runs + comparison
 ```
 
+**Selection (decided 2026-11-05).** Two settings per method, both from the
+validation sweeps (`traj_eval/select_tuned.py`): `budget` = the most accurate
+setting whose serialized size fits the 1x budget (the own model's
+inference-only size, measured with `scripts/own_model_size.py`: the training
+checkpoint re-serialized without its optimizer state), and `best` = the most
+accurate setting regardless of size. "Most accurate" = lowest validation
+smoothed Q-error p90, ties by p99, p50, then size. Both are evaluated on the
+test set, so the thesis can show each method at equal size and at its best,
+with the cost of the latter.
+
 The in-process environment needs pandas and scipy (upstream imports them);
 `prepare` records their versions and fails early without them.
 
