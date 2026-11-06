@@ -1,5 +1,8 @@
 #!/bin/bash
-# Segment-MBR overcount statistic on the snapshot (no database).
+# Segment-MBR overcount statistic on the snapshot (no database): a checksum
+# verification of the snapshot, then the shard array (after the verification
+# succeeded), then the merge. The source files must be committed (the shards
+# refuse uncommitted changes).
 #   ./submit_mbr_overcount.sh                       test workload, 16 shards
 #   WORKLOAD=validation ./submit_mbr_overcount.sh   the validation workload
 #   OVERCOUNT_SHARDS=8 ./submit_mbr_overcount.sh    other shard count (new results only)
@@ -20,7 +23,9 @@ if [ ! -f "$benchmark" ] || [ ! -f "$SNAPSHOT_DIR/manifest.json" ]; then
 fi
 export_vars="ALL,REPO_ROOT=$REPO_ROOT,TRAJ_DATASET=$TRAJ_DATASET,SNAPSHOT_DIR=$SNAPSHOT_DIR,V3_CONFIG=$V3_CONFIG,TEST_BENCHMARK=$TEST_BENCHMARK,VALIDATION_BENCHMARK=$VALIDATION_BENCHMARK,WORKLOAD=$WORKLOAD"
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }
-array=$(submit --array=0-$((SHARDS - 1)) --export="$export_vars,OVERCOUNT_SHARDS=$SHARDS" "$SCRIPT_DIR/mbr_overcount.sbatch")
+verify=$(submit --export="$export_vars" "$SCRIPT_DIR/mbr_overcount_verify.sbatch")
+array=$(submit --dependency="afterok:$verify" --array=0-$((SHARDS - 1)) --export="$export_vars,OVERCOUNT_SHARDS=$SHARDS" "$SCRIPT_DIR/mbr_overcount.sbatch")
 merge=$(submit --dependency="afterany:$array" --export="$export_vars" "$SCRIPT_DIR/mbr_overcount_merge.sbatch")
+echo "overcount_verify=$verify"
 echo "overcount_array=$array ($SHARDS shards)"
 echo "overcount_merge=$merge -> $SNAPSHOT_DIR/analysis/mbr_overcount/${WORKLOAD}_report.md"

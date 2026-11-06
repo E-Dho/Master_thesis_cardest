@@ -171,8 +171,18 @@ predicate: *corner* (both endpoints outside the window, line misses it, MBR
 overlaps it: the false positives) and *crossing* (both endpoints outside, line
 passes through: correct). Multi queries count distinct trips, single queries
 segment rows; `standard.*` and `temporal.*` queries are excluded (no spatial
-predicate). Sharded, resumable and input-bound like the gate (the binding also
-records the code revision).
+predicate). Sharded and resumable like the gate.
+
+Provenance and gates: a `verify` step checks every snapshot array against its
+manifest checksum once (`snapshot_verification.json`, with each array's size
+and mtime); shards and merge refuse to start without it or if an array changed
+since. The results directory is bound to the manifest, benchmark, config,
+shard count, statistic version, git revision and a SHA-256 over the source
+files of the computation; shards refuse uncommitted source changes
+(`--allow-dirty` for local experiments only). The merge fails on any label
+mismatch and on any query that violates `exact <= decoupled <= mbr`, the
+segment partition `mbr = exact + corner + decoupled_only`, or has a segment
+with an endpoint inside the window whose line misses it.
 
 ```bash
 REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_mbr_overcount.sh   # WORKLOAD=test, 16 shards

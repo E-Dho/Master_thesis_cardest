@@ -39,12 +39,30 @@ queries, whose time span overlaps ``[L, U]``.
 Queries without a spatial or spatio-temporal predicate (``standard.*``,
 ``temporal.*``) cannot be affected and are only counted as excluded.
 
+Provenance. ``verify`` re-checks every snapshot array against the SHA-256 in
+the manifest once and writes ``snapshot_verification.json`` (with the size and
+mtime of every array); ``run`` and ``merge`` refuse to start unless that record
+exists for the same manifest and every array still has the recorded size and
+mtime. Every results directory is bound (``binding.json``) to the snapshot
+manifest, benchmark, config, shard count, statistic version, the git revision
+and a SHA-256 over the source files of the computation; ``run`` refuses source
+files with uncommitted changes (``--allow-dirty`` only for local experiments;
+the source hash still tells two dirty states apart).
+
+Invariants. ``merge`` fails on any label mismatch and on any query violating
+``exact <= decoupled <= mbr``, the segment partition
+``mbr = exact + corner + decoupled_only + endpoint_anomaly``, a nonzero
+endpoint anomaly (a line with an endpoint inside ``W`` that misses ``W``) or,
+for single queries, segment counts that disagree with the row counts.
+
 Work is sharded and resumable exactly like the label gate (``snapshot_gate``):
 ``run`` appends one fsynced JSON line per query, ``merge`` checks completeness
 and writes the report (JSON, with the ids of all overcounted queries), a
 Markdown table, a CSV of every evaluated query and a CSV of only the
 overcounted queries (``mbr_count > exact_count``), most overcounted first.
 
+    python -m evaluation.trajectory_pol_porto.traj_eval.mbr_overcount verify \\
+        --snapshot DIR --results-dir OUT
     python -m evaluation.trajectory_pol_porto.traj_eval.mbr_overcount run \\
         --snapshot DIR --config pol_v3_config.json --benchmark benchmark.jsonl \\
         --results-dir OUT --shard 0 --shards 16
@@ -56,6 +74,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -71,9 +91,24 @@ import numpy as np
 from .snapshot_gate import EXIT_DEADLINE, BindingError, _done, _rows, _sha256, _shard_path, bind_results_dir
 
 STATISTIC = "segment_mbr_overcount"
-STATISTIC_VERSION = 1
+STATISTIC_VERSION = 2  # 2: corner requires both endpoints outside; provenance and invariant gates
 SPATIAL_KINDS = ("spatial", "spatio_temporal")
 REPO_ROOT = Path(__file__).resolve().parents[3]
+VERIFICATION_FILE = "snapshot_verification.json"
+# every module whose code decides a number in the report
+SOURCE_MODULES = (
+    "evaluation.trajectory_pol_porto.traj_eval.mbr_overcount",
+    "evaluation.trajectory_pol_porto.traj_eval.snapshot_gate",
+    "evaluation.trajectory_pol_porto.traj_eval.snapshot",
+    "query_generation.benchmark_v3.numpy_backend",
+    "query_generation.benchmark_v3.exact",
+    "query_generation.benchmark_v3.config",
+    "query_generation.query_generator",
+)
+
+
+class ProvenanceError(RuntimeError):
+    """The inputs or the code cannot be tied to a unique, verified state."""
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +271,7 @@ def evaluate_query(backend, record: Dict[str, Any]) -> Dict[str, Any]:
         "ratio_mbr_to_exact": mbr_count / exact_count if exact_count else None,
         "segments_mbr": count(everything),
         "segments_exact": count(coupled),
-        "segments_corner": count(~line),
+        "segments_corner": count(both_outside & ~line),
         "segments_decoupled_only": count(line & ~coupled),
         "segments_both_endpoints_outside": count(both_outside),
         "segments_crossing": count(both_outside & line),
@@ -248,26 +283,73 @@ def evaluate_query(backend, record: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def invariant_violations(item: Dict[str, Any]) -> List[str]:
+    """Checks every stored result must pass; any violation fails the merge."""
+
+    problems = []
+    if not item["exact_count"] <= item["decoupled_count"] <= item["mbr_count"]:
+        problems.append("nesting exact <= decoupled <= mbr")
+    if item["dimension"] == "spatial" and item["decoupled_count"] != item["exact_count"]:
+        problems.append("spatial query with decoupled != exact")
+    if item["anomaly_endpoint_inside_line_misses"]:
+        problems.append("line with an endpoint inside the window misses it")
+    if item["segments_mbr"] != (item["segments_exact"] + item["segments_corner"] + item["segments_decoupled_only"]
+                                + item["anomaly_endpoint_inside_line_misses"]):
+        problems.append("segment partition mbr = exact + corner + decoupled_only + anomaly")
+    if not item["segments_crossing"] + item["segments_corner"] <= item["segments_both_endpoints_outside"]:
+        problems.append("crossing + corner exceed the segments with both endpoints outside")
+    if item["relation"] == "single" and (item["segments_exact"] != item["exact_count"]
+                                         or item["segments_mbr"] != item["mbr_count"]):
+        problems.append("single query whose segment counts differ from its row counts")
+    if item["dimension"] == "spatial" and item["segments_decoupled_only"]:
+        problems.append("spatial query with decoupling-only segments")
+    return problems
+
+
 # ---------------------------------------------------------------------------
 # Sharded, resumable run
 
 
-def code_revision() -> str:
+def source_files() -> List[Path]:
+    return [Path(importlib.import_module(name).__file__).resolve() for name in SOURCE_MODULES]
+
+
+def source_sha256() -> str:
+    """SHA-256 over the relative paths and contents of :data:`SOURCE_MODULES`."""
+
+    digest = hashlib.sha256()
+    for path in sorted(source_files()):
+        digest.update(str(path.relative_to(REPO_ROOT)).encode() + b"\0")
+        digest.update(_sha256(path).encode() + b"\n")
+    return digest.hexdigest()
+
+
+def code_state() -> Dict[str, Any]:
+    """Git revision and whether any source file differs from it (None: not a git checkout)."""
+
+    paths = [str(path.relative_to(REPO_ROOT)) for path in source_files()]
     try:
         revision = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True,
                                   text=True, check=True).stdout.strip()
-        dirty = subprocess.run(["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, check=True).stdout.strip()
-        return revision + ("-dirty" if dirty else "")
+        status = subprocess.run(["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--", *paths],
+                                capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+        return {"code_revision": None, "source_files_modified": None}
+    return {"code_revision": revision, "source_files_modified": bool(status)}
 
 
-def binding(snapshot: Path, benchmark: Path, config_sha256: str, shards: int) -> Dict[str, Any]:
+def binding(snapshot: Path, benchmark: Path, config_sha256: str, shards: int, *,
+            allow_dirty: bool = False) -> Dict[str, Any]:
+    state = code_state()
+    if not allow_dirty and (state["code_revision"] is None or state["source_files_modified"]):
+        raise ProvenanceError(
+            "the source files are not a committed git state "
+            f"({state}); commit them, or pass --allow-dirty for a local experiment")
     return {
         "statistic": STATISTIC,
         "statistic_version": STATISTIC_VERSION,
-        "code_revision": code_revision(),
+        **state,
+        "source_sha256": source_sha256(),
         "snapshot_manifest_sha256": _sha256(Path(snapshot) / "manifest.json"),
         "benchmark_sha256": _sha256(Path(benchmark)),
         "config_sha256": config_sha256,
@@ -275,12 +357,76 @@ def binding(snapshot: Path, benchmark: Path, config_sha256: str, shards: int) ->
     }
 
 
+def _loaded_arrays(snapshot: Path) -> List[str]:
+    """Manifest paths of every array ``load_snapshot`` reads."""
+
+    from .snapshot import read_manifest
+
+    manifest = read_manifest(snapshot)
+    return sorted(f"tables/{table_id}/{column}.npy"
+                  for table_id, table in manifest["tables"].items() for column in table["columns"])
+
+
+def _stats(snapshot: Path, relative: Iterable[str]) -> Dict[str, List[int]]:
+    stats = {}
+    for name in relative:
+        info = (Path(snapshot) / name).stat()
+        stats[name] = [info.st_size, info.st_mtime_ns]
+    return stats
+
+
+def verify(snapshot: Path, results_dir: Path, log=print) -> Dict[str, Any]:
+    """Check every snapshot array against its manifest checksum; record the result."""
+
+    from .snapshot import read_manifest, verify_snapshot
+
+    snapshot = Path(snapshot)
+    started = time.time()
+    problems = verify_snapshot(snapshot)
+    listed = set(read_manifest(snapshot)["files"])
+    loaded = _loaded_arrays(snapshot)
+    problems += [f"{name} is read but has no checksum in the manifest" for name in loaded if name not in listed]
+    record = {
+        "snapshot": str(snapshot),
+        "snapshot_manifest_sha256": _sha256(snapshot / "manifest.json"),
+        "passed": not problems,
+        "problems": problems[:200],
+        "files_checked": len(listed),
+        "array_stats": _stats(snapshot, sorted(listed)),
+        "seconds": round(time.time() - started, 2),
+        "verified_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    results_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / VERIFICATION_FILE).write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    log(f"snapshot verification: passed={record['passed']} files={len(listed)} problems={len(problems)}")
+    return record
+
+
+def require_verified(snapshot: Path, results_dir: Path) -> Dict[str, Any]:
+    """Refuse unless ``verify`` passed for this manifest and no array changed since (size, mtime)."""
+
+    path = results_dir / VERIFICATION_FILE
+    if not path.exists():
+        raise ProvenanceError(f"{path} is missing; run the verify step first")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not record.get("passed"):
+        raise ProvenanceError(f"snapshot verification failed: {record.get('problems')}")
+    if record.get("snapshot_manifest_sha256") != _sha256(Path(snapshot) / "manifest.json"):
+        raise ProvenanceError("snapshot verification was done for another manifest")
+    loaded = _loaded_arrays(snapshot)
+    missing = [name for name in loaded if name not in record["array_stats"]]
+    changed = [name for name, stat in _stats(snapshot, loaded).items() if record["array_stats"].get(name) != stat]
+    if missing or changed:
+        raise ProvenanceError(f"snapshot arrays changed since verification: {(missing + changed)[:5]}")
+    return record
+
+
 def selected_rows(benchmark: Path) -> List[Dict[str, Any]]:
     return [row for row in _rows(benchmark) if spatial_predicate(row) is not None]
 
 
 def run_shard(snapshot: Path, config: Path, benchmark: Path, results_dir: Path, shard: int, shards: int,
-              deadline_seconds: Optional[float] = None, log=print) -> int:
+              deadline_seconds: Optional[float] = None, log=print, *, allow_dirty: bool = False) -> int:
     from query_generation.benchmark_v3.config import load_settings
 
     from .snapshot import load_snapshot
@@ -288,11 +434,12 @@ def run_shard(snapshot: Path, config: Path, benchmark: Path, results_dir: Path, 
     if not 0 <= shard < shards:
         raise ValueError("--shard must be in [0, --shards)")
     started = time.time()
+    require_verified(snapshot, results_dir)
     settings = load_settings(config)
+    bind_results_dir(results_dir, binding(snapshot, benchmark, settings.sha256, shards, allow_dirty=allow_dirty))
     data = load_snapshot(snapshot, expected_config_sha256=settings.sha256)
     backend = _backend_class()(settings, data)
     rows = [row for position, row in enumerate(selected_rows(benchmark)) if position % shards == shard]
-    bind_results_dir(results_dir, binding(snapshot, benchmark, settings.sha256, shards))
     path = _shard_path(results_dir, shard, shards)
     done = _done(path)
     hashes = {row["query_id"]: row["predicate_hash"] for row in rows}
@@ -318,6 +465,8 @@ def run_shard(snapshot: Path, config: Path, benchmark: Path, results_dir: Path, 
             os.fsync(handle.fileno())
             if not item["match"]:
                 log(f"MISMATCH {item}")
+            for problem in invariant_violations(item):
+                log(f"INVARIANT {item['query_id']}: {problem}")
     log(f"shard {shard}/{shards} finished")
     return 0
 
@@ -390,10 +539,13 @@ def markdown(report: Dict[str, Any]) -> str:
         "",
         f"Benchmark `{report['benchmark']}` (sha256 `{report['benchmark_sha256'][:16]}…`), "
         f"snapshot manifest sha256 `{report['snapshot_manifest_sha256'][:16]}…`, "
-        f"code `{report['binding']['code_revision']}`, statistic v{report['binding']['statistic_version']}.",
+        f"code `{report['binding']['code_revision']}` (source sha256 `{report['binding']['source_sha256'][:16]}…`), "
+        f"statistic v{report['binding']['statistic_version']}; snapshot arrays verified against the manifest "
+        f"({report['snapshot_verification']['files_checked']} files).",
         f"{report['queries_total']} queries in the benchmark, {report['queries_evaluated']} with a spatial or "
         f"spatio-temporal predicate (the others cannot be affected). Exact count = stored label for "
-        f"{report['queries_evaluated'] - report['mismatch_count']} of {report['queries_evaluated']}.",
+        f"{report['queries_evaluated'] - report['mismatch_count']} of {report['queries_evaluated']}; "
+        f"invariant violations: {report['invariant_violation_count']}.",
         "",
         "Counts are distinct trajectories for multi queries and segment rows for single queries. "
         "*Corner* segments: start and end outside the window, line misses it, box overlaps it. "
@@ -420,8 +572,9 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
     if not binding_path.exists():
         raise BindingError(f"{results_dir} has no binding.json")
     bound = json.loads(binding_path.read_text(encoding="utf-8"))
-    if bound.get("statistic") != STATISTIC:
-        raise BindingError(f"{results_dir} holds results of another statistic")
+    if bound.get("statistic") != STATISTIC or bound.get("statistic_version") != STATISTIC_VERSION:
+        raise BindingError(f"{results_dir} holds results of another statistic or version")
+    verification = require_verified(snapshot, results_dir)
     for key, value in (("benchmark_sha256", _sha256(benchmark)),
                        ("snapshot_manifest_sha256", _sha256(Path(snapshot) / "manifest.json"))):
         if bound.get(key) != value:
@@ -441,8 +594,9 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
     unexpected = sorted(set(found) - set(expected))
     foreign = sorted(q for q, item in found.items() if q in expected and item["predicate_hash"] != expected[q]["predicate_hash"])
     mismatches = sorted((item for item in found.values() if not item["match"]), key=lambda item: item["query_id"])
-    anomalies = sorted(q for q, item in found.items() if item["anomaly_endpoint_inside_line_misses"])
     items = [found[q] for q in sorted(found) if q in expected]
+    violations = [{"query_id": item["query_id"], "problems": problems}
+                  for item in items for problems in [invariant_violations(item)] if problems]
 
     groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for item in items:
@@ -453,10 +607,12 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
             groups[f"{item['dimension']} multi, {item['addon_predicates']} add-on(s)"].append(item)
     order = sorted(groups, key=lambda name: (not name.startswith("all"), name.count("."), name))
     report = {
-        "passed": not (missing or unexpected or duplicates or foreign or mismatches),
+        "passed": not (missing or unexpected or duplicates or foreign or mismatches or violations),
         "statistic": STATISTIC,
         "binding": bound,
-        "merge_code_revision": code_revision(),
+        "merge_code_state": {**code_state(), "source_sha256": source_sha256()},
+        "snapshot_verification": {key: verification[key] for key in (
+            "passed", "files_checked", "snapshot_manifest_sha256", "verified_at_utc", "seconds")},
         "benchmark": str(benchmark),
         "benchmark_sha256": bound["benchmark_sha256"],
         "snapshot": str(snapshot),
@@ -471,7 +627,8 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
         "unexpected": unexpected[:200],
         "duplicates": duplicates[:200],
         "predicate_hash_mismatches": foreign[:200],
-        "anomaly_queries": anomalies[:200],
+        "invariant_violation_count": len(violations),
+        "invariant_violations": violations[:200],
         "groups": {name: summarize(groups[name]) for name in order},
         "overcounted_query_ids": [item["query_id"] for item in items if item["mbr_count"] > item["exact_count"]],
         "seconds_total": round(sum(item.get("seconds", 0.0) for item in items), 2),
@@ -481,6 +638,7 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
             "decoupled_count": "segment line meets the window and segment time span meets the interval, tested separately",
             "mbr_count": "segment MBR overlaps the window (and time span meets the interval for spatio-temporal queries)",
             "segments_corner": "both endpoints outside the window, line misses it, MBR overlaps it (MBR false positive)",
+            "anomaly_endpoint_inside_line_misses": "an endpoint inside the window but the line misses it; must be 0",
             "segments_crossing": "both endpoints outside the window, line passes through it (true positive)",
             "segment_scope": "segments satisfying every other predicate of the query (and the interval, if spatio-temporal)",
         },
@@ -504,6 +662,9 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Segment-MBR overcount of the benchmark's spatial predicates")
     sub = parser.add_subparsers(dest="command", required=True)
+    check = sub.add_parser("verify", help="check the snapshot arrays against the manifest checksums once")
+    check.add_argument("--snapshot", required=True, type=Path)
+    check.add_argument("--results-dir", required=True, type=Path)
     run = sub.add_parser("run")
     run.add_argument("--snapshot", required=True, type=Path)
     run.add_argument("--config", required=True, type=Path)
@@ -512,6 +673,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     run.add_argument("--shard", type=int, default=0)
     run.add_argument("--shards", type=int, default=1)
     run.add_argument("--deadline-seconds", type=float)
+    run.add_argument("--allow-dirty", action="store_true",
+                     help="accept uncommitted source changes (local experiments only; recorded in the binding)")
     combine = sub.add_parser("merge")
     combine.add_argument("--snapshot", required=True, type=Path)
     combine.add_argument("--benchmark", required=True, type=Path)
@@ -520,12 +683,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                          help="writes <prefix>.json, <prefix>.md, <prefix>_per_query.csv and <prefix>_overcounted.csv")
     args = parser.parse_args(argv)
     log = lambda message: print(message, flush=True)
+    if args.command == "verify":
+        return 0 if verify(args.snapshot, args.results_dir, log)["passed"] else 1
     if args.command == "run":
         return run_shard(args.snapshot, args.config, args.benchmark, args.results_dir, args.shard, args.shards,
-                         args.deadline_seconds, log)
+                         args.deadline_seconds, log, allow_dirty=args.allow_dirty)
     report = merge(args.benchmark, args.results_dir, args.report_prefix, args.snapshot)
     log(json.dumps({key: report[key] for key in ("passed", "queries_total", "queries_evaluated", "mismatch_count",
-                                                  "missing_count")}))
+                                                  "missing_count", "invariant_violation_count")}))
     log(markdown(report))
     return 0 if report["passed"] else 1
 
