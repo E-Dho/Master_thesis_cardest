@@ -440,10 +440,18 @@ validation sweeps (`traj_eval/select_tuned.py`): `budget` = the most accurate
 setting whose serialized size fits the 1x budget (the own model's
 inference-only size, measured with `scripts/own_model_size.py`: the training
 checkpoint re-serialized without its optimizer state), and `best` = the most
-accurate setting regardless of size. "Most accurate" = lowest validation
-smoothed Q-error p90, ties by p99, p50, then size. Both are evaluated on the
-test set, so the thesis can show each method at equal size and at its best,
-with the cost of the latter.
+accurate setting regardless of size. "Most accurate" = lowest geometric mean
+of the validation smoothed Q-error over the answered queries (`q_gmean`,
+decided 2026-11-06: one number over the whole distribution, so a heavy tail
+counts; p90 alone picked a TraHist setting with p99 11,111), ties by p90, p99,
+then size. Tuning files written before `q_gmean` existed get it from the run's
+`predictions.csv`. Both are evaluated on the test set, so the thesis can show
+each method at equal size and at its best, with the cost of the latter.
+
+`own_model_size.py --breakdown` additionally reports the pickled size of every
+checkpoint field and the largest `metadata.columns` entries (domain lengths and
+bytes), to see which part of the inference-only size is model weights and
+which is schema payload.
 
 The in-process environment needs pandas and scipy (upstream imports them);
 `prepare` records their versions and fails early without them.

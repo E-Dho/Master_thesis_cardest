@@ -44,7 +44,62 @@ def _resmade(payload: Dict[str, Any]) -> Any:
     return model
 
 
-def measure(path: Path, build_module: Optional[Callable[[Dict[str, Any]], Any]] = None) -> Dict[str, Any]:
+def _pickled_bytes(value: Any) -> int:
+    """Size of ``value`` pickled as ``torch.save`` does (protocol 2)."""
+    import pickle
+
+    return len(pickle.dumps(value, protocol=2))
+
+
+def _value_count(value: Any) -> int:
+    return len(value) if isinstance(value, (list, tuple)) else 0
+
+
+def breakdown(payload: Dict[str, Any], top: int = 25) -> Dict[str, Any]:
+    """Where the inference-only bytes are: every checkpoint field, and the largest columns.
+
+    Fields: pickled size of each top-level entry (the state dict via
+    ``torch.save``). Columns: for each column of ``metadata.columns``, its name,
+    kind, table, domain and predicate-domain lengths and pickled size, largest
+    first. Vocabularies: pickled size of each entry of ``predicate_vocabularies``
+    (one level deeper for mappings).
+    """
+    import io
+
+    import torch
+
+    fields = {}
+    for key, value in payload.items():
+        if key == "optimizer_state_dict":
+            continue
+        if key == "model_state_dict":
+            buffer = io.BytesIO()
+            torch.save(value, buffer)
+            fields[key] = buffer.getbuffer().nbytes
+        else:
+            fields[key] = _pickled_bytes(value)
+    columns = []
+    for column in (payload.get("metadata") or {}).get("columns") or []:
+        columns.append({"name": column.get("name"), "kind": column.get("kind"), "table": column.get("table"),
+                        "domain_size": _value_count(column.get("domain")),
+                        "predicate_domain_size": _value_count(column.get("predicate_domain")),
+                        "bytes": _pickled_bytes(column)})
+    columns.sort(key=lambda column: column["bytes"], reverse=True)
+    vocabularies: Dict[str, Any] = {}
+    for key, value in (payload.get("predicate_vocabularies") or {}).items():
+        if isinstance(value, dict):
+            parts = sorted(((str(k), _pickled_bytes(v)) for k, v in value.items()), key=lambda kv: kv[1], reverse=True)
+            vocabularies[key] = {"bytes": _pickled_bytes(value), "largest": dict(parts[:top])}
+        else:
+            vocabularies[key] = {"bytes": _pickled_bytes(value)}
+    return {"fields_bytes": dict(sorted(fields.items(), key=lambda kv: kv[1], reverse=True)),
+            "columns": len(columns), "largest_columns": columns[:top],
+            "metadata_column_bytes_total": int(sum(column["bytes"] for column in columns)),
+            "predicate_vocabularies": vocabularies}
+
+
+def measure(path: Path, build_module: Optional[Callable[[Dict[str, Any]], Any]] = None,
+            with_breakdown: bool = False) -> Dict[str, Any]:
     """Sizes of one checkpoint; ``build_module`` rebuilds the module (default: ResMADE).
 
     The state dict holds learnable parameters *and* buffers (MADE masks, lookup
@@ -71,7 +126,7 @@ def measure(path: Path, build_module: Optional[Callable[[Dict[str, Any]], Any]] 
     torch.save(reduced, buffer)
     trajectory = payload.get("trajectory_distinct") or {}
     metadata = payload.get("metadata") or {}
-    return {
+    result = {
         "checkpoint": str(path),
         "checkpoint_bytes": path.stat().st_size,
         "checkpoint_sha256": _sha256(path),
@@ -89,14 +144,19 @@ def measure(path: Path, build_module: Optional[Callable[[Dict[str, Any]], Any]] 
         "tables": sorted((metadata.get("tables") or {}).keys()) if isinstance(metadata.get("tables"), dict) else None,
         "torch": torch.__version__,
     }
+    if with_breakdown:
+        result["breakdown"] = breakdown(payload)
+    return result
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--checkpoint", action="append", required=True, type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--breakdown", action="store_true",
+                        help="also report the size of every checkpoint field and the largest columns")
     args = parser.parse_args(argv)
-    rows = [measure(path) for path in args.checkpoint]
+    rows = [measure(path, with_breakdown=args.breakdown) for path in args.checkpoint]
     text = json.dumps(rows, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

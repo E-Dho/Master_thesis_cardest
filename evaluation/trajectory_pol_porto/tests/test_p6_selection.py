@@ -12,14 +12,16 @@ from evaluation.trajectory_pol_porto.traj_eval import select_tuned
 from evaluation.trajectory_pol_porto.traj_eval.tune import COLUMNS
 
 
-def _write(path: Path, rows, coverage="cov2:" + "c" * 64, run_directory="r"):
+def _write(path: Path, rows, coverage="cov2:" + "c" * 64, run_directory="r", gmean=None):
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=COLUMNS)
         writer.writeheader()
         for parameters, p50, p90, p99, size in rows:
             writer.writerow({"variant_id": "v", "parameters": json.dumps(parameters), "query_count": 1800,
                              "scored_count": 678, "coverage_fraction": 678 / 1800, "q_p50": p50, "q_p90": p90,
-                             "q_p95": p90, "q_p99": p99, "q_max": p99, "zero_estimate_count": 0,
+                             "q_p95": p90, "q_p99": p99, "q_max": p99,
+                             "q_gmean": (p90 if gmean is None else gmean(parameters)) if gmean != "" else "",
+                             "zero_estimate_count": 0,
                              "serialized_bytes": size, "theoretical_bytes": size, "build_seconds": 1,
                              "coverage_sha256": coverage, "run_directory": run_directory})
 
@@ -30,7 +32,7 @@ def _predictions(run: Path, statuses, benchmark_sha="b" * 64):
         "queries_jsonl_sha256": benchmark_sha, "select": {"relation": "multi"},
         "query_id_rule": "0-based position within the selection, in file order", "query_count": len(statuses)}}}))
     lines = ["workload,query_id,status,true_cardinality,estimated_cardinality,raw_q_error,smoothed_q_error,diagnostic"]
-    lines += [f"validation_multi,{i},{status},1,,,," for i, status in enumerate(statuses)]
+    lines += [f"validation_multi,{i},{status},1,,,{2.0 if status == 'ok' else ''}," for i, status in enumerate(statuses)]
     (run / "predictions.csv").write_text("\n".join(lines) + "\n")
 
 
@@ -50,6 +52,38 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(result["budget"]["parameters"], {"unit_size_m": 400, "time_buckets": 1600})
         self.assertEqual(result["smallest"]["parameters"], {"unit_size_m": 400, "time_buckets": 100})
         self.assertAlmostEqual(result["best_over_budget_factor"], 52 / 30)
+
+    def test_geometric_mean_ranks_before_p90(self) -> None:
+        # the TraHist case: a slightly better p90 with a huge tail loses on the geometric mean
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.csv"
+            gmeans = {50: 3.9, 100: 3.4}
+            _write(path, [({"unit_size_m": 50}, 2.62, 5.27, 11110.8, 120_000),
+                          ({"unit_size_m": 100}, 3.61, 5.73, 42.4, 26_000)],
+                   gmean=lambda parameters: gmeans[parameters["unit_size_m"]])
+            result = select_tuned.select(select_tuned.read_rows([path]), budget_bytes=1e9)
+        self.assertEqual(result["best"]["parameters"], {"unit_size_m": 100})
+        self.assertEqual(result["best"]["q_gmean"], 3.4)
+
+    def test_geometric_mean_from_predictions(self) -> None:
+        import math
+
+        from evaluation.trajectory_pol_porto.traj_eval.tune import geometric_mean_q
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "run"
+            run.mkdir()
+            (run / "predictions.csv").write_text(
+                "workload,query_id,status,true_cardinality,estimated_cardinality,raw_q_error,smoothed_q_error,diagnostic\n"
+                "validation_multi,0,ok,1,1,1,1.0,\nvalidation_multi,1,ok,1,4,4,4.0,\n"
+                "validation_multi,2,unsupported,1,,,,x\nother,0,ok,1,9,9,9.0,\n")
+            self.assertAlmostEqual(geometric_mean_q(run), 2.0)
+            # older tuning files without the column: recomputed from the run directory
+            _predictions(run, ["ok", "ok"])
+            path = Path(tmp) / "a.csv"
+            _write(path, [({"u": 1}, 1.0, 2.0, 3.0, 100)], run_directory=str(run), gmean="")
+            self.assertAlmostEqual(select_tuned.read_rows([path])[0]["q_gmean"], 2.0)
+            self.assertTrue(math.isfinite(select_tuned.read_rows([path])[0]["q_gmean"]))
 
     def test_duplicate_settings_must_agree_in_every_field(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,10 +136,10 @@ class SelectionTest(unittest.TestCase):
                 select_tuned.read_rows([a, b])
 
     def test_nothing_under_the_budget_and_ties(self) -> None:
-        rows = [{"parameters": {"u": 1}, "scored_count": 5, "q_p50": 1, "q_p90": 2, "q_p99": 3,
+        rows = [{"parameters": {"u": 1}, "scored_count": 5, "q_p50": 1, "q_p90": 2, "q_p99": 3, "q_gmean": 1.5,
                  "serialized_bytes": 100, "variant_id": "a", "coverage_fraction": 1, "q_max": 3,
                  "zero_estimate_count": 0, "theoretical_bytes": 100, "coverage_sha256": "x", "source": "s"},
-                {"parameters": {"u": 2}, "scored_count": 5, "q_p50": 1, "q_p90": 2, "q_p99": 3,
+                {"parameters": {"u": 2}, "scored_count": 5, "q_p50": 1, "q_p90": 2, "q_p99": 3, "q_gmean": 1.5,
                  "serialized_bytes": 50, "variant_id": "b", "coverage_fraction": 1, "q_max": 3,
                  "zero_estimate_count": 0, "theoretical_bytes": 50, "coverage_sha256": "x", "source": "s"}]
         result = select_tuned.select(rows, budget_bytes=10)
@@ -192,6 +226,18 @@ class OwnModelSizeTest(unittest.TestCase):
         self.assertEqual(row["parameters"], sum(p.numel() for p in model.parameters()))
         self.assertEqual(row["buffers"], sum(b.numel() for b in model.buffers()))
         self.assertGreater(row["buffers"], 0)  # MADE masks
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "checkpoint.pt"
+            save_resmade_checkpoint(path, model, optimizer, epoch=0, step=3, metadata=source.metadata,
+                                    predicate_vocabularies=PredicateVocabularies.from_metadata(source.metadata),
+                                    config=config)
+            detail = _size_module().measure(path, with_breakdown=True)["breakdown"]
+        self.assertNotIn("optimizer_state_dict", detail["fields_bytes"])
+        self.assertIn("metadata", detail["fields_bytes"])
+        self.assertEqual(detail["columns"], len(source.metadata.columns))
+        sizes = [column["bytes"] for column in detail["largest_columns"]]
+        self.assertEqual(sizes, sorted(sizes, reverse=True))
+        self.assertTrue(all("domain_size" in column for column in detail["largest_columns"]))
 
 
 if __name__ == "__main__":

@@ -7,8 +7,11 @@ Two picks per method (decided 2026-11-05):
 - ``best``: the most accurate setting regardless of size, to show how much
   more the method needs to reach its best and how it compares at equal size.
 
-"Most accurate" = lowest smoothed Q-error p90 on the validation multi
-queries, ties broken by p99, then p50, then the smaller model. All rows of one
+"Most accurate" = lowest geometric mean of the smoothed Q-error on the
+validation multi queries (decided 2026-11-05: one number over the whole
+distribution, so a heavy tail counts; p90 alone picked a TraHist setting with
+p99 11,111), ties broken by p90, p99, then the smaller model. Files written
+before ``q_gmean`` existed get it from the run's ``predictions.csv``. All rows of one
 method must have the same coverage (the settings do not change which queries
 are supported); a method with no setting under the budget gets ``None`` and
 the smallest setting is reported for reference.
@@ -28,9 +31,9 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from .tune import COVERAGE_VERSION, coverage_sha256
+from .tune import COVERAGE_VERSION, coverage_sha256, geometric_mean_q
 
-NUMERIC = ("query_count", "scored_count", "coverage_fraction", "q_p50", "q_p90", "q_p95", "q_p99", "q_max",
+NUMERIC = ("query_count", "scored_count", "coverage_fraction", "q_p50", "q_p90", "q_p95", "q_p99", "q_max", "q_gmean",
            "zero_estimate_count", "serialized_bytes", "theoretical_bytes", "build_seconds")
 
 
@@ -62,6 +65,12 @@ def read_rows(paths: Iterable[Path]) -> List[Dict[str, Any]]:
                         raise ValueError(f"{path}: no coverage_sha256 and no predictions.csv / run_manifest.json "
                                          f"for {row['parameters']} (run directory {run})")
                     row["coverage_sha256"] = coverage_sha256(run)
+                if row.get("q_gmean") in (None, ""):  # files written before the column existed
+                    run = Path(row.get("run_directory") or "")
+                    if not (run / "predictions.csv").is_file():
+                        raise ValueError(f"{path}: no q_gmean and no predictions.csv for {row['parameters']} "
+                                         f"(run directory {run})")
+                    row["q_gmean"] = geometric_mean_q(run)
                 key = json.dumps(row["parameters"], sort_keys=True)
                 if key in rows:
                     differing = [k for k in COMPARED if rows[key].get(k) != row.get(k)]
@@ -72,7 +81,7 @@ def read_rows(paths: Iterable[Path]) -> List[Dict[str, Any]]:
 
 
 def _rank(row: Dict[str, Any]):
-    return (row["q_p90"], row["q_p99"], row["q_p50"], row["serialized_bytes"])
+    return (row["q_gmean"], row["q_p90"], row["q_p99"], row["serialized_bytes"])
 
 
 def select(rows: Sequence[Dict[str, Any]], budget_bytes: Optional[float]) -> Dict[str, Any]:
@@ -90,8 +99,8 @@ def select(rows: Sequence[Dict[str, Any]], budget_bytes: Optional[float]) -> Dic
         if row is None:
             return None
         return {key: row[key] for key in ("parameters", "variant_id", "scored_count", "coverage_fraction", "q_p50",
-                                          "q_p90", "q_p99", "q_max", "zero_estimate_count", "serialized_bytes",
-                                          "theoretical_bytes", "coverage_sha256", "source")}
+                                          "q_p90", "q_p99", "q_max", "q_gmean", "zero_estimate_count",
+                                          "serialized_bytes", "theoretical_bytes", "coverage_sha256", "source")}
 
     return {"settings": len(rows), "budget_bytes": budget_bytes, "budget": brief(budget), "best": brief(best),
             "smallest": brief(smallest), "best_over_budget_factor":
@@ -105,7 +114,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--budget-bytes", type=float, required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    out: Dict[str, Any] = {"rule": "min validation smoothed q_p90, then q_p99, q_p50, serialized_bytes",
+    out: Dict[str, Any] = {"rule": "min validation geometric-mean smoothed Q-error, then q_p90, q_p99, serialized_bytes",
                            "budget_bytes": args.budget_bytes, "methods": {}}
     for item in args.method:
         name, _, paths = item.partition("=")

@@ -5,8 +5,8 @@ config is re-run (prepare, smoke, build, evaluate, summarize) on the
 validation benchmark's multi queries only, under the experiment id
 ``<experiment>_tuning`` (so tuning runs never mix with the test runs), and one
 row per combination is written to ``tuning.csv`` / ``tuning.json``:
-coverage, smoothed Q-error p50/p90/p95/p99/max on the supported queries
-(zero estimates included), the zero-estimate count, a fingerprint of the
+coverage, smoothed Q-error p50/p90/p95/p99/max and its geometric mean on the
+supported queries (zero estimates included), the zero-estimate count, a fingerprint of the
 answered query set (``coverage_sha256``), the
 serialized model size and the method's theoretical size, and build seconds.
 Choosing a configuration (under the memory budget) is a separate, documented
@@ -36,7 +36,7 @@ from evaluation.eval_core.config import experiment_config_from_raw, load_raw_con
 from evaluation.eval_core.runner import run_seed
 
 COLUMNS = ("variant_id", "parameters", "query_count", "scored_count", "coverage_fraction",
-           "q_p50", "q_p90", "q_p95", "q_p99", "q_max", "zero_estimate_count", "serialized_bytes",
+           "q_p50", "q_p90", "q_p95", "q_p99", "q_max", "q_gmean", "zero_estimate_count", "serialized_bytes",
            "theoretical_bytes", "build_seconds", "coverage_sha256", "run_directory")
 
 
@@ -124,6 +124,23 @@ def coverage_sha256(run: Path, workload: str = "validation_multi") -> str:
     return f"{COVERAGE_VERSION}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
+def geometric_mean_q(run: Path, workload: str = "validation_multi") -> float:
+    """Geometric mean of the smoothed Q-error over the answered (``ok``) queries of a run."""
+    import math
+
+    logs = []
+    with (Path(run) / "predictions.csv").open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row["workload"] == workload and row["status"] == "ok":
+                value = float(row["smoothed_q_error"])
+                if not (value >= 1.0 and math.isfinite(value)):
+                    raise ValueError(f"{run}: smoothed Q-error {value!r} for query {row['query_id']}")
+                logs.append(math.log(value))
+    if not logs:
+        raise ValueError(f"no answered {workload} queries in {run}")
+    return math.exp(math.fsum(logs) / len(logs))
+
+
 def row_of(run: Path, parameters: Dict[str, Any], variant_id: str) -> Dict[str, Any]:
     summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
     accuracy = summary["workloads"]["validation_multi"]["accuracy"]
@@ -135,7 +152,8 @@ def row_of(run: Path, parameters: Dict[str, Any], variant_id: str) -> Dict[str, 
         "query_count": accuracy.get("query_count"), "scored_count": accuracy.get("scored_query_count"),
         "coverage_fraction": accuracy.get("coverage_fraction"),
         "q_p50": q.get("p50"), "q_p90": q.get("p90"), "q_p95": q.get("p95"), "q_p99": q.get("p99"),
-        "q_max": q.get("max"), "zero_estimate_count": accuracy.get("zero_estimate_count"),
+        "q_max": q.get("max"), "q_gmean": geometric_mean_q(run),
+        "zero_estimate_count": accuracy.get("zero_estimate_count"),
         "serialized_bytes": artifacts.get("serialized_bytes"),
         "theoretical_bytes": artifacts.get("theoretical_bytes"),
         "build_seconds": build.get("total_build_seconds"),
