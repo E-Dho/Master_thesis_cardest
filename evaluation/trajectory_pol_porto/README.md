@@ -442,11 +442,18 @@ inference-only size, measured with `scripts/own_model_size.py`: the training
 checkpoint re-serialized without its optimizer state), and `best` = the most
 accurate setting regardless of size. "Most accurate" = lowest geometric mean
 of the validation smoothed Q-error over the answered queries (`q_gmean`,
-decided 2026-11-06: one number over the whole distribution, so a heavy tail
-counts; p90 alone picked a TraHist setting with p99 11,111), ties by p90, p99,
-then size. Tuning files written before `q_gmean` existed get it from the run's
+decided 2026-11-06: one number over the whole distribution instead of one
+quantile; it mostly reflects the typical query, so it can prefer a better
+median over a better tail - TraHist 25 m, p50 1.65 / p99 11,111 - and p99/max
+are reported with every pick), ties by p90, p99, then size. Tuning files written before `q_gmean` existed get it from the run's
 `predictions.csv`. Both are evaluated on the test set, so the thesis can show
 each method at equal size and at its best, with the cost of the latter.
+
+**Picks (POL v3, 2026-11-06, budget 872,606,460 bytes).** TraHist 25 m,
+TraHist-Temporal 25 m / 3200 buckets, CASE+ 25 m: budget = best. CASE+-Temporal:
+budget 200 m / 3200 (`case_plus_temporal.yaml`, 288 MB), best 100 m / 3200
+(`case_plus_temporal_best.yaml`, 1.17 GB, 1.34x the budget). The values and
+their validation errors are noted in each config.
 
 `own_model_size.py --breakdown` additionally reports the pickled size of every
 checkpoint field and the largest `metadata.columns` entries (domain lengths and
@@ -461,9 +468,13 @@ The in-process environment needs pandas and scipy (upstream imports them);
 One level: 1× the own model's inference-only serialized size per dataset
 (decided 2026-10-26). Every adapter reports `serialized_bytes`, and
 `artifact_metadata` adds `budget_bytes` and `within_budget` when the config
-sets `adapter.budget_bytes`. The sampling ladder runs without a budget; a
-`traj_sampling` config with `budget_bytes` follows once the own model's POL v3
-checkpoint size is known.
+sets `adapter.budget_bytes`. POL v3 (2026-11-06): 872,606,460 bytes, the
+inference-only size of `pol_50m_traj_dedup_single_anchor_mbr_segments_first_20k`
+step 20000 (`own_model_size.py`): 57.1 MB weights and buffers plus 815.2 MB of
+value domains that inference needs to map range literals to encoded ids
+(`segments:t_e` 405 MB, `segments:t_s` 372 MB, `trips:end_time` 36 MB). The
+sampling ladder runs without a budget; a `traj_sampling` config with
+`budget_bytes` can now follow.
 
 ## Timing
 

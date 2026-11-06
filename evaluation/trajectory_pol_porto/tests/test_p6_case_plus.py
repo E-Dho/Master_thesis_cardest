@@ -257,7 +257,20 @@ class ShippedCaseConfigTest(unittest.TestCase):
             self.assertEqual(raw["experiment"]["seeds"], [0])
         self.assertIs(base["adapter"]["temporal"], False)
         self.assertIs(temporal["adapter"]["temporal"], True)
-        self.assertEqual(base["adapter"]["unit_size_m"], temporal["adapter"]["unit_size_m"])
+        best = load_simple_yaml(configs / "case_plus_temporal_best.yaml")
+        # tuned on validation (select_tuned, 2026-11-06); budget = the own model's inference-only size
+        self.assertEqual(base["adapter"]["unit_size_m"], 25)
+        self.assertEqual((temporal["adapter"]["unit_size_m"], temporal["adapter"]["time_buckets"]), (200, 3200))
+        self.assertEqual((best["adapter"]["unit_size_m"], best["adapter"]["time_buckets"]), (100, 3200))
+        for raw in (base, temporal, best):
+            self.assertEqual(raw["adapter"]["budget_bytes"], 872606460)
+        # the best pick is the budget config with another grid and its own variant id
+        tuned = ("unit_size_m", "time_buckets")
+        self.assertEqual({k: v for k, v in best["adapter"].items() if k not in tuned},
+                         {k: v for k, v in temporal["adapter"].items() if k not in tuned})
+        self.assertEqual(best["experiment"]["variant_id"], "temporal_best")
+        self.assertEqual({k: v for k, v in best["experiment"].items() if k not in ("variant_id", "display_name")},
+                         {k: v for k, v in temporal["experiment"].items() if k not in ("variant_id", "display_name")})
 
 
 if __name__ == "__main__":

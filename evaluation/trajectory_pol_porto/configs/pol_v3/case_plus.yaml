@@ -2,6 +2,11 @@
 # re-implemented from Algorithms 1-3) on POL v3, spatial only. See
 # traj_eval/adapters/case_plus.py. unit_size_m is tuned on the validation
 # workload (slurm/submit_p6.sh STAGE=tune) before the test runs.
+# Tuned 2026-11-06 (traj_eval/select_tuned.py at 2d3a923, validation multi only):
+# min geometric-mean smoothed Q-error under the 1x budget = the own model's
+# inference-only size, 872,606,460 bytes (pol_50m_..._segments_first_20k step
+# 20000: 57.1 MB weights/buffers + 815.2 MB value domains needed at inference).
+# Pick: 25 m (validation gm 1.12, p90 1.28, p99 3.74, 1.1 MB); budget = best.
 extends: _base.yaml
 experiment:
   experiment_id: traj_phase1_pol_v3
@@ -16,4 +21,5 @@ adapter:
   benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json
   plus: true
   temporal: false
-  unit_size_m: 100
+  unit_size_m: 25
+  budget_bytes: 872606460

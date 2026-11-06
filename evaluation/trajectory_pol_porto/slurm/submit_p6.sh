@@ -7,18 +7,22 @@
 #   CONFIG_NAMES="trahist_temporal" ...   a subset
 #   UNIT_SIZES / TIME_BUCKETS             override the sweep grids (values separated by /)
 #   AFTER_JOB=<id>                        start after that job succeeded
+#   RUN_MEM=64G                           memory of the test runs (the tuning jobs had 64G;
+#                                         CASE+-Temporal best holds a 1.17 GB model)
 # The cpu_1core timing follows with submit_timing.sh
-# (CPU_CONFIGS="trahist trahist_temporal case_plus case_plus_temporal").
+# (CPU_CONFIGS="trahist trahist_temporal case_plus case_plus_temporal case_plus_temporal_best").
+# STAGE=tune skips *_best configs (they reuse the base config's sweep).
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
 CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
 STAGE=${STAGE:?set STAGE=tune or STAGE=run}
-CONFIG_NAMES=${CONFIG_NAMES:-"trahist trahist_temporal case_plus case_plus_temporal"}
+CONFIG_NAMES=${CONFIG_NAMES:-"trahist trahist_temporal case_plus case_plus_temporal case_plus_temporal_best"}
 UNIT_SIZES=${UNIT_SIZES:-"25/50/100/200/400"}
 TIME_BUCKETS=${TIME_BUCKETS:-"25/50/100/200/400"}
 VALIDATION_JSONL=${VALIDATION_JSONL:-/work_beegfs/sunip956/master_thesis_trajectories/mobilitydb/query_runs/qgen_pol_v3_validation_seed20261026/benchmark.jsonl}
 VALIDATION_MULTI=${VALIDATION_MULTI:-1800}
+RUN_MEM=${RUN_MEM:-64G}
 TUNING_ROOT=${TUNING_ROOT:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3_tuning}
 COMPARE_WITH=${COMPARE_WITH-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 traj_sampling_n100000 traj_sampling_n1000000 mobilitydb_v3_sql mobilitydb_segment_stbox mobilitydb_trip_stbox deepdb_mbr mscn"}
 COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/p6_comparison}
@@ -32,6 +36,7 @@ if [ -n "${AFTER_JOB:-}" ]; then dependency_args=(--dependency="afterok:$AFTER_J
 case "$STAGE" in
   tune)
     for name in $CONFIG_NAMES; do
+      case "$name" in *_best) echo "$name: no sweep (uses ${name%_best}'s)"; continue ;; esac
       config="$CONFIG_DIR/$name.yaml"
       if [ ! -f "$config" ]; then echo "missing config $config" >&2; exit 2; fi
       grids="unit_size_m=$UNIT_SIZES"
@@ -48,7 +53,7 @@ case "$STAGE" in
     for name in $CONFIG_NAMES; do
       config="$CONFIG_DIR/$name.yaml"
       if [ ! -f "$config" ]; then echo "missing config $config" >&2; exit 2; fi
-      job=$(submit "${dependency_args[@]}" --array=0 --export="$base_export,CONFIG=$config" \
+      job=$(submit "${dependency_args[@]}" --array=0 --mem="$RUN_MEM" --export="$base_export,CONFIG=$config" \
         "$SCRIPT_DIR/run_inprocess.sbatch")
       echo "$name: job $job (seed 0; deterministic)"
       jobs+=("$job")

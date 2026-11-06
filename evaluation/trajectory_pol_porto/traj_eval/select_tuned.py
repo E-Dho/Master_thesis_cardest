@@ -8,9 +8,12 @@ Two picks per method (decided 2026-11-05):
   more the method needs to reach its best and how it compares at equal size.
 
 "Most accurate" = lowest geometric mean of the smoothed Q-error on the
-validation multi queries (decided 2026-11-05: one number over the whole
-distribution, so a heavy tail counts; p90 alone picked a TraHist setting with
-p99 11,111), ties broken by p90, p99, then the smaller model. Files written
+validation multi queries (decided 2026-11-06, kept after seeing the picks: one
+number over the whole distribution instead of one quantile). It mostly
+reflects the typical query - with 226-678 answered queries the worst 1% are
+2-7 queries - so it can prefer a setting with a better median and a worse
+tail (TraHist 25 m: p50 1.65, p99 11,111); the tail is reported with every
+pick. Ties broken by p90, p99, then the smaller model. Files written
 before ``q_gmean`` existed get it from the run's ``predictions.csv``. All rows of one
 method must have the same coverage (the settings do not change which queries
 are supported); a method with no setting under the budget gets ``None`` and

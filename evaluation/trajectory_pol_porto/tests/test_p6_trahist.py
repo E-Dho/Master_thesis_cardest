@@ -196,7 +196,9 @@ class ShippedTraHistConfigTest(unittest.TestCase):
         self.assertIs(temporal["adapter"]["temporal"], True)
         shared = {k: v for k, v in base["adapter"].items() if k != "temporal"}
         self.assertEqual({k: temporal["adapter"][k] for k in shared}, shared)
-        self.assertEqual(temporal["adapter"]["time_buckets"], 100)  # spec start; tuned on validation
+        # tuned on validation (select_tuned, 2026-11-06); budget = the own model's inference-only size
+        self.assertEqual((base["adapter"]["unit_size_m"], temporal["adapter"]["time_buckets"]), (25, 3200))
+        self.assertEqual(base["adapter"]["budget_bytes"], 872606460)
 
 
 if __name__ == "__main__":

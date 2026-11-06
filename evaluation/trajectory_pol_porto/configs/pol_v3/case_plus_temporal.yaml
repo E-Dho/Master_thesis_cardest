@@ -3,6 +3,12 @@
 # counts (F/L distinct statistics) and virtual counts per trajectory time span.
 # unit_size_m and time_buckets are tuned on the validation workload
 # (slurm/submit_p6.sh STAGE=tune) before the test runs.
+# Tuned 2026-11-06 (traj_eval/select_tuned.py at 2d3a923, validation multi only):
+# min geometric-mean smoothed Q-error under the 1x budget = the own model's
+# inference-only size, 872,606,460 bytes (pol_50m_..._segments_first_20k step
+# 20000: 57.1 MB weights/buffers + 815.2 MB value domains needed at inference).
+# Budget pick: 200 m / 3200 buckets (validation gm 1.59, p90 4.84, p99 30.9,
+# 288 MB). Best without a size limit: case_plus_temporal_best.yaml.
 extends: _base.yaml
 experiment:
   experiment_id: traj_phase1_pol_v3
@@ -17,5 +23,6 @@ adapter:
   benchmark_config: ../../../../query_generation/benchmark_v3/pol_v3_config.json
   plus: true
   temporal: true
-  time_buckets: 100
-  unit_size_m: 100
+  time_buckets: 3200
+  unit_size_m: 200
+  budget_bytes: 872606460

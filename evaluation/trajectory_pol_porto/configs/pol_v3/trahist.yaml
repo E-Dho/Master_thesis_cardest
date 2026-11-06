@@ -2,6 +2,11 @@
 # (YJ960/TraHist, pinned below) runs from its checkout; see
 # traj_eval/adapters/trahist.py. unit_size_m and time_buckets are tuned on the
 # validation workload (slurm/submit_p6.sh STAGE=tune) before the test runs.
+# Tuned 2026-11-06 (traj_eval/select_tuned.py at 2d3a923, validation multi only):
+# min geometric-mean smoothed Q-error under the 1x budget = the own model's
+# inference-only size, 872,606,460 bytes (pol_50m_..._segments_first_20k step
+# 20000: 57.1 MB weights/buffers + 815.2 MB value domains needed at inference).
+# Pick: 25 m (validation gm 2.83, p90 12.6, p99 11,111, 0.5 MB); budget = best.
 extends: _base.yaml
 experiment:
   experiment_id: traj_phase1_pol_v3
@@ -17,10 +22,11 @@ adapter:
   trahist_source: /work_beegfs/sunip956/master_thesis_trajectories/external/trahist
   trahist_revision: 870e8ce6db0e6363eeca80dce193623034c858ab
   temporal: false
-  unit_size_m: 100
+  unit_size_m: 25
   alpha: 0.5
   beta: 1.0
   kappa: 3
   connectivity: axis
   agg_mode: mean
   ratio_eps: 1.0
+  budget_bytes: 872606460
