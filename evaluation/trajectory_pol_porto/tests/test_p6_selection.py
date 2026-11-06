@@ -12,7 +12,7 @@ from evaluation.trajectory_pol_porto.traj_eval import select_tuned
 from evaluation.trajectory_pol_porto.traj_eval.tune import COLUMNS
 
 
-def _write(path: Path, rows, coverage="c" * 64, run_directory="r"):
+def _write(path: Path, rows, coverage="cov2:" + "c" * 64, run_directory="r"):
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=COLUMNS)
         writer.writeheader()
@@ -60,7 +60,7 @@ class SelectionTest(unittest.TestCase):
             _write(second, [({"u": 1}, 1.0, 2.0, 3.0, 999)])  # same p90, different size
             with self.assertRaisesRegex(ValueError, "serialized_bytes"):
                 select_tuned.read_rows([first, second])
-            _write(second, [({"u": 1}, 1.0, 2.0, 3.0, 100)], coverage="d" * 64)
+            _write(second, [({"u": 1}, 1.0, 2.0, 3.0, 100)], coverage="cov2:" + "d" * 64)
             with self.assertRaisesRegex(ValueError, "coverage_sha256"):
                 select_tuned.read_rows([first, second])
 
@@ -88,6 +88,15 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(rows[0]["coverage_sha256"], coverage_sha256(root / "r1"))
             with self.assertRaisesRegex(ValueError, "different query sets"):
                 select_tuned.select(rows, budget_bytes=1000)
+            # a fingerprint stored by the previous, unbound version is not trusted: recomputed
+            old = "0" * 64
+            _write(a, [({"u": 1}, 1.0, 2.0, 3.0, 100)], coverage=old, run_directory=str(root / "r1"))
+            self.assertEqual(select_tuned.read_rows([a])[0]["coverage_sha256"], coverage_sha256(root / "r1"))
+            self.assertTrue(coverage_sha256(root / "r1").startswith("cov2:"))
+            _write(a, [({"u": 1}, 1.0, 2.0, 3.0, 100)], coverage=old, run_directory=str(root / "missing"))
+            with self.assertRaisesRegex(ValueError, "no coverage_sha256"):
+                select_tuned.read_rows([a])
+            _write(a, [({"u": 1}, 1.0, 2.0, 3.0, 100)], coverage="", run_directory=str(root / "r1"))
             _write(b, [({"u": 2}, 1.0, 2.5, 3.0, 50)], coverage="", run_directory=str(root / "missing"))
             with self.assertRaisesRegex(ValueError, "no coverage_sha256"):
                 select_tuned.read_rows([a, b])

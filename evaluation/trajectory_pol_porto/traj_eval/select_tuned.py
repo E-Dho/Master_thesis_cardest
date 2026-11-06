@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from .tune import coverage_sha256
+from .tune import COVERAGE_VERSION, coverage_sha256
 
 NUMERIC = ("query_count", "scored_count", "coverage_fraction", "q_p50", "q_p90", "q_p95", "q_p99", "q_max",
            "zero_estimate_count", "serialized_bytes", "theoretical_bytes", "build_seconds")
@@ -40,9 +40,11 @@ COMPARED = NUMERIC + ("variant_id", "coverage_sha256")
 def read_rows(paths: Iterable[Path]) -> List[Dict[str, Any]]:
     """Rows of all files, one per setting; a setting repeated with any differing field is an error.
 
-    ``coverage_sha256`` (which queries a run answered) is taken from the file,
-    or recomputed from the run's ``predictions.csv`` for files written before
-    the column existed; a row whose coverage cannot be established is refused.
+    ``coverage_sha256`` (which queries a run answered) is taken from the file
+    only in the current format (``cov2:`` prefix, bound to the benchmark);
+    otherwise - no column, or a value from an older version - it is recomputed
+    from the run's ``predictions.csv`` and ``run_manifest.json``. A row whose
+    coverage cannot be established is refused.
     """
     rows: Dict[str, Dict[str, Any]] = {}
     for path in paths:
@@ -53,7 +55,8 @@ def read_rows(paths: Iterable[Path]) -> List[Dict[str, Any]]:
                         row[key] = float(row[key])
                 row["parameters"] = json.loads(row["parameters"])
                 row["source"] = str(path)
-                if not row.get("coverage_sha256"):
+                if not str(row.get("coverage_sha256") or "").startswith(f"{COVERAGE_VERSION}:"):
+                    # missing, or an older fingerprint format: recompute from the run directory
                     run = Path(row.get("run_directory") or "")
                     if not ((run / "predictions.csv").is_file() and (run / "run_manifest.json").is_file()):
                         raise ValueError(f"{path}: no coverage_sha256 and no predictions.csv / run_manifest.json "

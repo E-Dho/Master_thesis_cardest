@@ -89,6 +89,9 @@ def tuning_raw(raw: Dict[str, Any], parameters: Dict[str, Any], validation_jsonl
 
 
 BENCHMARK_FIELDS = ("queries_jsonl_sha256", "select", "query_id_rule", "query_count")
+# The fingerprint format; values without this prefix (written before it was bound to the benchmark,
+# 9612b2f) are not trusted and are recomputed from the run directory.
+COVERAGE_VERSION = "cov2"
 
 
 def coverage_sha256(run: Path, workload: str = "validation_multi") -> str:
@@ -118,7 +121,7 @@ def coverage_sha256(run: Path, workload: str = "validation_multi") -> str:
     if len(lines) != int(identity["query_count"]):
         raise ValueError(f"{run}: {len(lines)} predictions for {identity['query_count']} queries")
     text = header + "\n" + "".join(f"{query_id}:{status}\n" for query_id, status in sorted(lines))
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return f"{COVERAGE_VERSION}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
 def row_of(run: Path, parameters: Dict[str, Any], variant_id: str) -> Dict[str, Any]:
