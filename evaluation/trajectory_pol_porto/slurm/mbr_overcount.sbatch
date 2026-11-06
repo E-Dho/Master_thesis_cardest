@@ -16,7 +16,8 @@ traj_resolve_repo_root
 activate_mobilitydb_env
 cd "$REPO_ROOT"
 WORKLOAD=${WORKLOAD:?set WORKLOAD=test or validation}
+OVERCOUNT_ROOT=${OVERCOUNT_ROOT:-$SNAPSHOT_DIR/analysis/mbr_overcount/v$(python -m evaluation.trajectory_pol_porto.traj_eval.mbr_overcount version)}
 python -m evaluation.trajectory_pol_porto.traj_eval.mbr_overcount run \
   --snapshot "$SNAPSHOT_DIR" --config "$V3_CONFIG" --benchmark "$(traj_benchmark_for "$WORKLOAD")" \
-  --results-dir "$SNAPSHOT_DIR/analysis/mbr_overcount/$WORKLOAD" \
+  --results-dir "$OVERCOUNT_ROOT/$WORKLOAD" \
   --shard "$SLURM_ARRAY_TASK_ID" --shards "${OVERCOUNT_SHARDS:?}" --deadline-seconds "${DEADLINE_SECONDS:-13800}"

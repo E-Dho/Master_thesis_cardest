@@ -180,7 +180,8 @@ since. The results directory is bound to the manifest, benchmark, config,
 shard count, statistic version, git revision and a SHA-256 over the source
 files of the computation; shards refuse uncommitted source changes
 (`--allow-dirty` for local experiments only). The merge fails on any label
-mismatch and on any query that violates `exact <= decoupled <= mbr`, the
+mismatch (recomputed against the benchmark, not taken from the stored flag)
+and on any query that violates `exact <= decoupled <= mbr`, the
 segment partition `mbr = exact + corner + decoupled_only`, or has a segment
 with an endpoint inside the window whose line misses it.
 
@@ -188,7 +189,9 @@ with an endpoint inside the window whose line misses it.
 REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_mbr_overcount.sh   # WORKLOAD=test, 16 shards
 ```
 
-Output in `$SNAPSHOT_DIR/analysis/mbr_overcount/`: `test_report.{json,md}`
+Output in `$SNAPSHOT_DIR/analysis/mbr_overcount/v<version>/` (one directory per
+statistic version, currently `v2`, so results of an older version never block a
+run; `OVERCOUNT_ROOT` overrides it): `test_report.{json,md}`
 (per category, per dimension × relation and per add-on count; provenance
 hashes; the JSON also lists the ids of all overcounted queries),
 `test_report_per_query.csv` (every evaluated query) and

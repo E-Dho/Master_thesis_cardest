@@ -15,5 +15,6 @@ traj_resolve_repo_root
 activate_mobilitydb_env
 cd "$REPO_ROOT"
 WORKLOAD=${WORKLOAD:?set WORKLOAD=test or validation}
+OVERCOUNT_ROOT=${OVERCOUNT_ROOT:-$SNAPSHOT_DIR/analysis/mbr_overcount/v$(python -m evaluation.trajectory_pol_porto.traj_eval.mbr_overcount version)}
 python -m evaluation.trajectory_pol_porto.traj_eval.mbr_overcount verify \
-  --snapshot "$SNAPSHOT_DIR" --results-dir "$SNAPSHOT_DIR/analysis/mbr_overcount/$WORKLOAD"
+  --snapshot "$SNAPSHOT_DIR" --results-dir "$OVERCOUNT_ROOT/$WORKLOAD"

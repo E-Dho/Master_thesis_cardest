@@ -92,6 +92,8 @@ from .snapshot_gate import EXIT_DEADLINE, BindingError, _done, _rows, _sha256, _
 
 STATISTIC = "segment_mbr_overcount"
 STATISTIC_VERSION = 2  # 2: corner requires both endpoints outside; provenance and invariant gates
+# Job scripts keep each version's results in its own directory, analysis/mbr_overcount/v<version>/
+# (`python -m ...mbr_overcount version` prints it), so results of another version never block a run.
 SPATIAL_KINDS = ("spatial", "spatio_temporal")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VERIFICATION_FILE = "snapshot_verification.json"
@@ -368,10 +370,14 @@ def _loaded_arrays(snapshot: Path) -> List[str]:
 
 
 def _stats(snapshot: Path, relative: Iterable[str]) -> Dict[str, List[int]]:
+    """Size and mtime of the files that exist (missing files are left out)."""
+
     stats = {}
     for name in relative:
-        info = (Path(snapshot) / name).stat()
-        stats[name] = [info.st_size, info.st_mtime_ns]
+        path = Path(snapshot) / name
+        if path.exists():
+            info = path.stat()
+            stats[name] = [info.st_size, info.st_mtime_ns]
     return stats
 
 
@@ -414,8 +420,9 @@ def require_verified(snapshot: Path, results_dir: Path) -> Dict[str, Any]:
     if record.get("snapshot_manifest_sha256") != _sha256(Path(snapshot) / "manifest.json"):
         raise ProvenanceError("snapshot verification was done for another manifest")
     loaded = _loaded_arrays(snapshot)
-    missing = [name for name in loaded if name not in record["array_stats"]]
-    changed = [name for name, stat in _stats(snapshot, loaded).items() if record["array_stats"].get(name) != stat]
+    current = _stats(snapshot, loaded)
+    missing = [name for name in loaded if name not in record["array_stats"] or name not in current]
+    changed = [name for name, stat in current.items() if record["array_stats"].get(name) != stat]
     if missing or changed:
         raise ProvenanceError(f"snapshot arrays changed since verification: {(missing + changed)[:5]}")
     return record
@@ -593,7 +600,12 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
     missing = sorted(set(expected) - set(found))
     unexpected = sorted(set(found) - set(expected))
     foreign = sorted(q for q, item in found.items() if q in expected and item["predicate_hash"] != expected[q]["predicate_hash"])
-    mismatches = sorted((item for item in found.values() if not item["match"]), key=lambda item: item["query_id"])
+    # the label check is redone here from the benchmark, never taken from the stored match flag
+    mismatches = sorted(
+        ({**item, "benchmark_label": int(expected[qid]["cardinality"])} for qid, item in found.items()
+         if qid in expected and not (item["match"] is True and int(item["exact_count"]) == int(item["label"])
+                                     == int(expected[qid]["cardinality"]))),
+        key=lambda item: item["query_id"])
     items = [found[q] for q in sorted(found) if q in expected]
     violations = [{"query_id": item["query_id"], "problems": problems}
                   for item in items for problems in [invariant_violations(item)] if problems]
@@ -662,6 +674,7 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Segment-MBR overcount of the benchmark's spatial predicates")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("version", help="print the statistic version (job scripts name the results directory by it)")
     check = sub.add_parser("verify", help="check the snapshot arrays against the manifest checksums once")
     check.add_argument("--snapshot", required=True, type=Path)
     check.add_argument("--results-dir", required=True, type=Path)
@@ -683,6 +696,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          help="writes <prefix>.json, <prefix>.md, <prefix>_per_query.csv and <prefix>_overcounted.csv")
     args = parser.parse_args(argv)
     log = lambda message: print(message, flush=True)
+    if args.command == "version":
+        print(STATISTIC_VERSION)
+        return 0
     if args.command == "verify":
         return 0 if verify(args.snapshot, args.results_dir, log)["passed"] else 1
     if args.command == "run":

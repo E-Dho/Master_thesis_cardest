@@ -172,6 +172,26 @@ class OvercountRunTest(unittest.TestCase):
             self.assertIn("nesting exact <= decoupled <= mbr", flagged[lines[0]["query_id"]])
             self.assertTrue(any("partition" in p for p in flagged[lines[1]["query_id"]]))
 
+    def test_merge_rechecks_the_label_instead_of_trusting_the_match_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            benchmark = write_benchmark(root / "benchmark.jsonl")
+            snapshot, report = self._run(root, benchmark)
+            self.assertTrue(report["passed"])
+            shard = sorted((root / "out").glob("shard_*.jsonl"))[0]
+            lines = [json.loads(line) for line in shard.read_text().splitlines()]
+            # a stored label that disagrees with the benchmark, with match left True
+            lines[0]["label"] += 1
+            # exact_count and label agree with each other but not with the benchmark
+            lines[1]["label"] += 1
+            lines[1]["exact_count"] += 1
+            lines[1]["decoupled_count"] += 1
+            lines[1]["mbr_count"] += 1
+            shard.write_text("".join(json.dumps(line) + "\n" for line in lines))
+            report = mo.merge(benchmark, root / "out", root / "report", snapshot)
+            self.assertFalse(report["passed"])
+            self.assertEqual({m["query_id"] for m in report["mismatches"]}, {lines[0]["query_id"], lines[1]["query_id"]})
+
     def test_invariants_catch_an_endpoint_anomaly(self) -> None:
         item = {"exact_count": 3, "decoupled_count": 3, "mbr_count": 4, "dimension": "spatial", "relation": "multi",
                 "anomaly_endpoint_inside_line_misses": 1, "segments_mbr": 5, "segments_exact": 3,
@@ -225,6 +245,33 @@ class ProvenanceTest(unittest.TestCase):
         record = mo.verify(self.snapshot, self.root / "out", log=QUIET)
         self.assertFalse(record["passed"])
         self.assertTrue(any("sy.npy" in problem for problem in record["problems"]))
+
+    def test_a_missing_array_is_recorded_as_a_failed_verification(self) -> None:
+        (self.snapshot / "tables" / "segments" / "ey.npy").unlink()
+        record = mo.verify(self.snapshot, self.root / "out", log=QUIET)
+        self.assertFalse(record["passed"])
+        self.assertTrue(any("ey.npy" in problem for problem in record["problems"]))
+        stored = json.loads((self.root / "out" / mo.VERIFICATION_FILE).read_text())
+        self.assertFalse(stored["passed"])
+        with self.assertRaises(mo.ProvenanceError):
+            self._run(self.root / "out")
+
+    def test_an_array_deleted_after_verification_is_refused(self) -> None:
+        self.assertTrue(mo.verify(self.snapshot, self.root / "out", log=QUIET)["passed"])
+        (self.snapshot / "tables" / "segments" / "ey.npy").unlink()
+        with self.assertRaises(mo.ProvenanceError):
+            mo.require_verified(self.snapshot, self.root / "out")
+
+    def test_job_scripts_read_the_same_version_as_the_module(self) -> None:
+        import re
+        import subprocess
+
+        script = Path(mo.__file__).resolve().parents[1] / "slurm" / "submit_mbr_overcount.sh"
+        pattern = re.search(r"sed -n '([^']+)'", script.read_text()).group(1)
+        version = subprocess.run(["sed", "-n", pattern, mo.__file__], capture_output=True, text=True,
+                                 check=True).stdout.strip()
+        self.assertEqual(version, str(mo.STATISTIC_VERSION))
+        self.assertEqual(mo.main(["version"]), 0)
 
     def test_uncommitted_source_changes_are_refused(self) -> None:
         from unittest import mock
