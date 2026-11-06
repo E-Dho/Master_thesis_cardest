@@ -178,9 +178,12 @@ records the code revision).
 REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_mbr_overcount.sh   # WORKLOAD=test, 16 shards
 ```
 
-Output: `$SNAPSHOT_DIR/analysis/mbr_overcount/test_report.{json,md}` (per
-category, per dimension × relation and per add-on count; provenance hashes)
-and `test_report_per_query.csv`.
+Output in `$SNAPSHOT_DIR/analysis/mbr_overcount/`: `test_report.{json,md}`
+(per category, per dimension × relation and per add-on count; provenance
+hashes; the JSON also lists the ids of all overcounted queries),
+`test_report_per_query.csv` (every evaluated query) and
+`test_report_overcounted.csv` (only queries with `mbr_count > exact_count`,
+most overcounted first, with the split into corner and decoupling overcount).
 
 ## P3 estimators
 

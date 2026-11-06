@@ -81,8 +81,21 @@ class OvercountRunTest(unittest.TestCase):
                 if item["relation"] == "single":
                     self.assertEqual(item["segments_exact"], item["label"])
                     self.assertEqual(item["segments_mbr"], item["mbr_count"])
-            for suffix in (".json", ".md", "_per_query.csv"):
+            for suffix in (".json", ".md", "_per_query.csv", "_overcounted.csv"):
                 self.assertTrue(Path(f"{root / 'report'}{suffix}").exists())
+            # the overcounted queries are listed by id, in the JSON and in their own CSV
+            overcounted = sorted(item["query_id"] for item in items if item["mbr_count"] > item["exact_count"])
+            self.assertGreater(len(overcounted), 0)  # the synthetic fixture has some
+            self.assertEqual(sorted(report["overcounted_query_ids"]), overcounted)
+            import csv
+            with Path(f"{root / 'report'}_overcounted.csv").open(encoding="utf-8") as handle:
+                listed = list(csv.DictReader(handle))
+            self.assertEqual(sorted(row["query_id"] for row in listed), overcounted)
+            ratios = [float(row["ratio_mbr_to_exact"]) for row in listed]
+            self.assertEqual(ratios, sorted(ratios, reverse=True))
+            for row in listed:
+                self.assertEqual(int(row["overcount"]), int(row["overcount_corner"]) + int(row["overcount_decoupling"]))
+                self.assertEqual(int(row["overcount"]), int(row["mbr_count"]) - int(row["exact_count"]))
 
     def test_mbr_count_matches_a_brute_force_box_count(self) -> None:
         data = synthetic_data()

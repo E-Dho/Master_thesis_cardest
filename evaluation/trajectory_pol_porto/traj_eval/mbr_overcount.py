@@ -41,7 +41,9 @@ Queries without a spatial or spatio-temporal predicate (``standard.*``,
 
 Work is sharded and resumable exactly like the label gate (``snapshot_gate``):
 ``run`` appends one fsynced JSON line per query, ``merge`` checks completeness
-and writes the report (JSON), a per-query CSV and a Markdown table.
+and writes the report (JSON, with the ids of all overcounted queries), a
+Markdown table, a CSV of every evaluated query and a CSV of only the
+overcounted queries (``mbr_count > exact_count``), most overcounted first.
 
     python -m evaluation.trajectory_pol_porto.traj_eval.mbr_overcount run \\
         --snapshot DIR --config pol_v3_config.json --benchmark benchmark.jsonl \\
@@ -227,6 +229,11 @@ def evaluate_query(backend, record: Dict[str, Any]) -> Dict[str, Any]:
         "decoupled_count": decoupled_count,
         "mbr_count": mbr_count,
         "match": exact_count == label,
+        "overcounted": mbr_count > exact_count,
+        "overcount": mbr_count - exact_count,
+        "overcount_corner": mbr_count - decoupled_count,
+        "overcount_decoupling": decoupled_count - exact_count,
+        "ratio_mbr_to_exact": mbr_count / exact_count if exact_count else None,
         "segments_mbr": count(everything),
         "segments_exact": count(coupled),
         "segments_corner": count(~line),
@@ -367,7 +374,8 @@ def summarize(items: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 CSV_FIELDS = ["query_id", "category", "label_kind", "addon_predicates", "spatial_mode", "window_area_m2", "label",
-              "exact_count", "decoupled_count", "mbr_count", "segments_mbr", "segments_exact", "segments_corner",
+              "exact_count", "decoupled_count", "mbr_count", "overcounted", "overcount", "overcount_corner",
+              "overcount_decoupling", "ratio_mbr_to_exact", "segments_mbr", "segments_exact", "segments_corner",
               "segments_decoupled_only", "segments_both_endpoints_outside", "segments_crossing",
               "anomaly_endpoint_inside_line_misses", "match", "predicate_hash"]
 
@@ -465,6 +473,7 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
         "predicate_hash_mismatches": foreign[:200],
         "anomaly_queries": anomalies[:200],
         "groups": {name: summarize(groups[name]) for name in order},
+        "overcounted_query_ids": [item["query_id"] for item in items if item["mbr_count"] > item["exact_count"]],
         "seconds_total": round(sum(item.get("seconds", 0.0) for item in items), 2),
         "written_at_utc": datetime.now(timezone.utc).isoformat(),
         "definitions": {
@@ -483,6 +492,12 @@ def merge(benchmark: Path, results_dir: Path, report_prefix: Path, snapshot: Pat
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(items)
+    overcounted = sorted((item for item in items if item["mbr_count"] > item["exact_count"]),
+                         key=lambda item: (-item["mbr_count"] / item["exact_count"], item["query_id"]))
+    with Path(f"{report_prefix}_overcounted.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(overcounted)
     return report
 
 
@@ -502,7 +517,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     combine.add_argument("--benchmark", required=True, type=Path)
     combine.add_argument("--results-dir", required=True, type=Path)
     combine.add_argument("--report-prefix", required=True, type=Path,
-                         help="writes <prefix>.json, <prefix>.md and <prefix>_per_query.csv")
+                         help="writes <prefix>.json, <prefix>.md, <prefix>_per_query.csv and <prefix>_overcounted.csv")
     args = parser.parse_args(argv)
     log = lambda message: print(message, flush=True)
     if args.command == "run":
