@@ -151,6 +151,37 @@ name `pol_mobilitydb` with `--dependency=singleton`, like every v3 database job
 arrays (test: 16 shards, validation: 8) need no database and start after the
 export succeeded. Output: `$THESIS_WORK_ROOT/traj_snapshots/pol_v3/`.
 
+### Segment-MBR overcount statistic
+
+`traj_eval/mbr_overcount.py` measures how much a segment-level bounding box
+overcounts the spatial part of the benchmark. For every query with a spatial
+or spatio-temporal predicate it counts, with the same `NumpyBackend` path as
+the gate and only that predicate's segment mask replaced:
+
+- `exact_count`: the v3 predicate; must equal the stored label (checked);
+- `decoupled_count`: line meets the window, time span meets the interval,
+  tested separately (equals `exact_count` for spatial queries);
+- `mbr_count`: segment MBR overlaps the window (and time span meets the
+  interval).
+
+`exact <= decoupled <= mbr`, so `mbr - exact` splits into the corner effect
+(`mbr - decoupled`) and the space/time decoupling (`decoupled - exact`).
+Per query it also counts segments by class among those satisfying every other
+predicate: *corner* (both endpoints outside the window, line misses it, MBR
+overlaps it: the false positives) and *crossing* (both endpoints outside, line
+passes through: correct). Multi queries count distinct trips, single queries
+segment rows; `standard.*` and `temporal.*` queries are excluded (no spatial
+predicate). Sharded, resumable and input-bound like the gate (the binding also
+records the code revision).
+
+```bash
+REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_mbr_overcount.sh   # WORKLOAD=test, 16 shards
+```
+
+Output: `$SNAPSHOT_DIR/analysis/mbr_overcount/test_report.{json,md}` (per
+category, per dimension × relation and per add-on count; provenance hashes)
+and `test_report_per_query.csv`.
+
 ## P3 estimators
 
 Both are in-process adapters (`traj_eval/adapters/`) built from the P2
