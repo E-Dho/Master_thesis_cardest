@@ -4,6 +4,9 @@
 #   ./submit_timing.sh                         both profiles (P3 on cpu_1core, P4 on cpu_postgres_2core)
 #   PROFILES=cpu_1core ./submit_timing.sh      one profile
 #   CPU_CONFIGS="exact_mbr traj_sampling_n1000" ./submit_timing.sh
+#   PROFILES="cpu_1core gpu_single_query" CPU_CONFIGS=own_model GPU_CONFIGS=own_model ./submit_timing.sh
+#                                              neural methods: GPU latency in its own table (one L40S)
+#   GPU_AFTER_JOB=<id>[:<id>...] ./submit_timing.sh   gpu_single_query waits for these jobs (afterok)
 #   AFTER_JOB=<id> ./submit_timing.sh          the planner timing starts after job <id> succeeded
 #                                              (the P4 accuracy job)
 #   CPU_AFTER_JOB=<id>[:<id>...] ./submit_timing.sh   cpu_1core waits for these jobs (afterok)
@@ -20,6 +23,7 @@ CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
 PROFILES=${PROFILES:-"cpu_1core cpu_postgres_2core"}
 CPU_CONFIGS=${CPU_CONFIGS:-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 traj_sampling_n100000 traj_sampling_n1000000"}
 PG_CONFIGS=${PG_CONFIGS:-"mobilitydb_v3_sql mobilitydb_segment_stbox mobilitydb_trip_stbox"}
+GPU_CONFIGS=${GPU_CONFIGS:-own_model}
 COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/timed_comparison}
 DB_JOB_NAME=${DB_JOB_NAME:-pol_mobilitydb}
 COMPARE_WITH=${COMPARE_WITH:-}
@@ -53,7 +57,14 @@ for profile in $PROFILES; do
       job=$(submit "${extra_sbatch[@]}" --job-name="$DB_JOB_NAME" --dependency="$deps" --export="$base_export,CONFIGS=$configs" \
         "$SCRIPT_DIR/timing_cpu_postgres_2core.sbatch")
       ;;
-    *) echo "unknown profile $profile (cpu_1core or cpu_postgres_2core)" >&2; exit 2 ;;
+    gpu_single_query)
+      configs=$(paths_of "$GPU_CONFIGS")
+      gpu_after=()
+      if [ -n "${GPU_AFTER_JOB:-}" ]; then gpu_after=(--dependency="afterok:$GPU_AFTER_JOB"); fi
+      # the GPU job selects its node class itself (--constraint=L40); TIMING_SBATCH_ARGS is for the CPU jobs
+      job=$(submit "${gpu_after[@]}" --export="$base_export,CONFIGS=$configs" "$SCRIPT_DIR/timing_gpu_single_query.sbatch")
+      ;;
+    *) echo "unknown profile $profile (cpu_1core, cpu_postgres_2core or gpu_single_query)" >&2; exit 2 ;;
   esac
   echo "$profile: job $job"
   jobs+=("$job")

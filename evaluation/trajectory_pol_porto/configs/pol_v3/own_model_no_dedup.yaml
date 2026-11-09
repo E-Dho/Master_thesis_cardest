@@ -1,0 +1,45 @@
+# P7 ablation: the same checkpoints and queries as own_model.yaml, but the
+# distinct-trajectory routes report the matching-segment estimate (no
+# traj_dedup_factor). trips/agents-only multi and single queries are unchanged.
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_pol_v3
+  method_id: own_model
+  variant_id: segments_first_no_dedup
+  display_name: Own model without dedup head (matching segments)
+  protocol: native
+  adaptation: Own model; the v3 segment line test and the coupled space-time test are approximated by the segment bounding box and separate space and time conditions (approx diagnostics); closed intervals as start <= U and end >= L. Ablation: matching-segment estimate reported as the distinct-trajectory estimate (dedup head ignored).
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/E-Dho/Master_thesis_cardest.git
+  installed_version: model trained at model/pol-segments-first-training-state (056493b seed 0, f8456e7 seeds 1 and 2); inference code of this repository (the bridge records the model package it imported)
+timing:
+  device: cpu
+  synchronize_cuda: false
+  comparison_basis: neural_cpu_inference_with_gpu_supplement
+  published_reference_hardware: own model; cluster AMD EPYC 7313 (cpu_1core) and NVIDIA L40S (gpu_single_query)
+  primary_profile: cpu_1core
+  profiles: [cpu_1core, gpu_single_query]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-4
+    absolute_tolerance: 1.0e-6
+resources:
+  profile: pretrained_checkpoint_inference
+  cpu_threads: 8
+artifacts:
+  checkpoint_template: /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/checkpoint_best.pt
+  training_config_template: /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/training_config.yaml
+adapter:
+  type: external
+  working_directory: ../../../..
+  environment:
+    PYTHONPATH: null
+  require_smoke_before_build: true
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py prepare --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/checkpoint_best.pt --output-directory {exchange_directory}
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py smoke --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/checkpoint_best.pt --estimate matching_segments --output-directory {exchange_directory} --queries-jsonl /work_beegfs/sunip956/master_thesis_trajectories/mobilitydb/query_runs/qgen_pol_v3_exact_st_seed20261021/benchmark.jsonl --select-json '{{"relation": "multi"}}' --query-limit {query_limit}
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py build --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/checkpoint_best.pt --output-directory {exchange_directory}
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py evaluate --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/checkpoint_best.pt --estimate matching_segments --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv} --device cpu
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py evaluate --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/checkpoint_best.pt --estimate matching_segments --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv} --warmup-passes 1 --repetitions 3 --device cpu
+    gpu_single_query: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py evaluate --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3/seed_{seed}/checkpoint_best.pt --estimate matching_segments --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv} --warmup-passes 1 --repetitions 3 --device cuda

@@ -19,14 +19,15 @@ different. The plan behind it is the project doc
 | P4 | MobilityDB / PostgreSQL planner (three variants) | done, timed |
 | P5 | DeepDB-MBR | done, timed |
 | P8b | MSCN | done, timed |
-| P6 | TraHist, TraHist-Temporal, CASE+, CASE+-Temporal (shared temporal module, tuning on validation) | implemented; cluster runs pending |
-| P7, P9 | own model, Porto | open (RIS: no-go for now) |
+| P6 | TraHist, TraHist-Temporal, CASE+, CASE+-Temporal (shared temporal module, tuning on validation) | done on POL, timed |
+| P7 | Own model (ResMADE + `traj_dedup_factor`), dedup-head ablation, error split | implemented; seeds 1-2 training, cluster runs pending |
+| P9 | Porto | open (RIS: no-go for now) |
 
 `traj_eval/plugin.py` registers the in-process adapters: `traj_exact_mbr` and
 `traj_sampling` (P3), `traj_mobilitydb` (P4), `traj_mscn` (P8b),
 `traj_trahist` and `traj_case_plus` (P6). DeepDB-MBR
-(P5) uses the core's `external` adapter with
-`scripts/deepdb_mbr_bridge.py`.
+(P5) and the own model (P7) use the core's `external` adapter with
+`scripts/deepdb_mbr_bridge.py` and `scripts/own_model_traj_bridge.py`.
 
 ## Workloads
 
@@ -509,6 +510,62 @@ which is schema payload.
 
 The in-process environment needs pandas and scipy (upstream imports them);
 `prepare` records their versions and fails early without them.
+
+## P7 own model
+
+Decided 2026-11-09: the model as trained, configuration
+`pol_50m_traj_dedup_single_anchor_mbr_segments_first_20k` (table order
+segments-trips-agents), each run's `checkpoint_best.pt`, three training seeds.
+Seed 0 is the existing run (job 22578159, step 19,750); seeds 1 and 2 differ
+only in `training.seed`, `predicate_generation.seed` and the output directory.
+The code that trained them is pinned on branch
+`model/pol-segments-first-training-state` (056493b = `ae1a52d` plus the three
+uncommitted files of the training checkout; all 84 non-cache files under
+`model/src` and `model/configs` match the training tree's git blob hashes).
+`configs/pol_v3/own_model.yaml` reads
+`$THESIS_WORK_ROOT/p7_models/pol_v3/seed_<s>/{checkpoint_best.pt,training_config.yaml}`.
+
+`traj_eval/own_model_translate.py` maps a v3 row onto the model's query record
+without changing the model code. Closed intervals become `start <= U` and
+`end >= L` (the adapter's own `temporal_overlap` mode is half-open). Every query is
+answered, on one of three routes:
+
+| route | queries | estimate |
+|---|---|---|
+| `distinct` | multi joining segments | matching segments x `traj_dedup_factor` |
+| `join` | multi on trips/agents only | join rows (= distinct trips: the other tables are on the one side) |
+| `rows` | single | table rows |
+
+Spatial windows are answered with the segment bounding box
+(`approx:segment_mbr`); spatio-temporal queries also test space and time
+separately (`approx:decoupled_space_time`). The segment-MBR overcount statistic
+measures what that costs on the benchmark itself. `--clamp table:attribute=lo:hi`
+(Porto `origin_stand`: NULL modelled as 0, domain 1..63) intersects every
+condition with the domain so the NULL value never matches. `test_p7_own_model.py`
+evaluates the translated tokens exactly on the fixture data: every non-spatial
+fixture query reproduces its label, every spatial one the MBR count.
+
+The bridge (`scripts/own_model_traj_bridge.py`) writes, next to the exchange
+CSVs, `<workload>_predictions_components.csv` (route, matching-segment estimate,
+`traj_dedup_factor`, forward calls) and its provenance (checkpoint sha256,
+training config sha256, the file the `model` package was imported from).
+`build` reports the inference-only size (`own_model_size.py`) as
+`serialized_bytes`. `own_model_no_dedup.yaml` reports the matching-segment
+estimate on `distinct` routes (ablation without the dedup head).
+
+Error split (`traj_eval/segment_truth.py`, then `traj_eval/own_model_error_split.py`):
+`D_hat/D_exact = (M_hat/M) * (a_hat/a) * (D/D_exact)` with `M`, `D` the true
+matching segments and trajectories under the semantics the model answers
+(MBR, space and time separate) and `a = D/M`: the learned segment count, the
+learned dedup factor and the semantic approximation, as additive log10 terms.
+
+```bash
+STAGE=check MODEL_ROOT=<training-state worktree> slurm/submit_p7.sh   # repo vs training-state code: identical estimates
+STAGE=truth slurm/submit_p7.sh                                         # matching-segment truth, 16 shards
+STAGE=run   slurm/submit_p7.sh                                         # seeds 0-2 of own_model and own_model_no_dedup
+PROFILES="cpu_1core gpu_single_query" CPU_CONFIGS=own_model GPU_CONFIGS=own_model \
+  TIMING_SBATCH_ARGS="--nodelist=<EPYC 7313 node>" slurm/submit_timing.sh
+```
 
 ## Memory budget
 
