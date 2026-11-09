@@ -86,8 +86,8 @@ class SegmentTruthTest(unittest.TestCase):
 class ErrorSplitTest(unittest.TestCase):
     def test_terms_add_up_and_isolate_each_factor(self) -> None:
         truth = {"query_id": "q", "matching_segments_model": "100", "distinct_model": "20", "distinct_exact": "10"}
-        component = {"route": "distinct", "status": "ok", "zero_support": "False",
-                     "matching_segment_estimate": "200.0", "traj_dedup_factor": "0.2"}
+        component = {"route": "distinct", "status": "ok", "zero_support": "False", "estimate_kind": "dedup",
+                     "estimated_cardinality": "40.0", "matching_segment_estimate": "200.0", "traj_dedup_factor": "0.2"}
         terms = split.split_query(component, truth)
         self.assertAlmostEqual(terms["segment"], math.log10(2))  # M_hat / M
         self.assertAlmostEqual(terms["dedup"], 0.0)  # a_hat == a = 0.2
@@ -95,6 +95,20 @@ class ErrorSplitTest(unittest.TestCase):
         self.assertAlmostEqual(terms["total"], math.log10(40 / 10))
         self.assertIsNone(split.split_query({**component, "zero_support": "True"}, truth))
         self.assertIsNone(split.split_query({**component, "route": "join"}, truth))
+
+    def test_the_ablation_applies_factor_one(self) -> None:
+        # own_model_no_dedup reports M_hat; the stored head output must not be credited to it
+        truth = {"query_id": "q", "matching_segments_model": "100", "distinct_model": "20", "distinct_exact": "10"}
+        component = {"route": "distinct", "status": "ok", "zero_support": "False",
+                     "estimate_kind": "matching_segments", "estimated_cardinality": "200.0",
+                     "matching_segment_estimate": "200.0", "traj_dedup_factor": "0.2"}
+        terms = split.split_query(component, truth)
+        self.assertAlmostEqual(terms["dedup"], math.log10(1 / 0.2))  # a_hat = 1 against a = 0.2
+        self.assertAlmostEqual(terms["total"], math.log10(200 / 10))
+        with self.assertRaises(ValueError):  # reported estimate inconsistent with its kind
+            split.split_query({**component, "estimated_cardinality": "40.0"}, truth)
+        with self.assertRaises(ValueError):  # files without the kind are refused
+            split.split_query({k: v for k, v in component.items() if k != "estimate_kind"}, truth)
 
     def test_runs_are_joined_by_workload_position(self) -> None:
         rows = list(benchmark_rows())
@@ -116,13 +130,32 @@ class ErrorSplitTest(unittest.TestCase):
             with (run / "exchange" / "pol_v3_multi_predictions_components.csv").open("w", encoding="utf-8",
                                                                                       newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=("query_id", "route", "status", "zero_support",
+                                                            "estimate_kind", "estimated_cardinality",
                                                             "matching_segment_estimate", "traj_dedup_factor"))
                 writer.writeheader()
                 for position, row in enumerate(multi):
                     writer.writerow({"query_id": position, "route": "distinct" if st.selected(row) else "join",
-                                     "status": "ok", "zero_support": "False",
+                                     "status": "ok", "zero_support": "False", "estimate_kind": "dedup",
+                                     "estimated_cardinality": 2 * row["cardinality"],
                                      "matching_segment_estimate": 8 * row["cardinality"], "traj_dedup_factor": 0.25})
             report = split.split_runs(benchmark, truth_path, [run])
+            # an ablation run cannot be pooled with it
+            ablation = root / "ablation"
+            (ablation / "exchange").mkdir(parents=True)
+            text = (run / "exchange" / "pol_v3_multi_predictions_components.csv").read_text()
+            rows_out = list(csv.DictReader(text.splitlines()))
+            for item in rows_out:
+                item["estimate_kind"] = "matching_segments"
+                item["estimated_cardinality"] = item["matching_segment_estimate"]
+            with (ablation / "exchange" / "pol_v3_multi_predictions_components.csv").open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows_out[0]))
+                writer.writeheader()
+                writer.writerows(rows_out)
+            ablation_report = split.split_runs(benchmark, truth_path, [ablation])
+            with self.assertRaises(ValueError):
+                split.split_runs(benchmark, truth_path, [run, ablation])
+        self.assertEqual(ablation_report["estimate_kind"], "matching_segments")
+        self.assertAlmostEqual(ablation_report["pooled"]["all"]["dedup"]["median_abs_log10"], math.log10(4))
         pooled = report["pooled"]["all"]
         self.assertEqual(pooled["queries"], sum(1 for row in multi if st.selected(row)))
         self.assertAlmostEqual(pooled["segment"]["median_abs_log10"], math.log10(2))

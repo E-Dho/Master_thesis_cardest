@@ -558,6 +558,11 @@ Error split (`traj_eval/segment_truth.py`, then `traj_eval/own_model_error_split
 matching segments and trajectories under the semantics the model answers
 (MBR, space and time separate) and `a = D/M`: the learned segment count, the
 learned dedup factor and the semantic approximation, as additive log10 terms.
+`a_hat` is taken from the reported estimate (`D_hat / M_hat`), so the ablation
+counts with factor 1; the components CSV records the `estimate_kind`, and runs of
+different kinds are not pooled. The configs name the checkpoint directory in
+their commands (recorded in every run manifest); `submit_p7.sh STAGE=run`
+refuses a `P7_MODELS` that differs from it.
 
 ```bash
 STAGE=check MODEL_ROOT=<training-state worktree> slurm/submit_p7.sh   # repo vs training-state code: identical estimates

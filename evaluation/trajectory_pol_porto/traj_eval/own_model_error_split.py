@@ -8,7 +8,11 @@ MBR, space and time separate; ``D_exact`` = the label):
     D_hat / D_exact = (M_hat / M) * (a_hat / a) * (D / D_exact),   a = D / M
 
 - segment factor ``M_hat / M``: error of the learned matching-segment count;
-- dedup factor ``a_hat / a``: error of ``traj_dedup_factor``;
+- dedup factor ``a_hat / a``: error of the dedup factor the reported estimate
+  used, ``a_hat = D_hat / M_hat`` taken from the reported estimate, not from the
+  stored head output: ``traj_dedup_factor`` for ``own_model``, 1 for the
+  ablation ``own_model_no_dedup`` (which reports ``M_hat``; its whole
+  duplication error lands in this term);
 - semantics factor ``D / D_exact``: what answering the MBR / decoupled question
   instead of the exact one costs (1 for queries without a spatial window).
 
@@ -47,7 +51,17 @@ def split_query(component: Dict[str, str], truth: Dict[str, str]) -> Optional[Di
     if component["route"] != "distinct" or component["status"] != "ok" or component["zero_support"] != "False":
         return None
     m_hat = float(component["matching_segment_estimate"])
-    a_hat = float(component["traj_dedup_factor"])
+    reported = float(component["estimated_cardinality"])
+    kind = component.get("estimate_kind")
+    if kind not in ("dedup", "matching_segments"):
+        raise ValueError(f"components row {component.get('query_id')} has no known estimate_kind ({kind!r})")
+    if m_hat <= 0 or reported <= 0:
+        return None
+    a_hat = reported / m_hat  # the factor the reported estimate actually applied
+    expected = float(component["traj_dedup_factor"]) if kind == "dedup" else 1.0
+    if not math.isclose(a_hat, expected, rel_tol=1e-9, abs_tol=1e-12):
+        raise ValueError(f"components row {component.get('query_id')}: reported estimate {reported} is not "
+                         f"M_hat x {'traj_dedup_factor' if kind == 'dedup' else '1'}")
     m, d = int(truth["matching_segments_model"]), int(truth["distinct_model"])
     d_exact = int(truth["distinct_exact"])
     if min(m_hat, a_hat, m, d, d_exact) <= 0:
@@ -55,7 +69,7 @@ def split_query(component: Dict[str, str], truth: Dict[str, str]) -> Optional[Di
     a = d / m
     terms = {"segment": math.log10(m_hat / m), "dedup": math.log10(a_hat / a),
              "semantics": math.log10(d / d_exact)}
-    terms["total"] = math.log10(m_hat * a_hat / d_exact)
+    terms["total"] = math.log10(reported / d_exact)
     if abs(sum(terms[t] for t in TERMS) - terms["total"]) > 1e-9:
         raise ArithmeticError(f"terms do not add up for {truth['query_id']}")
     return terms
@@ -98,6 +112,9 @@ def split_runs(benchmark: Path, truth_csv: Path, runs: Iterable[Path], workload:
         components = _csv(Path(run) / "exchange" / f"{workload}_predictions_components.csv")
         if len(components) != len(positions):
             raise ValueError(f"{run}: {len(components)} component rows for {len(positions)} workload queries")
+        kinds = {component.get("estimate_kind") for component in components if component["route"] == "distinct"}
+        if len(kinds) != 1:
+            raise ValueError(f"{run}: distinct routes with estimate kinds {sorted(map(str, kinds))}")
         groups: Dict[str, List[Dict[str, float]]] = defaultdict(list)
         excluded = 0
         for component in components:
@@ -116,16 +133,21 @@ def split_runs(benchmark: Path, truth_csv: Path, runs: Iterable[Path], workload:
             pooled["all"].append(terms)
             pooled[dimension].append(terms)
             rows_out.append({"run": str(run), "query_id": source_id, "dimension": dimension, **terms})
-        per_run[str(run)] = {"excluded_zero_or_unsupported": excluded,
+        per_run[str(run)] = {"estimate_kind": kinds.pop(), "excluded_zero_or_unsupported": excluded,
                              "groups": {name: summarize(items) for name, items in sorted(groups.items())}}
-    return {"definition": "D_hat/D_exact = (M_hat/M) * (a_hat/a) * (D/D_exact); log10 terms; M, D under the model's "
+    run_kinds = {value["estimate_kind"] for value in per_run.values()}
+    if len(run_kinds) > 1:
+        raise ValueError(f"runs of different estimate kinds cannot be pooled: {sorted(run_kinds)}")
+    return {"estimate_kind": run_kinds.pop() if run_kinds else None,
+            "definition": "D_hat/D_exact = (M_hat/M) * (a_hat/a) * (D/D_exact), a_hat = D_hat/M_hat of the "
+                          "reported estimate; log10 terms; M, D under the model's "
                           "semantics (segment MBR, separate space and time), D_exact = label",
             "runs": per_run, "pooled": {name: summarize(items) for name, items in sorted(pooled.items())},
             "rows": rows_out}
 
 
 def markdown(report: Dict[str, Any]) -> str:
-    lines = ["# Own model: error split (log10 terms, pooled over runs)", "",
+    lines = [f"# Own model: error split (log10 terms, pooled over runs; estimate: {report.get('estimate_kind')})", "",
              "| group | queries | segment med abs | dedup med abs | semantics med abs | total med abs | "
              "segment mean | dedup mean | semantics mean | dominant segment / dedup / semantics |",
              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]

@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LATENCY_SCOPE = "predicate_encoding_and_estimation"
-COMPONENT_FIELDS = ("query_id", "route", "status", "estimated_cardinality", "matching_segment_estimate",
+COMPONENT_FIELDS = ("query_id", "route", "status", "estimate_kind", "estimated_cardinality", "matching_segment_estimate",
                     "traj_dedup_factor", "distinct_trajectory_estimate", "model_forward_calls", "zero_support",
                     "diagnostic")
 
@@ -296,7 +296,8 @@ def evaluate_workload(model: OwnModel, rows: List[Dict[str, Any]], predictions_p
                                 "diagnostic": diagnostic})
         parts = parts_of.get(query_id, {}) if status == "ok" else {}
         component_rows.append({
-            "query_id": query_id, "route": route, "status": status, "estimated_cardinality": value,
+            "query_id": query_id, "route": route, "status": status, "estimate_kind": estimate_kind,
+            "estimated_cardinality": value,
             "matching_segment_estimate": _text(parts.get("matching_segment_estimate")),
             "traj_dedup_factor": _text(parts.get("traj_dedup_factor")),
             "distinct_trajectory_estimate": _text(parts.get("distinct_trajectory_estimate")),

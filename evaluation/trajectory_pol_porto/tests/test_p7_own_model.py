@@ -12,6 +12,9 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import math
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -329,8 +332,22 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(Path(provenance["model_package_file"]).resolve().parent,
                          (REPO / "model" / "src").resolve())
 
+        self.assertEqual({c["estimate_kind"] for c in components}, {"dedup"})
         ablation, _, ablation_components, _ = self._evaluate({"relation": "multi"}, "multi_ablation",
                                                              "--estimate", "matching_segments")
+        self.assertEqual({c["estimate_kind"] for c in ablation_components}, {"matching_segments"})
+        # the error split credits each variant with the factor it applied (review of ab48208)
+        from evaluation.trajectory_pol_porto.traj_eval import own_model_error_split as split
+
+        truth = {"query_id": "q", "matching_segments_model": "100", "distinct_model": "20", "distinct_exact": "10"}
+        dedup_terms, ablation_terms = [], []
+        for component, ablation_component in zip(components, ablation_components):
+            if component["route"] == "distinct" and component["zero_support"] == "False":
+                dedup_terms.append(split.split_query(component, truth)["dedup"])
+                ablation_terms.append(split.split_query(ablation_component, truth)["dedup"])
+        self.assertTrue(dedup_terms)
+        self.assertTrue(all(abs(value - math.log10(1 / 0.2)) < 1e-9 for value in ablation_terms))
+        self.assertNotEqual(dedup_terms, ablation_terms)
         for prediction, component, base in zip(ablation, ablation_components, components):
             if component["route"] == "distinct" and component["zero_support"] == "False":
                 self.assertEqual(float(prediction["estimated_cardinality"]),
@@ -409,6 +426,37 @@ class BridgeTest(unittest.TestCase):
         differs = [a["query_id"] for a, b in zip(estimates["own_model"], estimates["own_model_no_dedup"])
                    if a["estimated_cardinality"] != b["estimated_cardinality"]]
         self.assertTrue(differs)  # the variants differ exactly on the distinct routes
+
+
+class SubmitP7Test(unittest.TestCase):
+    """STAGE=run must not evaluate other checkpoints than P7_MODELS names (review of ab48208)."""
+
+    def _submit(self, env_extra):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "sbatch"
+            log = Path(tmp) / "sbatch.log"
+            fake.write_text('#!/bin/bash\necho "$@" >> "$FAKE_SBATCH_LOG"\necho 4242\n')
+            fake.chmod(0o755)
+            env = {**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}", "FAKE_SBATCH_LOG": str(log),
+                   "REPO_ROOT": str(REPO), "STAGE": "run", **env_extra}
+            if "P7_MODELS" not in env_extra:
+                env.pop("P7_MODELS", None)
+            result = subprocess.run(["bash", str(REPO / "evaluation/trajectory_pol_porto/slurm/submit_p7.sh")],
+                                    env=env, capture_output=True, text=True)
+            submitted = log.read_text().splitlines() if log.exists() else []
+        return result, submitted
+
+    def test_default_directory_submits_both_variants(self) -> None:
+        result, submitted = self._submit({})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(submitted), 3)  # two seed arrays and the comparison
+        self.assertTrue(all("--array=0,1,2" in line for line in submitted[:2]))
+
+    def test_other_directory_is_refused_before_submitting(self) -> None:
+        result, submitted = self._submit({"P7_MODELS": "/elsewhere/p7_models/pol_v3"})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("edit the config", result.stderr)
+        self.assertEqual(submitted, [])
 
 
 if __name__ == "__main__":

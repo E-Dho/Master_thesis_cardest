@@ -1,6 +1,9 @@
 #!/bin/bash
 # P7: the own model (ResMADE + traj_dedup_factor) on POL v3. Checkpoints and their
 # training configs are read from P7_MODELS/seed_<s>/{checkpoint_best.pt,training_config.yaml}.
+# The configs' bridge commands name that directory themselves (it is part of the
+# recorded command and the accuracy config hash), so STAGE=run refuses a P7_MODELS
+# that differs from the directory in the configs: edit the configs instead.
 #   STAGE=check ./submit_p7.sh   code check: this repository's model code vs the pinned training
 #                                state (MODEL_ROOT) on CHECK_QUERIES test queries per relation, seed 0
 #   STAGE=truth ./submit_p7.sh   true matching-segment counts of the test multi queries (verify,
@@ -54,6 +57,11 @@ case "$STAGE" in
     for name in $CONFIG_NAMES; do
       config="$CONFIG_DIR/$name.yaml"
       if [ ! -f "$config" ]; then echo "missing config $config" >&2; exit 2; fi
+      used=$(grep -oE -- '--(checkpoint|training-config) [^ ]+' "$config" | sed -E 's/^--[a-z-]+ //; s#/[^/]+$##' | sort -u)
+      if [ "$used" != "$P7_MODELS/seed_{seed}" ]; then
+        echo "$config reads its checkpoints from '$used', not P7_MODELS=$P7_MODELS/seed_{seed}; edit the config" >&2
+        exit 2
+      fi
       seeds=$(grep -E '^  seeds:' "$config" | sed -E 's/.*\[(.*)\].*/\1/' | tr -d ' ')
       job=$(submit "${after[@]}" --job-name=traj_own_model --array="$seeds" --export="$base_export,CONFIG=$config" \
         "$SCRIPT_DIR/run_external.sbatch")
