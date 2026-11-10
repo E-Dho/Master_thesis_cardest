@@ -71,7 +71,7 @@ OWN_MODEL_VARIANTS = {
             "training_summary.json"
         ),
     },
-    "duet_neurocard_distjoin_rare_aux_best_p99_step_11000": {
+    "duet_neurocard_distjoin_rare_aux_step_11000": {
         "label": r"\OwnModelName{} (best p99)",
         "qerror_only": True,
         "training_summary": (
@@ -659,6 +659,8 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
             # intermediate checkpoint.
             row["_build.training_s.mean"] = selected_training_seconds
             row["_build.training_s.std"] = 0.0
+            row["_build.total_s.mean"] = selected_training_seconds
+            row["_build.total_s.std"] = 0.0
             row["_build.training_record_is_full_run"] = True
         elif checkpoint_load_only:
             # A bridge load is not training/statistics construction.
@@ -698,8 +700,8 @@ def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
         own_model_single_run_note(rows),
         "Wall-clock time of the preprocessing stage, the training (or statistics-collection) "
         "stage, and their sum.",
-        ("For selected own-model checkpoints, training time is the full recorded training run "
-         "because no time-to-checkpoint record was logged."
+        ("For selected own-model checkpoints, training and total-build time are the full "
+         "recorded training run because no time-to-checkpoint record was logged."
          if any(r.get("_build.training_record_is_full_run") for r in rows) else ""),
         ("-- denotes a pretrained/reused checkpoint load rather than a training/statistics time."
          if any(r.get("_build.checkpoint_load_only") and not r.get("_build.training_record_is_full_run")

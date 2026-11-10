@@ -11,9 +11,15 @@ A minimizes smoothed p50; B minimizes smoothed p99. Smoothed q-error floors esti
 | Workload | Pick | Step | Original seed | Smoothed p50 / p90 / p95 / p99 / max | Raw p50 / p99 | Est. < 1 | Checkpoint | Training config | Source summary |
 |---|---|---:|---:|---|---|---:|---|---|---|
 | job_light | A: best smoothed median | 18000 | 0 | 1.24269892283/3.75286198775/8.79614947126/23.4405444854/33 | 1.24269892283 / 43.3986169574 | 2 | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_duet_binary_native_anpm_40k_rare_auxiliary/checkpoint_step_18000.pt` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/configs/job_light_duet_binary_native_anpm_40k_rare_auxiliary.yaml` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_duet_binary_native_anpm_40k_rare_auxiliary/joblight_checkpoint_sweep_10k_29k/job_light_query_summary_step_18000.json` |
-| job_light | B: best smoothed p99 | 11000 | 0 | 1.52050966821/4.13146258188/7.22214174464/11.8918041061/15.9550247521 | 1.52050966821 / 18.2931152998 | 1 | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_duet_binary_native_anpm_40k_rare_auxiliary/checkpoint_step_11000.pt` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/configs/job_light_duet_binary_native_anpm_40k_rare_auxiliary.yaml` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_0/gpu-full-20260924-v2-d03025b40e4aa7c3eb1b7c95bfcfb9977e6339acff5fa66edea58a256bbc933b/summary.json` |
+| job_light | B: best smoothed p99 | 11000 | 0 | 1.52050966821/4.13146258188/7.22214174464/11.8918041061/15.9550247521 | 1.52050966821 / 18.2931152998 | 1 | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_duet_binary_native_anpm_40k_rare_auxiliary/checkpoint_step_11000.pt` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/configs/job_light_duet_binary_native_anpm_40k_rare_auxiliary.yaml` | Selection seed: `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_0/gpu-full-20260924-v2-d03025b40e4aa7c3eb1b7c95bfcfb9977e6339acff5fa66edea58a256bbc933b/summary.json`; final report: existing three-seed aggregate `.../duet_neurocard_distjoin_rare_aux_step_11000/aggregate/comparison.json` |
 | job_light_ranges | A: best smoothed median | 40000 | 0 | 1.71585841503/36.2773434821/177.930059813/1746.57060735/8169 | 1.76672685124 / 277690.529955 | 110 | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/checkpoint_step_40000.pt` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/configs/job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0.yaml` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/job_light_ranges_summary.json` |
 | job_light_ranges | B: best smoothed p99 | 19500 | 1 | 1.82140331877/37.8761518453/141.366329158/887.046879175/22644 | 1.89432993604 / 133156.288666 | 112 | `/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/checkpoint_step_19500.pt` | `/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/training_config.yaml` | `/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_content_best_available_check/seed_1/best_available_checkpoint_check-f0786f6487cf0a564b603830c814fa42575e4ec941800e124d67905b5591bf19/summary.json` |
+
+### Provenance check
+
+The JOB-light B checkpoint is byte-identical to `own_model_rare_aux_40k/seed_0/checkpoint_step_11000.pt`; seeds 1 and 2 were already evaluated at the same step in `duet_neurocard_distjoin_rare_aux_step_11000`. The final B row therefore reports that existing three-seed aggregate, not a new single-seed run: smoothed p50 `1.57927750461 ± 0.111578846321`, p90 `5.58564238167 ± 1.78041930134`, p95 `9.92532435576 ± 3.77826388980`, p99 `22.0409971084 ± 13.1082611493`, and max `30.7060436802 ± 21.7435928641`. The selected seed-0 value `11.8918041061` was the best p99 among those three seeds.
+
+JOB-light A (step 18,000) is a standalone seed-0 training run, so no same-step three-seed aggregate exists. JOB-light-ranges A (step 40,000, seed 0) is likewise standalone. JOB-light-ranges B (step 19,500, seed 1) has matching seed checkpoints, but the available three-seed aggregate uses per-seed best checkpoints rather than a common step 19,500 and is therefore not substituted for the selected-checkpoint result.
 
 ## Complete Candidate Inventory
 
@@ -119,7 +125,6 @@ Change only `seeds:` to `[0, 1, 2]` in the four selected configs, then execute:
 ```bash
 for CONFIG in \
   configs/own_model_job_light_best_median_step_18000.yaml \
-  configs/own_model_job_light_best_p99_step_11000.yaml \
   configs/own_model_job_light_ranges_best_median_step_40000.yaml \
   configs/own_model_job_light_ranges_best_p99_step_19500.yaml; do
   python -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli run --config "$CONFIG"
@@ -129,11 +134,12 @@ PLAN=configs/timing_plan_selected_own_model_cpu.txt sbatch slurm/timing_cpu_1cor
 PLAN=configs/timing_plan_selected_own_model_gpu.txt sbatch slurm/timing_gpu_single_query.sbatch
 for CONFIG in \
   configs/own_model_job_light_best_median_step_18000.yaml \
-  configs/own_model_job_light_best_p99_step_11000.yaml \
   configs/own_model_job_light_ranges_best_median_step_40000.yaml \
   configs/own_model_job_light_ranges_best_p99_step_19500.yaml; do
   python -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli aggregate --config "$CONFIG"
 done
-# Re-run cli compare with the original 13 baseline inputs plus these four aggregates.
+# Re-run cli compare with the original 13 baseline inputs, the three new selected
+# aggregates above, and the existing three-seed normal-B aggregate
+# `duet_neurocard_distjoin_rare_aux_step_11000`.
 python scripts/make_latex_tables.py --results-root results/joblight_phase1
 ```
