@@ -24,12 +24,13 @@
     FOJ sampling ($N=1{,}000{,}000$) & -- & $200$ \\
     FOJ sampling ($N=7{,}168{,}000$) & -- & $1{,}434$ \\
     \midrule
-    \OwnModelName{}$^{\S}$ & $5.35$\,M & $82.3$ \\
+    \OwnModelName{} (best median)$^{\S}$ & $5.35$\,M & $38.2$ \\
+    \OwnModelName{} (best p99)$^{\S}$ & $5.35$\,M & $38.2$ \\
     \bottomrule
   \end{tabular}
   \end{adjustbox}
   \par\smallskip
   \begin{minipage}{\linewidth}\footnotesize
-    Trainable parameter count and serialized model or summary size in decimal MB ($10^6$ bytes); -- where not applicable. For \OwnModelName{}, serialized size is the full checkpoint; no inference-only exporter was available when these tables were generated. $^{\S}$Single run (seed 0); seeds 1 and 2 pending. $^{\dagger}$DeepDB supports only 19.7\,\% of the queries; its values are computed on that subset and are not considered for the best value.
+    Trainable parameter count and serialized model or summary size in decimal MB ($10^6$ bytes); -- where not applicable. For \OwnModelName{}, serialized size is the inference-only \texttt{state\_dict}. $^{\S}$This selected checkpoint was evaluated for one seed; no same-step three-seed aggregate is available. $^{\dagger}$DeepDB supports only 19.7\,\% of the queries; its values are computed on that subset and are not considered for the best value.
   \end{minipage}
 \end{table}

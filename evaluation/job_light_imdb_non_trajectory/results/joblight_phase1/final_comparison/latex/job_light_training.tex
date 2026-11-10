@@ -17,18 +17,19 @@
     NeuroCard & $20.6$\,{\scriptsize$\pm 24$}\,s & $2.88$\,{\scriptsize$\pm 0.12$}\,min & \best{$3.23$\,{\scriptsize$\pm 0.28$}\,min} \\
     DistJoin & $9.52$\,{\scriptsize$\pm 0.91$}\,s & $49.5$\,{\scriptsize$\pm 0.39$}\,min & $49.6$\,{\scriptsize$\pm 0.40$}\,min \\
     \midrule
-    FOJ sampling ($N=1{,}000$) & \best{$0$\,s} & $5.62$\,{\scriptsize$\pm 0.054$}\,min & $5.62$\,{\scriptsize$\pm 0.054$}\,min \\
-    FOJ sampling ($N=10{,}000$) & \best{$0$\,s} & $5.62$\,{\scriptsize$\pm 0.054$}\,min & $5.62$\,{\scriptsize$\pm 0.054$}\,min \\
-    FOJ sampling ($N=100{,}000$) & \best{$0$\,s} & $6.23$\,{\scriptsize$\pm 0.052$}\,min & $6.23$\,{\scriptsize$\pm 0.052$}\,min \\
-    FOJ sampling ($N=1{,}000{,}000$) & \best{$0$\,s} & $11.8$\,{\scriptsize$\pm 0.098$}\,min & $11.8$\,{\scriptsize$\pm 0.098$}\,min \\
-    FOJ sampling ($N=7{,}168{,}000$) & \best{$0$\,s} & $50.1$\,{\scriptsize$\pm 0.51$}\,min & $50.1$\,{\scriptsize$\pm 0.51$}\,min \\
+    FOJ sampling ($N=1{,}000$) & $0$\,s & $5.62$\,{\scriptsize$\pm 0.054$}\,min & $5.62$\,{\scriptsize$\pm 0.054$}\,min \\
+    FOJ sampling ($N=10{,}000$) & $0$\,s & $5.62$\,{\scriptsize$\pm 0.054$}\,min & $5.62$\,{\scriptsize$\pm 0.054$}\,min \\
+    FOJ sampling ($N=100{,}000$) & $0$\,s & $6.23$\,{\scriptsize$\pm 0.052$}\,min & $6.23$\,{\scriptsize$\pm 0.052$}\,min \\
+    FOJ sampling ($N=1{,}000{,}000$) & $0$\,s & $11.8$\,{\scriptsize$\pm 0.098$}\,min & $11.8$\,{\scriptsize$\pm 0.098$}\,min \\
+    FOJ sampling ($N=7{,}168{,}000$) & $0$\,s & $50.1$\,{\scriptsize$\pm 0.51$}\,min & $50.1$\,{\scriptsize$\pm 0.51$}\,min \\
     \midrule
-    \OwnModelName{}$^{\S}$ & $0.261$\,s & $19.6$\,h & $19.6$\,h \\
+    \OwnModelName{} (best median)$^{\S}$ & $0.261$\,s & $8.91$\,h & $8.91$\,h \\
+    \OwnModelName{} (best p99) & $0.323$\,{\scriptsize$\pm 0.19$}\,s & $5.42$\,h & $5.42$\,h \\
     \bottomrule
   \end{tabular}
   \end{adjustbox}
   \par\smallskip
   \begin{minipage}{\linewidth}\footnotesize
-    Values are mean\,$\pm$\,standard deviation over 1/3 seeds (no deviation shown for single-seed or zero-variance results). $^{\S}$Single run (seed 0); seeds 1 and 2 pending. Wall-clock time of the preprocessing stage, the training (or statistics-collection) stage, and their sum. For selected own-model checkpoints, training and total-build time are the full recorded training run because no time-to-checkpoint record was logged. FOJ sampling uses the recorded cumulative reservoir draw time at each sample prefix; the zero-valued cache-hit build timer is not reported.
+    Values are mean\,$\pm$\,standard deviation over three seeds (PostgreSQL: a single deterministic run). $^{\S}$This selected checkpoint was evaluated for one seed; no same-step three-seed aggregate is available. Wall-clock time of the preprocessing stage, the training (or statistics-collection) stage, and their sum. For selected own-model checkpoints, training and total-build time is measured to the selected checkpoint; final-step selections use the recorded full-run time. FOJ sampling uses the recorded cumulative reservoir draw time at each sample prefix; the zero-valued cache-hit build timer is not reported.
   \end{minipage}
 \end{table}

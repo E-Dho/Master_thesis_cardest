@@ -33,8 +33,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import statistics
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -62,18 +64,37 @@ DASH = "--"
 # unambiguous.
 OWN_MODEL_VARIANTS = {
     "duet_neurocard_distjoin_rare_aux_best_median_step_18000": {
-        "label": r"\OwnModelName{}",
-        "qerror_only": False,
-        "training_summary": (
+        "label": r"\OwnModelName{} (best median)",
+        "selection_order": 0,
+        "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "Master_thesis_cardest/model/runs/"
             "job_light_duet_binary_native_anpm_40k_rare_auxiliary/"
-            "training_summary.json"
+            "checkpoint_step_18000.pt",
         ),
+        "training_summaries": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "Master_thesis_cardest/model/runs/"
+            "job_light_duet_binary_native_anpm_40k_rare_auxiliary/"
+            "training_summary.json",
+        ),
+        "training_time_mode": "checkpoint",
     },
     "duet_neurocard_distjoin_rare_aux_step_11000": {
         "label": r"\OwnModelName{} (best p99)",
-        "qerror_only": True,
+        "selection_order": 1,
+        "checkpoint_paths": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "Master_thesis_cardest/model/runs/"
+            "job_light_duet_binary_native_anpm_40k_rare_auxiliary/"
+            "checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_rare_aux_40k/seed_1/"
+            "checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_rare_aux_40k/seed_2/"
+            "checkpoint_step_11000.pt",
+        ),
         "training_summaries": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "Master_thesis_cardest/model/runs/"
@@ -86,25 +107,39 @@ OWN_MODEL_VARIANTS = {
             "joblight_evaluation/own_model_rare_aux_40k/seed_2/"
             "training_summary.json",
         ),
+        "training_time_mode": "checkpoint",
     },
     "duet_neurocard_distjoin_rare_aux_best_median_step_40000": {
-        "label": r"\OwnModelName{}",
-        "qerror_only": False,
-        "training_summary": (
+        "label": r"\OwnModelName{} (best median)",
+        "selection_order": 0,
+        "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "Master_thesis_cardest/model/runs/"
             "job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/"
-            "training_summary.json"
+            "checkpoint_step_40000.pt",
         ),
+        "training_summaries": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "Master_thesis_cardest/model/runs/"
+            "job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/"
+            "training_summary.json",
+        ),
+        "training_time_mode": "full_run",
     },
     "duet_neurocard_distjoin_rare_aux_best_p99_step_19500": {
         "label": r"\OwnModelName{} (best p99)",
-        "qerror_only": True,
-        "training_summary": (
+        "selection_order": 1,
+        "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/"
-            "training_summary.json"
+            "checkpoint_step_19500.pt",
         ),
+        "training_summaries": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/"
+            "training_summary.json",
+        ),
+        "training_time_mode": "checkpoint",
     },
 }
 
@@ -171,13 +206,15 @@ def fmt_number(value: float, sig: int = 3) -> str:
         return f"{mantissa:.2f}\\cdot 10^{{{exponent}}}"
     if magnitude >= 1000:
         return _thousands(int(round(value)))
-    if magnitude >= 1:
-        digits = sig - 1 - int(math.floor(math.log10(magnitude)))
-        digits = max(digits, 0)
-        return f"{value:.{digits}f}"
-    # magnitude < 1: keep `sig` significant digits
+    # Round to the requested precision before choosing the final decimal
+    # places: 9.997 at three significant digits is 10.0, not 10.00.
     digits = sig - 1 - int(math.floor(math.log10(magnitude)))
-    return f"{value:.{digits}f}"
+    rounded = round(value, digits)
+    rounded_magnitude = abs(rounded)
+    if rounded_magnitude >= 1000:
+        return _thousands(int(round(rounded)))
+    digits = max(sig - 1 - int(math.floor(math.log10(rounded_magnitude))), 0)
+    return f"{rounded:.{digits}f}"
 
 
 def fmt_cell(mean: Any, std: Any = None, sig: int = 3, show_std: bool = True,
@@ -331,13 +368,15 @@ def prepare_rows(results: list[dict], workload: str) -> list[dict]:
         if not is_complete(row):
             label += r"$^{\dagger}$"
         variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
-        row["_qerror_only"] = bool(variant.get("qerror_only"))
         if row.get("method_id") == "own_model" and int(row.get("seed_count", 1)) == 1:
             label += r"$^{\S}$"
         row["_label"] = label
         row["_eligible"] = is_complete(row)
         rows.append(row)
-    rows.sort(key=lambda r: GROUP_OF_METHOD.get(r["method_id"], 99))  # stable
+    rows.sort(key=lambda r: (
+        GROUP_OF_METHOD.get(r["method_id"], 99),
+        OWN_MODEL_VARIANTS.get(r.get("variant_id"), {}).get("selection_order", 0),
+    ))
     return rows
 
 
@@ -357,18 +396,13 @@ def coverage_note(rows: list[dict]) -> str:
 
 
 def seeds_note(rows: list[dict]) -> str:
-    counts = sorted({int(r.get("seed_count", 1)) for r in rows})
-    return (
-        "Values are mean\\,$\\pm$\\,standard deviation over "
-        + ("/".join(str(c) for c in counts))
-        + " seeds (no deviation shown for single-seed or zero-variance results)."
-    )
+    return "Values are mean\\,$\\pm$\\,standard deviation over three seeds (PostgreSQL: a single deterministic run)."
 
 
 def own_model_single_run_note(rows: list[dict]) -> str:
     if any(r.get("method_id") == "own_model" and int(r.get("seed_count", 1)) == 1
            for r in rows):
-        return r"$^{\S}$Single run (seed 0); seeds 1 and 2 pending."
+        return r"$^{\S}$This selected checkpoint was evaluated for one seed; no same-step three-seed aggregate is available."
     return ""
 
 
@@ -378,8 +412,8 @@ def own_model_selection_note(rows: list[dict]) -> str:
         return (r"The \OwnModelName{} row was selected on this benchmark's own queries "
                 r"for both median (A) and p99 (B).")
     if len(selected) > 1:
-        return (r"The two \OwnModelName{} rows were selected on this benchmark's own queries: "
-                r"median (A) and p99 (B), respectively.")
+        return (r"The two \OwnModelName{} rows are the best-median (A) and best-p99 (B) "
+                r"selections on this benchmark's own queries.")
     return ""
 
 
@@ -387,7 +421,6 @@ def own_model_selection_note(rows: list[dict]) -> str:
 # Q-error tables
 # --------------------------------------------------------------------------- #
 def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool) -> str:
-    rows = [row for row in rows if not row.get("_qerror_only") or row.get("method_id") == "own_model"]
     kind = "Smoothed" if family == "smoothed_q_error" else "Raw"
     stats = [("p50", "Median"), ("p90", "90th"), ("p95", "95th"),
              ("p99", "99th"), ("max", "Max")]
@@ -463,14 +496,19 @@ def _names(value: Any) -> list[str]:
     return []
 
 
+def _append_footnote_marker(label: str, marker: str) -> str:
+    if label.endswith(r"$^{\S}$"):
+        return label[:-2] + marker + "}$"
+    return label + f"$^{{{marker}}}$"
+
+
 def inference_table(rows: list[dict], workload: str, show_std: bool) -> str:
-    rows = [row for row in rows if not row.get("_qerror_only")]
     for row in rows:
         if _cpu_profile(row) == "cpu_postgres_2core":
             row["_label"] += r"$^{\ast}$"
         if _cpu_profile(row) is None and _is_missing(
                 row.get("timing.gpu_single_query.mean_ms.mean")):
-            row["_label"] += r"$^{\ddagger}$"
+            row["_label"] = _append_footnote_marker(row["_label"], r"\ddagger")
     metrics = [("mean_ms", "Mean"), ("p50_ms", "p50"), ("p95_ms", "p95"), ("p99_ms", "p99")]
     columns = []
     for metric, header in metrics:
@@ -606,20 +644,112 @@ def _build_status(metrics: dict[str, Any]) -> str | None:
 
 def _selected_own_model_training_seconds(row: dict[str, Any]) -> tuple[float, float] | None:
     variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
-    records = variant.get("training_summaries") or (variant.get("training_summary"),)
-    records = tuple(record for record in records if record)
-    if not records:
+    summaries = tuple(variant.get("training_summaries") or ())
+    checkpoints = tuple(variant.get("checkpoint_paths") or ())
+    if not summaries:
         return None
+    if variant.get("training_time_mode") == "checkpoint" and len(summaries) != len(checkpoints):
+        raise ValueError(f"checkpoint/summary mismatch for {row['variant_id']}")
     values = []
-    for record in records:
+    for index, record in enumerate(summaries):
         try:
-            value = json.loads(Path(record).read_text(encoding="utf-8")).get("training_seconds")
-        except (OSError, json.JSONDecodeError):
+            summary_path = Path(record)
+            value = json.loads(summary_path.read_text(encoding="utf-8")).get("training_seconds")
+        except (OSError, json.JSONDecodeError, KeyError):
             return None
         if value is None:
             return None
-        values.append(float(value))
+        elapsed = float(value)
+        if variant.get("training_time_mode") == "checkpoint":
+            checkpoint_path = Path(checkpoints[index])
+            try:
+                training_start = summary_path.stat().st_mtime - elapsed
+                elapsed = checkpoint_path.stat().st_mtime - training_start
+            except OSError:
+                return None
+            if elapsed < 0 or elapsed > float(value) + 60:
+                raise ValueError(f"invalid selected-checkpoint time for {checkpoint_path}")
+        values.append(elapsed)
     return _mean_std(values)
+
+
+def _inference_state_dict_metadata(checkpoint_path: Path) -> dict[str, float | int | str]:
+    """Measure the deployable model state without optimizer or training metadata."""
+    import torch
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("model_state_dict")
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"{checkpoint_path} has no model_state_dict")
+    tensors = [value for value in state_dict.values() if isinstance(value, torch.Tensor)]
+    raw_bytes = sum(value.numel() * value.element_size() for value in tensors)
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as handle:
+        temporary_path = Path(handle.name)
+    try:
+        torch.save(state_dict, temporary_path)
+        serialized_bytes = temporary_path.stat().st_size
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return {
+        "inference_state_dict_mb": serialized_bytes / 1_000_000,
+        "inference_state_dict_raw_mb": raw_bytes / 1_000_000,
+        "inference_state_dict_tensor_count": sum(value.numel() for value in tensors),
+        "inference_state_dict_tensor_bytes": raw_bytes,
+        "full_checkpoint_mb": checkpoint_path.stat().st_size / 1_000_000,
+        "model_size_source": "torch.save(model_state_dict)",
+    }
+
+
+def _selected_own_model_metadata(row: dict[str, Any]) -> list[dict[str, Any]] | None:
+    variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
+    checkpoints = tuple(variant.get("checkpoint_paths") or ())
+    if not checkpoints:
+        return None
+    try:
+        return [_inference_state_dict_metadata(Path(path)) for path in checkpoints]
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def refresh_selected_own_model_build_records(rows: list[dict], results_root: Path) -> int:
+    """Persist selected-checkpoint deployment and elapsed-training metadata.
+
+    The evaluation bridge only knows checkpoint loading time.  This refresh is
+    deliberately run where the original checkpoints are mounted, then the
+    portable build records remain sufficient for later table generation.
+    """
+    updated = 0
+    for row in rows:
+        if row.get("method_id") != "own_model":
+            continue
+        metadata = _selected_own_model_metadata(row)
+        training = _selected_own_model_training_seconds(row)
+        if not metadata:
+            continue
+        runs = _run_dirs_from_timing(row, results_root) or _run_dirs_from_scan(row, results_root)
+        if not runs:
+            continue
+        if len(metadata) not in (1, len(runs)):
+            raise ValueError(f"selected metadata/run mismatch for {row['variant_id']}")
+        for index, run in enumerate(runs):
+            path = run / "build_metrics.json"
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            artifact = document.setdefault("artifacts", {})
+            artifact.update(metadata[index if len(metadata) > 1 else 0])
+            if training is not None:
+                artifact["selected_checkpoint_training_seconds"] = training[0]
+                artifact["selected_checkpoint_training_seconds_std"] = training[1]
+                artifact["selected_checkpoint_training_time_source"] = (
+                    "checkpoint_mtime - (training_summary_mtime - training_seconds)"
+                    if OWN_MODEL_VARIANTS[row["variant_id"]].get("training_time_mode") == "checkpoint"
+                    else "training_summary.training_seconds (selected final checkpoint)"
+                )
+            path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            updated += 1
+    return updated
 
 
 def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
@@ -677,14 +807,21 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
         checkpoint_load_only = bool(statuses & _CHECKPOINT_LOAD_STATUSES)
         row["_build.checkpoint_load_only"] = checkpoint_load_only
         row["_build.checkpoint_statuses"] = sorted(status for status in statuses if status)
-        selected_training = _selected_own_model_training_seconds(row)
+        selected_training = _mean_std(collect(
+            lambda m: artifacts(m).get("selected_checkpoint_training_seconds")
+        ))
+        if selected_training[0] is None:
+            selected_training = _selected_own_model_training_seconds(row)
         if selected_training is not None:
-            # The selected checkpoints predate the evaluation pipeline. Their
-            # summaries only record complete-run elapsed time, not time to an
-            # intermediate checkpoint.
             row["_build.training_s.mean"], row["_build.training_s.std"] = selected_training
             row["_build.total_s.mean"], row["_build.total_s.std"] = selected_training
-            row["_build.training_record_is_full_run"] = True
+            row["_build.training_record_is_selected_checkpoint"] = True
+        selected_size = _mean_std(collect(
+            lambda m: artifacts(m).get("inference_state_dict_mb")
+        ))
+        if selected_size[0] is not None:
+            row["_build.size_mb.mean"], row["_build.size_mb.std"] = selected_size
+            row["_build.size_is_inference_state_dict"] = True
         elif checkpoint_load_only:
             # A bridge load is not training/statistics construction.
             row["_build.training_s.mean"] = None
@@ -703,12 +840,12 @@ def _missing_build_note(rows: list[dict]) -> str:
 
 
 def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
-    rows = [row for row in rows if not row.get("_qerror_only")]
     columns = [
         Column("Preprocessing",
                value=lambda r: r.get("_build.preprocessing_s.mean"),
                render=lambda r: fmt_duration(r.get("_build.preprocessing_s.mean"),
-                                             r.get("_build.preprocessing_s.std"), show_std)),
+                                             r.get("_build.preprocessing_s.std"), show_std),
+               mark_best=False),
         Column("Training / statistics",
                value=lambda r: r.get("_build.training_s.mean"),
                render=lambda r: fmt_duration(r.get("_build.training_s.mean"),
@@ -723,11 +860,11 @@ def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
         own_model_single_run_note(rows),
         "Wall-clock time of the preprocessing stage, the training (or statistics-collection) "
         "stage, and their sum.",
-        ("For selected own-model checkpoints, training and total-build time are the full "
-         "recorded training run because no time-to-checkpoint record was logged."
-         if any(r.get("_build.training_record_is_full_run") for r in rows) else ""),
+        ("For selected own-model checkpoints, training and total-build time is measured to "
+         "the selected checkpoint; final-step selections use the recorded full-run time."
+         if any(r.get("_build.training_record_is_selected_checkpoint") for r in rows) else ""),
         ("-- denotes a pretrained/reused checkpoint load rather than a training/statistics time."
-         if any(r.get("_build.checkpoint_load_only") and not r.get("_build.training_record_is_full_run")
+         if any(r.get("_build.checkpoint_load_only") and not r.get("_build.training_record_is_selected_checkpoint")
                 for r in rows) else ""),
         ("FOJ sampling uses the recorded cumulative reservoir draw time at each sample prefix; "
          "the zero-valued cache-hit build timer is not reported."
@@ -746,7 +883,6 @@ def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
 
 
 def model_size_table(rows: list[dict], workload: str, show_std: bool) -> str:
-    rows = [row for row in rows if not row.get("_qerror_only")]
     columns = [
         Column("Parameters",
                value=lambda r: r.get("_build.params.mean"),
@@ -759,9 +895,8 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool) -> str:
     notes = [
         "Trainable parameter count and serialized model or summary size in decimal MB "
         "($10^6$ bytes); -- where not applicable.",
-        (r"For \OwnModelName{}, serialized size is the full checkpoint; no inference-only "
-         r"exporter was available when these tables were generated."
-         if any(r.get("method_id") == "own_model" for r in rows) else ""),
+        (r"For \OwnModelName{}, serialized size is the inference-only \texttt{state\_dict}."
+         if any(r.get("_build.size_is_inference_state_dict") for r in rows) else ""),
         own_model_single_run_note(rows),
         coverage_note(rows),
         _missing_build_note(rows),
@@ -798,12 +933,24 @@ def main() -> None:
     parser.add_argument("--output", type=Path,
                         default=default_root / "final_comparison" / "latex")
     parser.add_argument("--no-std", action="store_true", help="omit standard deviations")
+    parser.add_argument(
+        "--refresh-own-model-build-records",
+        action="store_true",
+        help="measure selected checkpoints and persist deployable-size/training-time metadata",
+    )
     args = parser.parse_args()
 
     data = json.loads(args.comparison.read_text(encoding="utf-8"))
     results = data["results"]
     show_std = not args.no_std
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.refresh_own_model_build_records:
+        refreshed = 0
+        for workload in WORKLOADS:
+            refreshed += refresh_selected_own_model_build_records(
+                prepare_rows(results, workload), args.results_root
+            )
+        print(f"refreshed {refreshed} selected own-model build records")
 
     written = []
     (args.output / "table_macros.tex").write_text(PREAMBLE, encoding="utf-8")

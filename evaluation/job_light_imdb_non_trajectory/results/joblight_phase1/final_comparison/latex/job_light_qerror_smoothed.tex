@@ -24,13 +24,13 @@
     FOJ sampling ($N=1{,}000{,}000$) & $1.08$\,{\scriptsize$\pm 0.0029$} & $2.12$\,{\scriptsize$\pm 0.48$} & $25.5$\,{\scriptsize$\pm 27$} & $(1.15\,{\scriptstyle\pm 0.88})\cdot 10^{5}$ & $(2.17\,{\scriptstyle\pm 0.44})\cdot 10^{5}$ & $4$\,{\scriptsize$\pm 1.0$} \\
     FOJ sampling ($N=7{,}168{,}000$) & \best{$1.02$\,{\scriptsize$\pm 0.0042$}} & \best{$1.58$\,{\scriptsize$\pm 0.30$}} & \best{$1.83$\,{\scriptsize$\pm 0.30$}} & $21{,}219$\,{\scriptsize$\pm 33{,}236$} & $68{,}396$\,{\scriptsize$\pm 1.07\cdot 10^{5}$} & $1.7$\,{\scriptsize$\pm 0.6$} \\
     \midrule
+    \OwnModelName{} (best median)$^{\S}$ & $1.24$ & $3.75$ & $8.80$ & $23.4$ & $33.0$ & $2$ \\
     \OwnModelName{} (best p99) & $1.58$\,{\scriptsize$\pm 0.11$} & $5.59$\,{\scriptsize$\pm 1.8$} & $9.93$\,{\scriptsize$\pm 3.8$} & $22.0$\,{\scriptsize$\pm 13$} & $30.7$\,{\scriptsize$\pm 22$} & $1.7$\,{\scriptsize$\pm 0.6$} \\
-    \OwnModelName{}$^{\S}$ & $1.24$ & $3.75$ & $8.80$ & $23.4$ & $33.0$ & $2$ \\
     \bottomrule
   \end{tabular}
   \end{adjustbox}
   \par\smallskip
   \begin{minipage}{\linewidth}\footnotesize
-    Values are mean\,$\pm$\,standard deviation over 1/3 seeds (no deviation shown for single-seed or zero-variance results). $^{\S}$Single run (seed 0); seeds 1 and 2 pending. The two \OwnModelName{} rows were selected on this benchmark's own queries: median (A) and p99 (B), respectively. Est.\,$<1$ is the number of queries with an estimate below one.
+    Values are mean\,$\pm$\,standard deviation over three seeds (PostgreSQL: a single deterministic run). $^{\S}$This selected checkpoint was evaluated for one seed; no same-step three-seed aggregate is available. The two \OwnModelName{} rows are the best-median (A) and best-p99 (B) selections on this benchmark's own queries. Est.\,$<1$ is the number of queries with an estimate below one.
   \end{minipage}
 \end{table}

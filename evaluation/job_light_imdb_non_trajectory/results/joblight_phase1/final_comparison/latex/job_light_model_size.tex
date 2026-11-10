@@ -23,12 +23,13 @@
     FOJ sampling ($N=1{,}000{,}000$) & -- & $200$ \\
     FOJ sampling ($N=7{,}168{,}000$) & -- & $1{,}434$ \\
     \midrule
-    \OwnModelName{}$^{\S}$ & $4.21$\,M & $65.9$ \\
+    \OwnModelName{} (best median)$^{\S}$ & $4.21$\,M & $30.5$ \\
+    \OwnModelName{} (best p99) & $4.21$\,M & $30.5$ \\
     \bottomrule
   \end{tabular}
   \end{adjustbox}
   \par\smallskip
   \begin{minipage}{\linewidth}\footnotesize
-    Trainable parameter count and serialized model or summary size in decimal MB ($10^6$ bytes); -- where not applicable. For \OwnModelName{}, serialized size is the full checkpoint; no inference-only exporter was available when these tables were generated. $^{\S}$Single run (seed 0); seeds 1 and 2 pending.
+    Trainable parameter count and serialized model or summary size in decimal MB ($10^6$ bytes); -- where not applicable. For \OwnModelName{}, serialized size is the inference-only \texttt{state\_dict}. $^{\S}$This selected checkpoint was evaluated for one seed; no same-step three-seed aggregate is available.
   \end{minipage}
 \end{table}
