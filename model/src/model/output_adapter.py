@@ -778,10 +778,10 @@ def _edge_sentinel_ids_in_encoded_interval(
     start, end = _non_sentinel_bounds(domain)
     sentinel_ids: list[int] = []
     for index in range(0, start):
-        if _encoded_interval_contains(index, column, token) and not token.satisfies(domain[index]):
+        if _encoded_interval_contains(index, column, token):
             sentinel_ids.append(index)
     for index in range(end, len(domain)):
-        if _encoded_interval_contains(index, column, token) and not token.satisfies(domain[index]):
+        if _encoded_interval_contains(index, column, token):
             sentinel_ids.append(index)
     return tuple(sentinel_ids)
 

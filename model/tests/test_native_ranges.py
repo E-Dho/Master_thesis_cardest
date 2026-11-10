@@ -2,7 +2,20 @@ from __future__ import annotations
 
 import unittest
 
+try:
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - exercised on torch-free hosts.
+    torch = None
+
+from model.src.data.complete_domain_preparation import SQL_NULL
+from model.src.data.full_join_sampler import OUTER_MISSING
 from model.src.evaluation.metrics import q_error, q_error_floor_one
+from model.src.model.anpm import ANPMConfig
+from model.src.model.factorization import FactorizationConfig, apply_factorization_to_metadata
+from model.src.model.output_adapter import (
+    FactorizedColumnProbabilityEvaluator,
+    TorchBackboneOutputs,
+)
 from model.scripts.evaluate_job_light_queries import (
     RawPredicate,
     build_normalized_token,
@@ -14,7 +27,84 @@ from model.src.predicates.vocabulary import PredicateVocabularies
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 
 
+class _UniformFactorDecoder:
+    """Minimal ANPM decoder with equal mass over every valid factor class."""
+
+    def __init__(self, factor_domains: tuple[int, ...]) -> None:
+        self.factor_domains = factor_domains
+
+    def conditional_logits(
+        self,
+        factor_index: int,
+        base_logits: torch.Tensor,
+        prefix_factors: torch.Tensor,
+        *,
+        valid_class_mask: torch.Tensor | None,
+        output_embedding: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del prefix_factors, output_embedding
+        logits = torch.zeros(
+            base_logits.shape[0],
+            self.factor_domains[factor_index],
+            dtype=base_logits.dtype,
+            device=base_logits.device,
+        )
+        if valid_class_mask is not None:
+            logits = logits.masked_fill(~valid_class_mask, float("-inf"))
+        return logits
+
+
 class NativeRangeNormalizationTest(unittest.TestCase):
+    @unittest.skipIf(torch is None, "PyTorch is required for factorized interval inference")
+    def test_factorized_string_bounds_exclude_edge_sentinels_without_fallback(self) -> None:
+        """Ordered string ranges use the CDF path and never include SQL padding."""
+
+        metadata = apply_factorization_to_metadata(
+            ModelMetadata(
+                columns=(
+                    ColumnMetadata(
+                        "title:phonetic_code",
+                        ColumnKind.DATA,
+                        (SQL_NULL, "A100", "B200", "C300", OUTER_MISSING),
+                        table="title",
+                    ),
+                ),
+                full_join_cardinality=5,
+            ),
+            FactorizationConfig(
+                enabled=True,
+                strategy="bitwise_lossless",
+                word_size_bits=2,
+                minimum_domain_size=2,
+            ),
+        )
+        factorization = metadata.factorization_plan.factorization_for_column(0)
+        assert factorization is not None
+        evaluator = FactorizedColumnProbabilityEvaluator(
+            factorization=factorization,
+            decoder=_UniformFactorDecoder(factorization.factor_domains),
+            anpm_config=ANPMConfig(mask_invalid_combinations=True),
+            backbone_outputs=TorchBackboneOutputs(
+                logits=torch.zeros(1, 1),
+                split_logits=[torch.zeros(1, 1) for _ in factorization.factor_domains],
+            ),
+        )
+        column = metadata.columns[0]
+
+        lower = evaluator.predicate_mass(
+            column, PredicateToken(PredicateOp.GREATER_EQUAL, "B200")
+        )
+        self.assertIsNotNone(lower)
+        self.assertAlmostEqual(float(lower.item()), 0.25, places=7)
+        self.assertFalse(evaluator.profile["fallback_enumeration_used"])
+
+        upper = evaluator.predicate_mass(
+            column, PredicateToken(PredicateOp.LESS_EQUAL, "B200")
+        )
+        self.assertIsNotNone(upper)
+        self.assertAlmostEqual(float(upper.item()), 0.25, places=7)
+        self.assertFalse(evaluator.profile["fallback_enumeration_used"])
+
     def test_open_and_closed_interval_normalization(self) -> None:
         normalized = ColumnPredicateSet(
             (
