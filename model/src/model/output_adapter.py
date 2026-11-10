@@ -9,7 +9,7 @@ import numpy as np
 from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata, OriginalColumnFactorization
 from model.src.model.anpm import ANPMConfig
 from model.src.model.factorization import factorize_value, valid_factor_class_mask
-from model.src.predicates.encoding import reciprocal_fanout_mask, softmax
+from model.src.predicates.encoding import range_mask_value, reciprocal_fanout_mask, softmax
 from model.src.predicates.operators import PredicateOp, PredicateToken
 
 
@@ -863,7 +863,7 @@ def _torch_predicate_mask_for_id_chunk(
         mask = reciprocal_fanout_mask(column)[start:stop]
     else:
         mask = np.array(
-            [float(token.satisfies(column.domain[index])) for index in range(start, stop)],
+            [float(range_mask_value(token, column.domain[index])) for index in range(start, stop)],
             dtype=float,
         )
     return torch.tensor(mask, dtype=dtype, device=device)

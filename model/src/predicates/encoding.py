@@ -6,12 +6,30 @@ from model.src.data.schema import ColumnKind, ColumnMetadata
 from model.src.predicates.operators import PredicateOp, PredicateToken
 
 
+def range_mask_value(token: PredicateToken, value: object) -> bool:
+    """Evaluate a predicate while keeping SQL/full-outer sentinels out of ranges.
+
+    Sentinels deliberately remain valid equality literals and wildcard values.
+    Their string spelling, however, must not make them match an ordered SQL
+    predicate merely because Python compares ``"__..."`` lexically above a
+    real string value.
+    """
+
+    if (
+        token.op not in {PredicateOp.EQUAL, PredicateOp.WILDCARD}
+        and isinstance(value, str)
+        and value.startswith("__")
+    ):
+        return False
+    return token.satisfies(value)
+
+
 def predicate_mask(column: ColumnMetadata, token: PredicateToken) -> np.ndarray:
     """Build m_i(v)=1[v satisfies token] for ordinary and indicator heads."""
 
     if token.op == PredicateOp.INV_FANOUT:
         raise ValueError("use reciprocal_fanout_mask for INV_FANOUT tokens")
-    return np.array([token.satisfies(value) for value in column.domain], dtype=float)
+    return np.array([range_mask_value(token, value) for value in column.domain], dtype=float)
 
 
 def reciprocal_fanout_mask(column: ColumnMetadata) -> np.ndarray:

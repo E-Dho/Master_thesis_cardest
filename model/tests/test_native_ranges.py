@@ -15,6 +15,7 @@ from model.src.model.factorization import FactorizationConfig, apply_factorizati
 from model.src.model.output_adapter import (
     FactorizedColumnProbabilityEvaluator,
     TorchBackboneOutputs,
+    TorchIdentityOutputAdapter,
 )
 from model.scripts.evaluate_job_light_queries import (
     RawPredicate,
@@ -104,6 +105,54 @@ class NativeRangeNormalizationTest(unittest.TestCase):
         self.assertIsNotNone(upper)
         self.assertAlmostEqual(float(upper.item()), 0.25, places=7)
         self.assertFalse(evaluator.profile["fallback_enumeration_used"])
+
+    @unittest.skipIf(torch is None, "PyTorch is required for torch interval inference")
+    def test_unfactorized_string_ranges_exclude_edge_sentinels(self) -> None:
+        """Both torch range APIs exclude sentinel strings on unfactorized heads."""
+
+        metadata = ModelMetadata(
+            columns=(
+                ColumnMetadata(
+                    "title:series_years",
+                    ColumnKind.DATA,
+                    (SQL_NULL, "A100", "B200", "C300", OUTER_MISSING),
+                    table="title",
+                ),
+            ),
+            full_join_cardinality=5,
+        )
+        probabilities = torch.tensor([[0.2, 0.1, 0.2, 0.3, 0.2]])
+        backbone_outputs = TorchBackboneOutputs(
+            logits=torch.log(probabilities),
+            split_logits=[torch.log(probabilities)],
+        )
+        adapter = TorchIdentityOutputAdapter()
+        cases = (
+            (PredicateToken(PredicateOp.GREATER_THAN, "B200"), "B200", None, False, True, 0.3),
+            (PredicateToken(PredicateOp.GREATER_EQUAL, "B200"), "B200", None, True, True, 0.5),
+            (PredicateToken(PredicateOp.LESS_THAN, "B200"), None, "B200", True, False, 0.1),
+            (PredicateToken(PredicateOp.LESS_EQUAL, "B200"), None, "B200", True, True, 0.3),
+            (PredicateToken.range("A100", "C300"), "A100", "C300", True, True, 0.6),
+        )
+        for token, lower, upper, lower_inclusive, upper_inclusive, expected in cases:
+            with self.subTest(token=token):
+                factor = adapter.column_factor(
+                    original_column_index=0,
+                    backbone_outputs=backbone_outputs,
+                    metadata=metadata,
+                    predicate_token=token,
+                )
+                interval = adapter.interval_mass(
+                    original_column_index=0,
+                    backbone_outputs=backbone_outputs,
+                    metadata=metadata,
+                    lower_literal=lower,
+                    upper_literal=upper,
+                    lower_inclusive=lower_inclusive,
+                    upper_inclusive=upper_inclusive,
+                )
+                self.assertAlmostEqual(float(factor.item()), expected, places=7)
+                self.assertAlmostEqual(float(interval.item()), expected, places=7)
 
     def test_open_and_closed_interval_normalization(self) -> None:
         normalized = ColumnPredicateSet(
