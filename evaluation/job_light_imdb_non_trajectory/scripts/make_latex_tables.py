@@ -93,7 +93,7 @@ OWN_MODEL_VARIANTS = {
         ),
         "training_time_mode": "checkpoint",
     },
-    "duet_neurocard_distjoin_rare_aux_step_11000": {
+    "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code": {
         "label": r"\OwnModelName{} (best p99)",
         "selection_order": 1,
         "qerror_only": True,
@@ -182,7 +182,7 @@ def row_label(result: dict[str, Any]) -> str:
     if method == "postgresql":
         return "PostgreSQL 16.10"
     if method == "mscn":
-        return "MSCN"
+        return "MSCN (adapted)" if result.get("protocol") == "adapted" else "MSCN"
     if method == "deepdb":
         if result.get("protocol") == "adapted":
             return "DeepDB (adapted)"

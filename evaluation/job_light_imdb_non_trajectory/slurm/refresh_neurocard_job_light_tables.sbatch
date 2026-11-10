@@ -39,4 +39,7 @@ command.extend(["--output", str(results / "final_comparison")])
 subprocess.run(command, check=True)
 PY
 
+"$PYTHON" "$EVAL/scripts/check_comparison_provenance.py" \
+  --comparison "$RESULTS/final_comparison/comparison.json" \
+  --output "$RESULTS/final_comparison/provenance.json"
 "$PYTHON" "$EVAL/scripts/make_latex_tables.py" --results-root "$RESULTS"

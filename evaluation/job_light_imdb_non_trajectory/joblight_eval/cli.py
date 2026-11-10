@@ -114,7 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         / config.method_id
         / config.variant_id
     )
-    paths = args.run_directory or discover_latest_complete_runs(base, config.seeds)
+    paths = args.run_directory or discover_latest_complete_runs(
+        base, config.seeds, accuracy_config_hash=config.accuracy_config_hash
+    )
     output = args.output or base / "aggregate"
     aggregate_runs(paths, output, allow_hardware_mismatch=args.allow_hardware_mismatch)
     print(output)

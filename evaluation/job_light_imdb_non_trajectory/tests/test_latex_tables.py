@@ -38,12 +38,21 @@ class LatexTablesTest(unittest.TestCase):
             {
                 "workload": "job_light",
                 "method_id": "own_model",
-                "variant_id": "duet_neurocard_distjoin_rare_aux_step_11000",
+                "variant_id": "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code",
                 "seed_count": 3,
                 "coverage_complete_all_seeds": True,
             },
         ], "job_light")
         self.assertEqual([row["_qerror_only"] for row in rows], [False, True])
+
+    def test_adapted_mscn_uses_an_explicit_label(self) -> None:
+        self.assertEqual(
+            MODULE["row_label"]({
+                "method_id": "mscn", "variant_id": "mscn_job_light_ranges_adapted",
+                "protocol": "adapted",
+            }),
+            "MSCN (adapted)",
+        )
 
     def test_printed_numbers_must_round_to_their_source(self) -> None:
         verify = MODULE["verify_printed"]

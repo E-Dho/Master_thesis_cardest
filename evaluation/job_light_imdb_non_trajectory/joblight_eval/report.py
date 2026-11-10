@@ -440,14 +440,40 @@ def hardware_mismatches(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[
     return result
 
 
-def discover_latest_complete_runs(config_root: Path, seeds: Iterable[int]) -> list[Path]:
+def discover_latest_complete_runs(
+    config_root: Path,
+    seeds: Iterable[int],
+    *,
+    accuracy_config_hash: str,
+) -> list[Path]:
+    """Return the newest complete, accuracy-compatible run for every seed.
+
+    Run-directory names are human-readable labels, not ordering guarantees.
+    Completion time from the staged manifest is the authoritative selection
+    criterion, after confirming that the resolved config has the current
+    accuracy-only identity.
+    """
     result: list[Path] = []
     for seed in seeds:
         parent = config_root / f"seed_{seed}"
-        candidates = sorted(parent.glob("*"), reverse=True) if parent.exists() else []
-        selected = next((path for path in candidates if _is_complete(path)), None)
+        candidates = []
+        for path in parent.glob("*") if parent.exists() else ():
+            if not _is_complete(path):
+                continue
+            summary = _load_complete_summary(path)
+            resolved = _resolved_config(path)
+            if _accuracy_hash(path, summary, resolved) != accuracy_config_hash:
+                continue
+            manifest = json.loads((path / "run_manifest.json").read_text(encoding="utf-8"))
+            completed_at = manifest.get("completed_at_utc")
+            if not isinstance(completed_at, str):
+                raise ValueError(f"complete run lacks completion time: {path}")
+            candidates.append((completed_at, path))
+        selected = max(candidates, default=(None, None))[1]
         if selected is None:
-            raise FileNotFoundError(f"no complete run found under {parent}")
+            raise FileNotFoundError(
+                f"no complete run matching accuracy hash {accuracy_config_hash} under {parent}"
+            )
         result.append(selected)
     return result
 

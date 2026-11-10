@@ -17,6 +17,7 @@ from evaluation.job_light_imdb_non_trajectory.joblight_eval.config import (
 from evaluation.job_light_imdb_non_trajectory.joblight_eval.report import (
     aggregate_runs,
     compare_aggregates,
+    discover_latest_complete_runs,
 )
 from evaluation.job_light_imdb_non_trajectory.joblight_eval.adapters.base import (
     AdapterEvaluation,
@@ -90,6 +91,34 @@ class ConfigAndArtifactsTest(unittest.TestCase):
             mismatch = _write_complete_run(root / "mismatch", seed=2, config_hash="def")
             with self.assertRaises(ValueError):
                 aggregate_runs([first, mismatch], root / "bad2")
+
+    def test_discover_latest_complete_runs_uses_completion_time_and_accuracy_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            query_path = root / "queries.txt"
+            query_path.write_text("title t##t.id,=,1#1\n", encoding="utf-8")
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                _config_text(query_path, root / "results", "v", "Fixture"), encoding="utf-8"
+            )
+            config = load_experiment_config(config_path)
+            parent = root / "results" / "fixture" / "external" / "v" / "seed_0"
+            parent.mkdir(parents=True)
+            old = _write_complete_run(parent / "z_old", seed=0, config_hash=config.config_hash)
+            new = _write_complete_run(parent / "a_new", seed=0, config_hash=config.config_hash)
+            for run, completed_at in ((old, "2026-01-01T00:00:00+00:00"),
+                                      (new, "2026-01-02T00:00:00+00:00")):
+                (run / "resolved_config.json").write_text(
+                    json.dumps(config.raw), encoding="utf-8"
+                )
+                (run / "run_manifest.json").write_text(
+                    json.dumps({"status": "complete", "completed_at_utc": completed_at}),
+                    encoding="utf-8",
+                )
+            selected = discover_latest_complete_runs(
+                parent.parent, [0], accuracy_config_hash=config.accuracy_config_hash
+            )
+            self.assertEqual(selected, [new])
 
     def test_complete_run_writes_contract_and_preserves_raw_estimate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
