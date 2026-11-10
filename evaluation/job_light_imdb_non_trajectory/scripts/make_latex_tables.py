@@ -63,7 +63,7 @@ DASH = "--"
 # the selection visible in the rendered tables and leaves future ablations
 # unambiguous.
 OWN_MODEL_VARIANTS = {
-    "duet_neurocard_distjoin_rare_aux_best_median_step_18000": {
+    "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code": {
         "label": r"\OwnModelName{} (best median)",
         "selection_order": 0,
         "checkpoint_paths": (
@@ -110,7 +110,7 @@ OWN_MODEL_VARIANTS = {
         ),
         "training_time_mode": "checkpoint",
     },
-    "duet_neurocard_distjoin_rare_aux_best_median_step_40000": {
+    "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code": {
         "label": r"\OwnModelName{} (best median)",
         "selection_order": 0,
         "checkpoint_paths": (
@@ -127,7 +127,7 @@ OWN_MODEL_VARIANTS = {
         ),
         "training_time_mode": "full_run",
     },
-    "duet_neurocard_distjoin_rare_aux_best_p99_step_19500": {
+    "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code": {
         "label": r"\OwnModelName{} (best p99)",
         "selection_order": 1,
         "qerror_only": True,

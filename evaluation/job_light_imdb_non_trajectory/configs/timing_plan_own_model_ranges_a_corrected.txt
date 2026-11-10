@@ -1,0 +1,4 @@
+# Corrected-source re-evaluation of the selected JOB-light-ranges A checkpoint.
+# This run directory is produced by Slurm job 22939854 before either timing job
+# may begin. Each timing launcher executes this one plan entry sequentially.
+evaluation/job_light_imdb_non_trajectory/configs/own_model_job_light_ranges_best_median_step_40000_corrected_model_code.yaml 0 evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/seed_0/corrected_model_code_step40000-6c6ee1a7ef57aa7a84b07442dae9986102f05c8e48935d60d9ff4c4f4ed43080

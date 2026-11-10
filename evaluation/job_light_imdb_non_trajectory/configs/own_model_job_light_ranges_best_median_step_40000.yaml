@@ -7,8 +7,8 @@ experiment:
   seeds: [0]
 source:
   url: https://github.com/E-Dho/Master_thesis_cardest.git
-  revision: f694978e070fd6242bddfbe173a53625a9971008
-  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_f694978
+  revision: 0d0030d6e81883fc3db3c139ae29255697f6bba9
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_0d0030d6e81883fc3db3c139ae29255697f6bba9
 paths:
   results_root: ../results
 workloads:
@@ -44,7 +44,9 @@ adapter:
   type: own_model
   working_directory: ../../..
   environment:
-    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation
+    OWN_MODEL_SOURCE: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_0d0030d6e81883fc3db3c139ae29255697f6bba9
+    OWN_MODEL_SOURCE_REVISION: 0d0030d6e81883fc3db3c139ae29255697f6bba9
+    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_0d0030d6e81883fc3db3c139ae29255697f6bba9:/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation
   require_smoke_before_build: true
   prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/configs/job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/checkpoint_step_40000.pt --output-directory {exchange_directory}
   smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/configs/job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/model/runs/job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/checkpoint_step_40000.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --device cpu

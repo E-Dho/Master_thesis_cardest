@@ -1,0 +1,5 @@
+extends: own_model_job_light_best_median_step_18000.yaml
+
+experiment:
+  variant_id: duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code
+  display_name: Own model best smoothed-median checkpoint step 18,000 (corrected model code)

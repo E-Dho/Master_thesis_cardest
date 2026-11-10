@@ -1,0 +1,5 @@
+extends: own_model_job_light_ranges_best_p99_step_19500.yaml
+
+experiment:
+  variant_id: duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code
+  display_name: Own model best smoothed-p99 checkpoint step 19,500 (corrected model code)

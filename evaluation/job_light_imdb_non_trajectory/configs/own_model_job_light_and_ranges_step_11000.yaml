@@ -7,8 +7,8 @@ experiment:
   seeds: [0, 1, 2]
 source:
   url: https://github.com/E-Dho/Master_thesis_cardest.git
-  revision: 8b15b6ca761e4460bcc18c23450a864fb835b058
-  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_8b15
+  revision: 0d0030d6e81883fc3db3c139ae29255697f6bba9
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_0d0030d6e81883fc3db3c139ae29255697f6bba9
 paths:
   results_root: ../results
 workloads:
@@ -46,7 +46,9 @@ adapter:
   type: own_model
   working_directory: ../../..
   environment:
-    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation
+    OWN_MODEL_SOURCE: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_0d0030d6e81883fc3db3c139ae29255697f6bba9
+    OWN_MODEL_SOURCE_REVISION: 0d0030d6e81883fc3db3c139ae29255697f6bba9
+    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_0d0030d6e81883fc3db3c139ae29255697f6bba9:/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation
   require_smoke_before_build: true
   prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory}
   smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --device cpu
