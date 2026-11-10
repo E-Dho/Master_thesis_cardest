@@ -121,7 +121,9 @@ class NativeRangeNormalizationTest(unittest.TestCase):
             ),
             full_join_cardinality=5,
         )
-        probabilities = torch.tensor([[0.2, 0.1, 0.2, 0.3, 0.2]])
+        probabilities = torch.tensor(
+            [[0.2, 0.1, 0.2, 0.3, 0.2]], dtype=torch.float64
+        )
         backbone_outputs = TorchBackboneOutputs(
             logits=torch.log(probabilities),
             split_logits=[torch.log(probabilities)],
