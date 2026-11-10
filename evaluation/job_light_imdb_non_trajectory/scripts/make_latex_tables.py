@@ -81,12 +81,22 @@ OWN_MODEL_VARIANTS = {
             "training_summary.json"
         ),
     },
-    "duet_neurocard_distjoin_rare_aux_best_median_step_11000": {
+    "duet_neurocard_distjoin_rare_aux_best_median_step_40000": {
         "label": r"\OwnModelName{}",
         "qerror_only": False,
         "training_summary": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
-            "joblight_evaluation/own_model_rare_aux_40k/seed_2/"
+            "Master_thesis_cardest/model/runs/"
+            "job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/"
+            "training_summary.json"
+        ),
+    },
+    "duet_neurocard_distjoin_rare_aux_best_p99_step_19500": {
+        "label": r"\OwnModelName{} (best p99)",
+        "qerror_only": True,
+        "training_summary": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/"
             "training_summary.json"
         ),
     },
