@@ -661,6 +661,18 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
             row[f"_build.{key}.mean"] = mean
             row[f"_build.{key}.std"] = std
 
+        if row.get("method_id") == "foj_sampling":
+            # Evaluation commonly reuses a completed reservoir, which makes the
+            # stage-local build timer zero.  The adapter preserves the actual
+            # cumulative draw time to each nested prefix in the artifact.
+            sampling_time = _mean_std(collect(
+                lambda m: artifacts(m).get("cumulative_sampling_seconds")
+            ))
+            if sampling_time[0] is not None:
+                row["_build.training_s.mean"], row["_build.training_s.std"] = sampling_time
+                row["_build.total_s.mean"], row["_build.total_s.std"] = sampling_time
+                row["_build.foj_cumulative_sampling"] = True
+
         statuses = {_build_status(metric) for metric in metrics}
         checkpoint_load_only = bool(statuses & _CHECKPOINT_LOAD_STATUSES)
         row["_build.checkpoint_load_only"] = checkpoint_load_only
@@ -717,6 +729,9 @@ def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
         ("-- denotes a pretrained/reused checkpoint load rather than a training/statistics time."
          if any(r.get("_build.checkpoint_load_only") and not r.get("_build.training_record_is_full_run")
                 for r in rows) else ""),
+        ("FOJ sampling uses the recorded cumulative reservoir draw time at each sample prefix; "
+         "the zero-valued cache-hit build timer is not reported."
+         if any(r.get("_build.foj_cumulative_sampling") for r in rows) else ""),
         coverage_note(rows),
         _missing_build_note(rows),
     ]
