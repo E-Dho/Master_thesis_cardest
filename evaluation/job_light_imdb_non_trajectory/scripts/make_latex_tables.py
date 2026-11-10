@@ -11,11 +11,24 @@ size).  For every workload it writes five tables:
     <workload>_training.tex
     <workload>_model_size.tex
 
-The best value per column is wrapped in ``\\best{...}``, which defaults to
-``\\textcolor{ThesisRed}{...}``.  Rows whose coverage is incomplete are shown
+Data and layout are kept apart:
+
+    joblight_data.tex   every number shown in any table, as \\JLdef{<key>}{<value>},
+                        plus \\JLbest{<key>} for the cells marked as best
+    <table>.tex         layout only: captions, labels, row names, notes; each
+                        cell is \\JLcell{<key>}, each number in a note \\JLval{<key>}
+    table_macros.tex    the macros above; inputs joblight_data.tex
+
+So a layout change cannot alter a number, and a change in the data shows up as
+a diff of joblight_data.tex alone.  Every formatted number is also parsed back
+and checked against its source value before it is written; generation aborts if
+a value does not round to what is printed.
+
+The best value per column is wrapped in ``\\best{...}`` (bold by default).  Rows
+whose coverage is incomplete, and rows listed as out of competition, are shown
 but never marked as best.
 
-Required LaTeX packages: booktabs, xcolor (with ThesisRed defined), adjustbox.
+Required LaTeX packages: booktabs, adjustbox.
 
 Usage
 -----
@@ -145,6 +158,10 @@ OWN_MODEL_VARIANTS = {
     },
 }
 
+# Methods that are shown in the inference table but excluded from its best-value
+# marking (see the table note for the reason).
+INFERENCE_OUT_OF_COMPETITION = {"mscn"}
+
 _CHECKPOINT_LOAD_STATUSES = {
     "pretrained_checkpoint",
     "reused_checkpoint",
@@ -219,6 +236,61 @@ def fmt_number(value: float, sig: int = 3) -> str:
     return f"{rounded:.{digits}f}"
 
 
+_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)(?:\\cdot 10\^\{(-?\d+)\})?")
+_SHARED_EXPONENT_RE = re.compile(
+    r"\$\((\d+(?:\.\d+)?)\\,\{\\scriptstyle\\pm (\d+(?:\.\d+)?)\}\)\\cdot 10\^\{(-?\d+)\}\$"
+)
+
+
+def _half_unit(digits: str) -> float:
+    """Half a unit of the last significant printed digit.
+
+    '1.23' -> 0.005 and '1234' -> 0.5; trailing zeros of an integer count as
+    rounding ('240' -> 5), because values are rounded to significant digits.
+    """
+    if "." in digits:
+        return 0.5 * 10.0 ** -len(digits.split(".", 1)[1])
+    stripped = digits.rstrip("0")
+    trailing = len(digits) - len(stripped) if stripped else 0
+    return 0.5 * 10.0 ** trailing
+
+
+def parse_printed_numbers(text: str) -> list[tuple[float, float]]:
+    """Return (value, rounding tolerance) for every number in a formatted cell, in order."""
+
+    plain = text.replace("{,}", "")
+    shared = _SHARED_EXPONENT_RE.search(plain)
+    if shared:
+        scale = 10.0 ** int(shared.group(3))
+        return [
+            (float(shared.group(1)) * scale, _half_unit(shared.group(1)) * scale),
+            (float(shared.group(2)) * scale, _half_unit(shared.group(2)) * scale),
+        ]
+    numbers = []
+    for match in _NUMBER_RE.finditer(plain):
+        scale = 10.0 ** int(match.group(2) or 0)
+        numbers.append((float(match.group(1)) * scale, _half_unit(match.group(1)) * scale))
+    return numbers
+
+
+def verify_printed(text: str, expected: list[float], *, unit_scale: float = 1.0) -> str:
+    """Raise unless every printed number rounds back to its source value.
+
+    ``unit_scale`` converts printed numbers back to the source unit (60 for a value
+    printed in minutes, 1e6 for "M", ...).  Returns ``text`` unchanged.
+    """
+
+    printed = parse_printed_numbers(text)
+    if len(printed) != len(expected):
+        raise ValueError(f"printed {text!r} has {len(printed)} numbers, expected {len(expected)}")
+    for (value, tolerance), source in zip(printed, expected):
+        source = float(source)
+        slack = tolerance * unit_scale + 1e-9 * max(1.0, abs(source))
+        if abs(value * unit_scale - source) > slack:
+            raise ValueError(f"printed {text!r} does not round to source value {source!r}")
+    return text
+
+
 def fmt_cell(mean: Any, std: Any = None, sig: int = 3, show_std: bool = True,
              suffix: str = "") -> str:
     if _is_missing(mean):
@@ -232,10 +304,12 @@ def fmt_cell(mean: Any, std: Any = None, sig: int = 3, show_std: bool = True,
             mantissa, exponent = fmt_number(mean).split("\\cdot 10^{")
             exponent = exponent.rstrip("}")
             std_mantissa = std / 10 ** int(exponent)
-            return (f"$({mantissa}\\,{{\\scriptstyle\\pm {std_mantissa:.2f}}})"
-                    f"\\cdot 10^{{{exponent}}}$" + suffix)
+            text = (f"$({mantissa}\\,{{\\scriptstyle\\pm {std_mantissa:.2f}}})"
+                    f"\\cdot 10^{{{exponent}}}$")
+            return verify_printed(text, [mean, std]) + suffix
         body += f"\\,{{\\scriptsize$\\pm {fmt_number(std, 2)}$}}"
-    return body + suffix
+        return verify_printed(body, [mean, std]) + suffix
+    return verify_printed(body, [mean]) + suffix
 
 
 def fmt_count(mean: Any, std: Any, show_std: bool = True) -> str:
@@ -243,9 +317,11 @@ def fmt_count(mean: Any, std: Any, show_std: bool = True) -> str:
         return DASH
     mean = float(mean)
     text = f"${mean:.0f}$" if abs(mean - round(mean)) < 1e-9 else f"${mean:.1f}$"
+    expected = [mean]
     if show_std and not _is_missing(std) and float(std) > 0:
         text += f"\\,{{\\scriptsize$\\pm {float(std):.1f}$}}"
-    return text
+        expected.append(float(std))
+    return verify_printed(text, expected)
 
 
 def fmt_duration(seconds_mean: Any, seconds_std: Any, show_std: bool = True) -> str:
@@ -260,7 +336,9 @@ def fmt_duration(seconds_mean: Any, seconds_std: Any, show_std: bool = True) -> 
     else:
         scale, unit = 3600.0, "h"
     std = None if _is_missing(seconds_std) else float(seconds_std) / scale
-    return fmt_cell(value / scale, std, show_std=show_std, suffix=f"\\,{unit}")
+    text = fmt_cell(value / scale, std, show_std=show_std, suffix=f"\\,{unit}")
+    expected = [value] + ([float(seconds_std)] if len(parse_printed_numbers(text)) == 2 else [])
+    return verify_printed(text, expected, unit_scale=scale)
 
 
 def fmt_int(value: Any) -> str:
@@ -268,10 +346,54 @@ def fmt_int(value: Any) -> str:
         return DASH
     value = float(value)
     if value >= 1e6:
-        return f"${value / 1e6:.2f}$\\,M"
+        return verify_printed(f"${value / 1e6:.2f}$\\,M", [value], unit_scale=1e6)
     if value >= 1e3:
-        return f"${value / 1e3:.1f}$\\,k"
-    return f"${value:.0f}$"
+        return verify_printed(f"${value / 1e3:.1f}$\\,k", [value], unit_scale=1e3)
+    return verify_printed(f"${value:.0f}$", [value])
+
+
+def fmt_percent(fraction: float) -> str:
+    return verify_printed(f"{100 * fraction:.1f}\\,\\%", [100 * fraction])
+
+
+class DataStore:
+    """Every value shown in the tables, keyed; written to joblight_data.tex."""
+
+    _KEY_RE = re.compile(r"^[A-Za-z0-9_/.\-]+$")
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.best: set[str] = set()
+
+    def add(self, key: str, text: str) -> str:
+        if not self._KEY_RE.match(key):
+            raise ValueError(f"invalid data key {key!r}")
+        if key in self.values and self.values[key] != text:
+            raise ValueError(f"data key {key!r} defined twice with different values")
+        self.values[key] = text
+        return key
+
+    def cell(self, key: str, text: str) -> str:
+        return f"\\JLcell{{{self.add(key, text)}}}"
+
+    def inline(self, key: str, text: str) -> str:
+        return f"\\JLval{{{self.add(key, text)}}}"
+
+    def render(self, sources: list[str]) -> str:
+        lines = [
+            "% Generated by make_latex_tables.py -- do not edit by hand.",
+            "% All numbers shown in the JOB-light tables. Sources:",
+            *[f"%   {source}" for source in sources],
+            "",
+        ]
+        lines += [f"\\JLdef{{{key}}}{{{self.values[key]}}}" for key in sorted(self.values)]
+        lines += ["", "% Cells marked as best value of their column."]
+        lines += [f"\\JLbest{{{key}}}" for key in sorted(self.best)]
+        return "\n".join(lines) + "\n"
+
+
+def row_key(row: dict[str, Any]) -> str:
+    return f"{row['method_id']}/{row['variant_id']}"
 
 
 # --------------------------------------------------------------------------- #
@@ -280,12 +402,13 @@ def fmt_int(value: Any) -> str:
 class Column:
     def __init__(self, header: str, value: Callable[[dict], Any],
                  render: Callable[[dict], str], lower_is_better: bool = True,
-                 mark_best: bool = True) -> None:
+                 mark_best: bool = True, key: str | None = None) -> None:
         self.header = header
         self.value = value
         self.render = render
         self.lower_is_better = lower_is_better
         self.mark_best = mark_best
+        self.key = key or re.sub(r"[^A-Za-z0-9]+", "_", header).strip("_").lower()
 
 
 def best_rows(rows: list[dict], column: Column) -> set[int]:
@@ -307,12 +430,17 @@ def best_rows(rows: list[dict], column: Column) -> set[int]:
 
 
 def render_table(rows: list[dict], columns: list[Column], *, caption: str,
-                 label: str, header_prefix: str = "", notes: Iterable[str] = (),
+                 label: str, data: DataStore, key_prefix: str,
+                 header_prefix: str = "", notes: Iterable[str] = (),
                  col_spec: str | None = None) -> str:
     best = [best_rows(rows, column) for column in columns]
+    keys = [column.key for column in columns]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"duplicate column keys in {key_prefix}: {keys}")
     spec = col_spec or ("l" + "r" * len(columns))
     lines = [
         "% Generated by make_latex_tables.py -- do not edit by hand.",
+        "% Layout only; every number is a key into joblight_data.tex.",
         r"\begin{table}[htbp]",
         r"  \centering",
         r"  \small",
@@ -338,9 +466,10 @@ def render_table(rows: list[dict], columns: list[Column], *, caption: str,
         cells = []
         for column_index, column in enumerate(columns):
             text = column.render(row)
+            key = f"{key_prefix}/{row_key(row)}/{column.key}"
+            cells.append(data.cell(key, text))
             if index in best[column_index] and text != DASH:
-                text = f"\\best{{{text}}}"
-            cells.append(text)
+                data.best.add(key)
         lines.append(f"    {row['_label']} & " + " & ".join(cells) + r" \\")
     lines += [
         r"    \bottomrule",
@@ -383,14 +512,17 @@ def prepare_rows(results: list[dict], workload: str) -> list[dict]:
     return rows
 
 
-def coverage_note(rows: list[dict]) -> str:
+def coverage_note(rows: list[dict], data: DataStore) -> str:
     partial = [r for r in rows if not is_complete(r)]
     if not partial:
         return ""
     parts = []
     for row in partial:
         fraction = row.get("coverage_fraction.mean")
-        share = f"{100 * fraction:.1f}\\,\\%" if fraction is not None else "part"
+        share = (
+            data.inline(f"{row['workload']}/coverage/{row_key(row)}", fmt_percent(fraction))
+            if fraction is not None else "part"
+        )
         parts.append(f"{row_label(row)} supports only {share} of the queries")
     return (
         r"$^{\dagger}$" + "; ".join(parts)
@@ -423,7 +555,11 @@ def own_model_selection_note(rows: list[dict]) -> str:
 # --------------------------------------------------------------------------- #
 # Q-error tables
 # --------------------------------------------------------------------------- #
-def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool) -> str:
+BEST_NOTE = r"Bold marks the best value per column."
+
+
+def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
+                 data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only") or row.get("method_id") == "own_model"]
     kind = "Smoothed" if family == "smoothed_q_error" else "Raw"
     stats = [("p50", "Median"), ("p90", "90th"), ("p95", "95th"),
@@ -436,6 +572,7 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool) -
             render=lambda r, k=key: fmt_cell(
                 r.get(f"{family}.{k}.mean"), r.get(f"{family}.{k}.std"),
                 show_std=show_std),
+            key=key,
         ))
     has_sub1 = any(not _is_missing(r.get("estimate_lt_1_count.mean")) for r in rows)
     if has_sub1:
@@ -445,6 +582,7 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool) -
             render=lambda r: fmt_count(
                 r.get("estimate_lt_1_count.mean"), r.get("estimate_lt_1_count.std"),
                 show_std=show_std),
+            key="estimates_below_one",
         ))
     header_prefix = (
         r"& \multicolumn{5}{c}{q-error percentile}"
@@ -452,24 +590,27 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool) -
         + r" \cmidrule(lr){2-6}"
     )
     description = (
-        "estimates and true cardinalities are clamped to at least one before the q-error is computed"
+        "Estimates and true cardinalities are clamped to at least one before the q-error is computed."
         if kind == "Smoothed"
-        else "q-error on the unclamped estimates"
+        else "Q-error on the unclamped estimates."
     )
     notes = [
+        description,
         seeds_note(rows),
+        BEST_NOTE,
         own_model_single_run_note(rows),
         own_model_selection_note(rows),
         (r"Est.\,$<1$ is the number of queries with an estimate below one."
          if has_sub1 else ""),
-        coverage_note(rows),
+        coverage_note(rows, data),
     ]
     workload_slug = workload.replace("_", "-")
     return render_table(
         rows, columns,
-        caption=(f"{kind} q-error on {WORKLOADS[workload]} ({description}). "
-                 r"Best value per column in \best{red}."),
+        caption=f"{kind} q-error on {WORKLOADS[workload]}",
         label=f"tab:{workload_slug}-qerror-{kind.lower()}",
+        data=data,
+        key_prefix=f"{workload}/qerror_{kind.lower()}",
         header_prefix=header_prefix,
         notes=notes,
         col_spec="l" + "r" * 5 + ("r" if has_sub1 else ""),
@@ -506,7 +647,7 @@ def _append_footnote_marker(label: str, marker: str) -> str:
     return label + f"$^{{{marker}}}$"
 
 
-def inference_table(rows: list[dict], workload: str, show_std: bool) -> str:
+def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only")]
     for row in rows:
         if _cpu_profile(row) == "cpu_postgres_2core":
@@ -514,6 +655,9 @@ def inference_table(rows: list[dict], workload: str, show_std: bool) -> str:
         if _cpu_profile(row) is None and _is_missing(
                 row.get("timing.gpu_single_query.mean_ms.mean")):
             row["_label"] = _append_footnote_marker(row["_label"], r"\ddagger")
+        if row["method_id"] in INFERENCE_OUT_OF_COMPETITION:
+            row["_eligible"] = False
+            row["_label"] = _append_footnote_marker(row["_label"], r"\circ")
     metrics = [("mean_ms", "Mean"), ("p50_ms", "p50"), ("p95_ms", "p95"), ("p99_ms", "p99")]
     columns = []
     for metric, header in metrics:
@@ -528,13 +672,14 @@ def inference_table(rows: list[dict], workload: str, show_std: bool) -> str:
             mean, std = _timing(r, profile, m)
             return fmt_cell(mean, std, show_std=show_std)
 
-        columns.append(Column(header, cpu_value, cpu_render))
+        columns.append(Column(header, cpu_value, cpu_render, key=f"cpu_{metric}"))
     for metric, header in metrics:
         columns.append(Column(
             header,
             value=lambda r, m=metric: _timing(r, "gpu_single_query", m)[0],
             render=lambda r, m=metric: fmt_cell(
                 *_timing(r, "gpu_single_query", m), show_std=show_std),
+            key=f"gpu_{metric}",
         ))
     header_prefix = (
         r"& \multicolumn{4}{c}{CPU, 1 core (ms)} & \multicolumn{4}{c}{GPU, single query (ms)} \\"
@@ -546,12 +691,26 @@ def inference_table(rows: list[dict], workload: str, show_std: bool) -> str:
         for key in ("timing.cpu_1core.cpu_models", "timing.gpu_single_query.gpu_names")
         for name in _names(row.get(key))
     })
+    hardware_text = (
+        data.inline(f"{workload}/inference/hardware", ", ".join(hardware)) if hardware else ""
+    )
     notes = [
-        seeds_note(rows),
-        own_model_single_run_note(rows),
         "Per-query end-to-end estimation latency under the standardized timing profiles"
-        + (f" ({', '.join(hardware)})" if hardware else "") + ".",
+        + (f" ({hardware_text})" if hardware else "") + ".",
+        seeds_note(rows),
     ]
+    out_of_competition = [r for r in rows if r["method_id"] in INFERENCE_OUT_OF_COMPETITION]
+    if out_of_competition:
+        names = ", ".join(sorted({row_label(r) for r in out_of_competition}))
+        notes.append(
+            rf"$^{{\circ}}${names} is shown out of competition: as a query-driven model it "
+            r"evaluates one small set-convolution network per query, whereas all other methods "
+            r"estimate from a model or sample of the data. Bold marks the best value per column "
+            r"among the remaining methods."
+        )
+    else:
+        notes.append(BEST_NOTE)
+    notes.append(own_model_single_run_note(rows))
     if any(_cpu_profile(r) == "cpu_postgres_2core" for r in rows):
         notes.append(r"$^{\ast}$Measured with client and PostgreSQL backend pinned to one core each.")
     missing = [r for r in rows if _cpu_profile(r) is None
@@ -563,17 +722,22 @@ def inference_table(rows: list[dict], workload: str, show_std: bool) -> str:
             mean = row.get("inference.mean_ms.mean")
             device = row.get("inference_device")
         device = {"cuda": "GPU", "cpu": "CPU"}.get(device or "", device or "")
-        extra = (f"; the non-profile-controlled evaluate-stage mean is "
-                 f"${fmt_number(float(mean))}$\\,ms ({device})"
-                 if not _is_missing(mean) else "")
+        extra = ""
+        if not _is_missing(mean):
+            value = data.inline(
+                f"{workload}/inference/{row_key(row)}/evaluate_stage_mean_ms",
+                verify_printed(f"${fmt_number(float(mean))}$", [float(mean)]),
+            )
+            extra = f"; the non-profile-controlled evaluate-stage mean is {value}\\,ms ({device})"
         notes.append(rf"$^{{\ddagger}}${row_label(row)} was not measured under a standardized profile{extra}.")
-    notes.append(coverage_note(rows))
+    notes.append(coverage_note(rows, data))
     workload_slug = workload.replace("_", "-")
     return render_table(
         rows, columns,
-        caption=(f"Inference latency per query on {WORKLOADS[workload]}. "
-                 r"Best value per column in \best{red}."),
+        caption=f"Inference latency per query on {WORKLOADS[workload]}",
         label=f"tab:{workload_slug}-inference",
+        data=data,
+        key_prefix=f"{workload}/inference",
         header_prefix=header_prefix,
         notes=notes,
         col_spec="l" + "r" * 8,
@@ -844,28 +1008,31 @@ def _missing_build_note(rows: list[dict]) -> str:
     return f"No build metrics found for: {missing}."
 
 
-def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
+def training_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only")]
     columns = [
         Column("Preprocessing",
                value=lambda r: r.get("_build.preprocessing_s.mean"),
                render=lambda r: fmt_duration(r.get("_build.preprocessing_s.mean"),
                                              r.get("_build.preprocessing_s.std"), show_std),
-               mark_best=False),
+               mark_best=False, key="preprocessing"),
         Column("Training / statistics",
                value=lambda r: r.get("_build.training_s.mean"),
                render=lambda r: fmt_duration(r.get("_build.training_s.mean"),
-                                             r.get("_build.training_s.std"), show_std)),
+                                             r.get("_build.training_s.std"), show_std),
+               key="training"),
         Column("Total build",
                value=lambda r: r.get("_build.total_s.mean"),
                render=lambda r: fmt_duration(r.get("_build.total_s.mean"),
-                                             r.get("_build.total_s.std"), show_std)),
+                                             r.get("_build.total_s.std"), show_std),
+               key="total"),
     ]
     notes = [
-        seeds_note(rows),
-        own_model_single_run_note(rows),
         "Wall-clock time of the preprocessing stage, the training (or statistics-collection) "
         "stage, and their sum.",
+        seeds_note(rows),
+        "Bold marks the best value in the training and total-build columns.",
+        own_model_single_run_note(rows),
         ("For selected own-model checkpoints, training and total-build time is measured to "
          "the selected checkpoint; final-step selections use the recorded full-run time."
          if any(r.get("_build.training_record_is_selected_checkpoint") for r in rows) else ""),
@@ -875,45 +1042,50 @@ def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
         ("FOJ sampling uses the recorded cumulative reservoir draw time at each sample prefix; "
          "the zero-valued cache-hit build timer is not reported."
          if any(r.get("_build.foj_cumulative_sampling") for r in rows) else ""),
-        coverage_note(rows),
+        coverage_note(rows, data),
         _missing_build_note(rows),
     ]
     workload_slug = workload.replace("_", "-")
     return render_table(
         rows, columns,
-        caption=(f"Build time on {WORKLOADS[workload]}. "
-                 r"Best value per column in \best{red}."),
+        caption=f"Training and build time on {WORKLOADS[workload]}",
         label=f"tab:{workload_slug}-training",
+        data=data,
+        key_prefix=f"{workload}/training",
         notes=notes,
     )
 
 
-def model_size_table(rows: list[dict], workload: str, show_std: bool) -> str:
+def model_size_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only")]
     columns = [
         Column("Parameters",
                value=lambda r: r.get("_build.params.mean"),
-               render=lambda r: fmt_int(r.get("_build.params.mean"))),
+               render=lambda r: fmt_int(r.get("_build.params.mean")),
+               key="parameters"),
         Column("Serialized size (MB)",
                value=lambda r: r.get("_build.size_mb.mean"),
                render=lambda r: fmt_cell(r.get("_build.size_mb.mean"),
-                                         r.get("_build.size_mb.std"), show_std=show_std)),
+                                         r.get("_build.size_mb.std"), show_std=show_std),
+               key="serialized_mb"),
     ]
     notes = [
         "Trainable parameter count and serialized model or summary size in decimal MB "
         "($10^6$ bytes); -- where not applicable.",
         (r"For \OwnModelName{}, serialized size is the inference-only \texttt{state\_dict}."
          if any(r.get("_build.size_is_inference_state_dict") for r in rows) else ""),
+        BEST_NOTE,
         own_model_single_run_note(rows),
-        coverage_note(rows),
+        coverage_note(rows, data),
         _missing_build_note(rows),
     ]
     workload_slug = workload.replace("_", "-")
     return render_table(
         rows, columns,
-        caption=(f"Model size on {WORKLOADS[workload]}. "
-                 r"Best value per column in \best{red}."),
+        caption=f"Model size on {WORKLOADS[workload]}",
         label=f"tab:{workload_slug}-model-size",
+        data=data,
+        key_prefix=f"{workload}/model_size",
         notes=notes,
     )
 
@@ -922,9 +1094,23 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool) -> str:
 # Main
 # --------------------------------------------------------------------------- #
 PREAMBLE = r"""% Generated by make_latex_tables.py -- macros used by the JOB-light tables.
-% Requires: booktabs, xcolor (ThesisRed defined in the thesis preamble), adjustbox.
-\providecommand{\best}[1]{\textcolor{ThesisRed}{#1}}
+% Requires: booktabs, adjustbox. Input once in the preamble; it loads the data file.
+\providecommand{\JobLightTableDir}{.}
+\providecommand{\best}[1]{{\boldmath\bfseries #1}}
 \providecommand{\OwnModelName}{Own model}
+\makeatletter
+% \JLdef{key}{value} stores a value; \JLbest{key} marks that cell as best.
+\providecommand{\JLdef}[2]{\@namedef{JL@v@#1}{#2}}
+\providecommand{\JLbest}[1]{\@namedef{JL@b@#1}{}}
+% \JLval{key} prints a value; \JLcell{key} prints it and applies \best if marked.
+\providecommand{\JLval}[1]{%
+  \@ifundefined{JL@v@#1}%
+    {\textbf{??}\PackageWarning{joblight-tables}{No value for key #1}}%
+    {\@nameuse{JL@v@#1}}}
+\providecommand{\JLcell}[1]{%
+  \@ifundefined{JL@b@#1}{\JLval{#1}}{\best{\JLval{#1}}}}
+\makeatother
+\input{\JobLightTableDir/joblight_data}
 """
 
 
@@ -960,15 +1146,16 @@ def main() -> None:
         print(f"refreshed {refreshed} selected own-model build records")
 
     written = []
+    store = DataStore()
     (args.output / "table_macros.tex").write_text(PREAMBLE, encoding="utf-8")
     written.append("table_macros.tex")
     for workload in WORKLOADS:
         builders = {
-            "qerror_smoothed": lambda rows: qerror_table(rows, workload, "smoothed_q_error", show_std),
-            "qerror_raw": lambda rows: qerror_table(rows, workload, "raw_q_error", show_std),
-            "inference": lambda rows: inference_table(rows, workload, show_std),
-            "training": lambda rows: training_table(rows, workload, show_std),
-            "model_size": lambda rows: model_size_table(rows, workload, show_std),
+            "qerror_smoothed": lambda rows: qerror_table(rows, workload, "smoothed_q_error", show_std, store),
+            "qerror_raw": lambda rows: qerror_table(rows, workload, "raw_q_error", show_std, store),
+            "inference": lambda rows: inference_table(rows, workload, show_std, store),
+            "training": lambda rows: training_table(rows, workload, show_std, store),
+            "model_size": lambda rows: model_size_table(rows, workload, show_std, store),
         }
         build_found = None
         for name, builder in builders.items():
@@ -982,6 +1169,13 @@ def main() -> None:
         print(f"{workload}: build metrics found for {build_found} of "
               f"{len(prepare_rows(results, workload))} rows")
 
+    (args.output / "joblight_data.tex").write_text(
+        store.render([f"comparison: {args.comparison}", f"build metrics: {args.results_root}"]),
+        encoding="utf-8",
+    )
+    written.append("joblight_data.tex")
+    print(f"joblight_data.tex: {len(store.values)} values, {len(store.best)} marked best")
+
     all_lines = [
         "% Generated by make_latex_tables.py",
         "% Set \\JobLightTableDir to this folder relative to your main .tex file.",
@@ -989,7 +1183,7 @@ def main() -> None:
         r"\input{\JobLightTableDir/table_macros}",
     ]
     all_lines += [f"\\input{{\\JobLightTableDir/{Path(name).stem}}}"
-                  for name in written if name != "table_macros.tex"]
+                  for name in written if name not in ("table_macros.tex", "joblight_data.tex")]
     (args.output / "all_tables.tex").write_text("\n".join(all_lines) + "\n", encoding="utf-8")
     print("wrote", len(written) + 1, "files to", args.output)
 
