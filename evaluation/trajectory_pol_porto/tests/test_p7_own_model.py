@@ -406,6 +406,11 @@ class BridgeTest(unittest.TestCase):
             config = load_experiment_config(root / f"{name}.yaml")
             self.assertEqual((config.method_id, config.seeds, config.adapter_type), ("own_model", (0, 1, 2), "external"))
             self.assertEqual(tuple(config.timing["profiles"]), ("cpu_1core", "gpu_single_query"))
+            from evaluation.eval_core.timing import consistency_settings
+
+            self.assertEqual(consistency_settings(config, "cpu_1core")["relative_tolerance"], 1e-4)
+            self.assertEqual((consistency_settings(config, "gpu_single_query")["relative_tolerance"],
+                              consistency_settings(config, "gpu_single_query")["absolute_tolerance"]), (1e-3, 1.0))
             workload = next(w for w in config.workloads if w.workload_id == "pol_v3_multi")
             out = self.root / f"rendered_{name}"
             values = {"seed": "0", "exchange_directory": str(out), "predictions_csv": str(out / "p.csv"),

@@ -72,11 +72,33 @@ def primary_profile(config: ExperimentConfig) -> str | None:
     return None if value in (None, "") else str(value)
 
 
-def consistency_settings(config: ExperimentConfig) -> dict[str, Any]:
+PROFILE_CONSISTENCY_KEYS = ("relative_tolerance", "absolute_tolerance")
+
+
+def consistency_settings(config: ExperimentConfig, profile: str | None = None) -> dict[str, Any]:
+    """Tolerances for comparing a timing run's estimates with the accuracy run's.
+
+    ``timing.estimate_consistency.profiles.<profile>`` may override the
+    tolerances (not the mode) for one timing profile, e.g. a GPU profile whose
+    float32 kernels differ slightly from the CPU accuracy run. The override in
+    effect is reported as ``profile_override``.
+    """
+    raw = dict(config.timing.get("estimate_consistency", {}) or {})
+    overrides = raw.pop("profiles", None) or {}
+    if not isinstance(overrides, dict):
+        raise ValueError("timing.estimate_consistency.profiles must map profile names to tolerances")
+    for name, values in overrides.items():
+        unknown = set(values or {}) - set(PROFILE_CONSISTENCY_KEYS)
+        if unknown:
+            raise ValueError(f"timing.estimate_consistency.profiles.{name} may only set "
+                             f"{PROFILE_CONSISTENCY_KEYS}, not {sorted(unknown)}")
     settings = dict(DEFAULT_CONSISTENCY)
-    settings.update(config.timing.get("estimate_consistency", {}) or {})
+    settings.update(raw)
     if settings["mode"] not in {"deterministic", "stochastic"}:
         raise ValueError("timing.estimate_consistency.mode must be deterministic or stochastic")
+    if profile is not None and overrides.get(profile):
+        settings.update(overrides[profile])
+        settings["profile_override"] = profile
     settings["relative_tolerance"] = float(settings["relative_tolerance"])
     settings["absolute_tolerance"] = float(settings["absolute_tolerance"])
     return settings
@@ -140,6 +162,7 @@ def estimate_consistency(
     passed = not status_mismatches and not missing and (not deterministic or not violations)
     return {
         "mode": settings["mode"],
+        "profile_override": settings.get("profile_override"),
         "relative_tolerance": relative,
         "absolute_tolerance": absolute,
         "compared_estimates": compared,
@@ -297,7 +320,7 @@ def run_timing_stage(
                 if not debug_unpinned:
                     failures.append(f"{workload_id}: hardware class violated: {observed_problems}")
         accuracy = read_predictions(run_directory / "predictions.csv")
-        consistency = estimate_consistency(accuracy, outcome.predictions, consistency_settings(config))
+        consistency = estimate_consistency(accuracy, outcome.predictions, consistency_settings(config, profile))
         if not consistency["passed"] and not allow_estimate_drift:
             failures.append(
                 f"timing estimates disagree with the accuracy run "

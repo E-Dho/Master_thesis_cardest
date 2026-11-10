@@ -24,6 +24,14 @@ timing:
     mode: deterministic
     relative_tolerance: 1.0e-4
     absolute_tolerance: 1.0e-6
+    # GPU float32 kernels vs the CPU accuracy run (decided 2026-11-10 after GPU timing
+    # 22923145): 5 of 24,000 estimates differed by more than 1e-4 relative; the largest
+    # was 2.4 % of an estimate of 0.78 (both smoothed to 1), all others <= 0.11 % or
+    # 1.33 tuples. Within 0.1 % or one tuple counts as the same estimate.
+    profiles:
+      gpu_single_query:
+        relative_tolerance: 1.0e-3
+        absolute_tolerance: 1.0
 resources:
   profile: pretrained_checkpoint_inference
   cpu_threads: 8

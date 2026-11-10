@@ -220,6 +220,32 @@ class TimingStageUnitTests(unittest.TestCase):
         self.assertTrue(stochastic["passed"])
         self.assertAlmostEqual(stochastic["max_relative_difference"], 0.25)
 
+    def test_profile_override_of_consistency_tolerances(self):
+        from types import SimpleNamespace
+
+        from evaluation.eval_core.timing import consistency_settings
+
+        config = SimpleNamespace(timing={"estimate_consistency": {
+            "mode": "deterministic", "relative_tolerance": 1e-4, "absolute_tolerance": 1e-6,
+            "profiles": {"gpu_single_query": {"relative_tolerance": 1e-3, "absolute_tolerance": 1.0}}}})
+        cpu = consistency_settings(config, "cpu_1core")
+        gpu = consistency_settings(config, "gpu_single_query")
+        self.assertEqual((cpu["relative_tolerance"], cpu["absolute_tolerance"], cpu.get("profile_override")),
+                         (1e-4, 1e-6, None))
+        self.assertEqual((gpu["relative_tolerance"], gpu["absolute_tolerance"], gpu["profile_override"]),
+                         (1e-3, 1.0, "gpu_single_query"))
+        self.assertEqual(gpu["mode"], "deterministic")
+        self.assertEqual(consistency_settings(config)["relative_tolerance"], 1e-4)
+        accuracy = [PredictionRecord("w", 0, "ok", 10, 18.21819)]
+        timing = [PredictionRecord("w", 0, "ok", 10, 18.19804)]  # 0.11 %: a GPU float32 difference
+        self.assertFalse(estimate_consistency(accuracy, timing, cpu)["passed"])
+        report = estimate_consistency(accuracy, timing, gpu)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["profile_override"], "gpu_single_query")
+        bad = SimpleNamespace(timing={"estimate_consistency": {"profiles": {"gpu_single_query": {"mode": "stochastic"}}}})
+        with self.assertRaises(ValueError):  # a profile may relax tolerances, never switch the mode
+            consistency_settings(bad, "gpu_single_query")
+
     def test_launch_plan_and_core_assignment(self):
         with tempfile.TemporaryDirectory() as temporary:
             plan = Path(temporary) / "plan.tsv"
