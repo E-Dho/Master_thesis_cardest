@@ -360,8 +360,13 @@ def write_index(directory: Path, *, metadata: ModelMetadata, parts: Dict[str, An
     return manifest
 
 
+PREPARED_FILES = ("manifest.json", "sample_rows.npy", "sample_trajectory_ids.npy", "sample_segment_ids.npy",
+                  "preparation_stats.json")
+
+
 def prepare(dataset: str, config_path: Path, snapshot: Path, prepared: Optional[Path] = None, *,
-            index_path: Optional[Path] = None, force_rebuild_index: bool = False, log=print) -> Dict[str, Any]:
+            index_path: Optional[Path] = None, force: bool = False, log=print) -> Dict[str, Any]:
+    """Write the prepared directory and the trajectory index; existing outputs are refused unless ``force``."""
     started = time.perf_counter()
     config = load_simple_yaml(str(config_path))
     validate_config(config)
@@ -372,6 +377,13 @@ def prepare(dataset: str, config_path: Path, snapshot: Path, prepared: Optional[
     if prepared is not None and index_path is None:  # never write next to the configured data by accident
         index_path = Path(prepared) / "trajectory_segment_index"
     prepared = Path(prepared or config["dataset"]["prepared_directory"])
+    index_dir = Path(index_path or config["dataset"].get("trajectory_index_path")
+                     or prepared / "trajectory_segment_index")
+    existing = [str(prepared / name) for name in PREPARED_FILES if (prepared / name).exists()]
+    if index_dir.exists():
+        existing.append(str(index_dir))
+    if existing and not force:  # checked before anything is written (review of a24d561)
+        raise SystemExit(f"refusing to overwrite existing prepared data: {existing}; pass --force to replace it")
     snapshot_manifest, data = _load_snapshot(snapshot)
     source = {"snapshot": str(snapshot.resolve()), "snapshot_manifest_sha256": _sha256(snapshot / "manifest.json"),
               "snapshot_version": snapshot_manifest.get("snapshot_version"),
@@ -397,11 +409,9 @@ def prepare(dataset: str, config_path: Path, snapshot: Path, prepared: Optional[
     rows = write_sample_rows(prepared / "sample_rows.npy", parts["encoded"])
     np.save(prepared / "sample_trajectory_ids.npy", parts["segment_trip"])
     np.save(prepared / "sample_segment_ids.npy", np.stack([parts["segment_trip"], parts["segment_idx"]], axis=1))
-    index_dir = Path(index_path or config["dataset"].get("trajectory_index_path")
-                     or prepared / "trajectory_segment_index")
     index_manifest = write_index(index_dir, metadata=metadata, parts=parts,
                                  trajectory_config=config.get("trajectory_distinct", {}) or {}, source=source,
-                                 config_path=config_path, force=force_rebuild_index)
+                                 config_path=config_path, force=force)
     stats = preparation_stats(metadata=metadata, encoded_sample=EncodedSampleRows(encoded_rows=np.asarray(rows)),
                               factorization_config=FactorizationConfig.from_dict(config.get("factorization", {})))
     stats.update({"snapshot": source, "trajectory_index_path": str(index_dir),
@@ -421,12 +431,16 @@ def compare(prepared: Path, reference: Path, chunk_rows: int = 2_000_000, *, ind
             reference_index: Optional[Path] = None) -> Dict[str, Any]:
     """Columns, domains and encoded rows of two preparations (e.g. snapshot vs staging TSVs), and their indexes."""
 
-    def load(directory: Path) -> ModelMetadata:
-        return ModelMetadata.from_json_dict(json.loads((directory / "manifest.json").read_text())["metadata"])
+    def load(directory: Path) -> Dict[str, Any]:
+        return json.loads((directory / "manifest.json").read_text())
 
-    mine, theirs = load(prepared), load(reference)
+    manifest_a, manifest_b = load(prepared), load(reference)
+    mine, theirs = (ModelMetadata.from_json_dict(m["metadata"]) for m in (manifest_a, manifest_b))
+    cardinalities = [[float(mine.full_join_cardinality), float(manifest_a.get("join_cardinality"))],
+                     [float(theirs.full_join_cardinality), float(manifest_b.get("join_cardinality"))]]
     report: Dict[str, Any] = {"columns_equal": [c.name for c in mine.columns] == [c.name for c in theirs.columns],
-                              "join_cardinality": [mine.full_join_cardinality, theirs.full_join_cardinality],
+                              "join_cardinality": cardinalities,
+                              "join_cardinality_equal": len({value for pair in cardinalities for value in pair}) == 1,
                               "columns": {}}
     for a, b in zip(mine.columns, theirs.columns):
         same_values = len(a.domain) == len(b.domain) and all(
@@ -455,7 +469,8 @@ def compare(prepared: Path, reference: Path, chunk_rows: int = 2_000_000, *, ind
             arrays[name] = bool(a.shape == b.shape and a.dtype == b.dtype and np.array_equal(a, b))
         report["index_arrays_equal"] = arrays
         index_ok = all(arrays.values())
-    report["passed"] = bool(index_ok and report["columns_equal"] and report["differing_sample_rows"] == 0
+    report["passed"] = bool(index_ok and report["columns_equal"] and report["join_cardinality_equal"]
+                            and report["differing_sample_rows"] == 0
                             and all(all(v for k, v in c.items() if k != "domain_size")
                                     for c in report["columns"].values())
                             and report["sample_trajectory_ids.npy_equal"] and report["sample_segment_ids.npy_equal"])
@@ -473,7 +488,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     run.add_argument("--trajectory-index-path", type=Path,
                      help="default: <prepared-directory>/trajectory_segment_index if --prepared-directory is "
                           "given, else dataset.trajectory_index_path")
-    run.add_argument("--force-rebuild-index", action="store_true")
+    run.add_argument("--force", action="store_true", help="replace existing prepared files and trajectory index")
     check = sub.add_parser("compare")
     check.add_argument("--prepared", required=True, type=Path)
     check.add_argument("--reference", required=True, type=Path)
@@ -483,7 +498,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "prepare":
         prepare(args.dataset, args.config, args.snapshot, args.prepared_directory,
-                index_path=args.trajectory_index_path, force_rebuild_index=args.force_rebuild_index)
+                index_path=args.trajectory_index_path, force=args.force)
         return 0
     report = compare(args.prepared, args.reference, index=args.index, reference_index=args.reference_index)
     text = json.dumps(report, indent=2, sort_keys=True)

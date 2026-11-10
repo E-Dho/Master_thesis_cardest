@@ -151,6 +151,49 @@ class PolEquivalenceTest(unittest.TestCase):
             rows[2, 0] = (rows[2, 0] + 1) % 3
             rows.flush()
             self.assertEqual(prep.compare(root / "a", root / "b")["differing_sample_rows"], 1)
+            # the join cardinality is part of the verdict (review of a24d561)
+            rows[2, 0] = (rows[2, 0] + 2) % 3
+            rows.flush()
+            self.assertTrue(prep.compare(root / "a", root / "b")["passed"])
+            manifest = json.loads((root / "b" / "manifest.json").read_text())
+            manifest["join_cardinality"] += 1
+            (root / "b" / "manifest.json").write_text(json.dumps(manifest))
+            report = prep.compare(root / "a", root / "b")
+            self.assertFalse(report["join_cardinality_equal"])
+            self.assertFalse(report["passed"])
+
+    def test_existing_outputs_are_refused_before_anything_is_written(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(6)
+            segments, starts, ends, counts = _segments(rng, np.arange(1, 4))
+            snapshot = _write_snapshot(root / "snap", {
+                "trips": {"trip_id": np.arange(1, 4), "call_type": np.array(list("ABC")),
+                          "origin_stand": np.array([np.nan, 3.0, np.nan]), "num_of_segments": counts,
+                          "trip_time.start": starts, "trip_time.end": ends},
+                "segments": segments})
+            config = _config(PORTO_CONFIG, root / "porto.yaml", root / "a")
+            prep.prepare("porto", config, snapshot, root / "a", log=lambda message: None)
+            before = {name: (root / "a" / name).read_bytes() for name in prep.PREPARED_FILES}
+            index_dir = root / "a" / "trajectory_segment_index"
+            # existing prepared files, and an existing index alone, are both refused
+            for victim in ("prepared", "index"):
+                target = root / f"only_{victim}"
+                if victim == "prepared":
+                    target.mkdir()
+                    (target / "sample_rows.npy").write_bytes(b"keep")
+                    kwargs = {"index_path": root / "fresh_index"}
+                else:
+                    kwargs = {"index_path": index_dir}
+                with self.assertRaises(SystemExit):
+                    prep.prepare("porto", config, snapshot, target, log=lambda message: None, **kwargs)
+            self.assertEqual((root / "only_prepared" / "sample_rows.npy").read_bytes(), b"keep")
+            self.assertFalse((root / "only_index" / "manifest.json").exists())
+            self.assertFalse((root / "fresh_index").exists())
+            with self.assertRaises(SystemExit):
+                prep.prepare("porto", config, snapshot, root / "a", log=lambda message: None)
+            self.assertEqual(before, {name: (root / "a" / name).read_bytes() for name in prep.PREPARED_FILES})
+            prep.prepare("porto", config, snapshot, root / "a", force=True, log=lambda message: None)
 
 
 class PortoPreparationTest(unittest.TestCase):
