@@ -83,6 +83,7 @@ OWN_MODEL_VARIANTS = {
     "duet_neurocard_distjoin_rare_aux_step_11000": {
         "label": r"\OwnModelName{} (best p99)",
         "selection_order": 1,
+        "qerror_only": True,
         "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "Master_thesis_cardest/model/runs/"
@@ -129,6 +130,7 @@ OWN_MODEL_VARIANTS = {
     "duet_neurocard_distjoin_rare_aux_best_p99_step_19500": {
         "label": r"\OwnModelName{} (best p99)",
         "selection_order": 1,
+        "qerror_only": True,
         "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/"
@@ -368,6 +370,7 @@ def prepare_rows(results: list[dict], workload: str) -> list[dict]:
         if not is_complete(row):
             label += r"$^{\dagger}$"
         variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
+        row["_qerror_only"] = bool(variant.get("qerror_only"))
         if row.get("method_id") == "own_model" and int(row.get("seed_count", 1)) == 1:
             label += r"$^{\S}$"
         row["_label"] = label
@@ -421,6 +424,7 @@ def own_model_selection_note(rows: list[dict]) -> str:
 # Q-error tables
 # --------------------------------------------------------------------------- #
 def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool) -> str:
+    rows = [row for row in rows if not row.get("_qerror_only") or row.get("method_id") == "own_model"]
     kind = "Smoothed" if family == "smoothed_q_error" else "Raw"
     stats = [("p50", "Median"), ("p90", "90th"), ("p95", "95th"),
              ("p99", "99th"), ("max", "Max")]
@@ -503,6 +507,7 @@ def _append_footnote_marker(label: str, marker: str) -> str:
 
 
 def inference_table(rows: list[dict], workload: str, show_std: bool) -> str:
+    rows = [row for row in rows if not row.get("_qerror_only")]
     for row in rows:
         if _cpu_profile(row) == "cpu_postgres_2core":
             row["_label"] += r"$^{\ast}$"
@@ -840,6 +845,7 @@ def _missing_build_note(rows: list[dict]) -> str:
 
 
 def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
+    rows = [row for row in rows if not row.get("_qerror_only")]
     columns = [
         Column("Preprocessing",
                value=lambda r: r.get("_build.preprocessing_s.mean"),
@@ -883,6 +889,7 @@ def training_table(rows: list[dict], workload: str, show_std: bool) -> str:
 
 
 def model_size_table(rows: list[dict], workload: str, show_std: bool) -> str:
+    rows = [row for row in rows if not row.get("_qerror_only")]
     columns = [
         Column("Parameters",
                value=lambda r: r.get("_build.params.mean"),

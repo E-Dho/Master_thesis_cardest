@@ -26,6 +26,25 @@ class LatexTablesTest(unittest.TestCase):
             r"Own$^{\S\ddagger}$",
         )
 
+    def test_best_p99_selection_is_qerror_only(self) -> None:
+        rows = MODULE["prepare_rows"]([
+            {
+                "workload": "job_light",
+                "method_id": "own_model",
+                "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_18000",
+                "seed_count": 1,
+                "coverage_complete_all_seeds": True,
+            },
+            {
+                "workload": "job_light",
+                "method_id": "own_model",
+                "variant_id": "duet_neurocard_distjoin_rare_aux_step_11000",
+                "seed_count": 3,
+                "coverage_complete_all_seeds": True,
+            },
+        ], "job_light")
+        self.assertEqual([row["_qerror_only"] for row in rows], [False, True])
+
 
 if __name__ == "__main__":
     unittest.main()
