@@ -74,11 +74,17 @@ OWN_MODEL_VARIANTS = {
     "duet_neurocard_distjoin_rare_aux_step_11000": {
         "label": r"\OwnModelName{} (best p99)",
         "qerror_only": True,
-        "training_summary": (
+        "training_summaries": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "Master_thesis_cardest/model/runs/"
             "job_light_duet_binary_native_anpm_40k_rare_auxiliary/"
-            "training_summary.json"
+            "training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_rare_aux_40k/seed_1/"
+            "training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_rare_aux_40k/seed_2/"
+            "training_summary.json",
         ),
     },
     "duet_neurocard_distjoin_rare_aux_best_median_step_40000": {
@@ -598,15 +604,22 @@ def _build_status(metrics: dict[str, Any]) -> str | None:
     return bridge.get("status") or detail.get("status")
 
 
-def _selected_own_model_training_seconds(row: dict[str, Any]) -> float | None:
-    record = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {}).get("training_summary")
-    if not record:
+def _selected_own_model_training_seconds(row: dict[str, Any]) -> tuple[float, float] | None:
+    variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
+    records = variant.get("training_summaries") or (variant.get("training_summary"),)
+    records = tuple(record for record in records if record)
+    if not records:
         return None
-    try:
-        value = json.loads(Path(record).read_text(encoding="utf-8")).get("training_seconds")
-    except (OSError, json.JSONDecodeError):
-        return None
-    return float(value) if value is not None else None
+    values = []
+    for record in records:
+        try:
+            value = json.loads(Path(record).read_text(encoding="utf-8")).get("training_seconds")
+        except (OSError, json.JSONDecodeError):
+            return None
+        if value is None:
+            return None
+        values.append(float(value))
+    return _mean_std(values)
 
 
 def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
@@ -652,15 +665,13 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
         checkpoint_load_only = bool(statuses & _CHECKPOINT_LOAD_STATUSES)
         row["_build.checkpoint_load_only"] = checkpoint_load_only
         row["_build.checkpoint_statuses"] = sorted(status for status in statuses if status)
-        selected_training_seconds = _selected_own_model_training_seconds(row)
-        if selected_training_seconds is not None:
+        selected_training = _selected_own_model_training_seconds(row)
+        if selected_training is not None:
             # The selected checkpoints predate the evaluation pipeline. Their
             # summaries only record complete-run elapsed time, not time to an
             # intermediate checkpoint.
-            row["_build.training_s.mean"] = selected_training_seconds
-            row["_build.training_s.std"] = 0.0
-            row["_build.total_s.mean"] = selected_training_seconds
-            row["_build.total_s.std"] = 0.0
+            row["_build.training_s.mean"], row["_build.training_s.std"] = selected_training
+            row["_build.total_s.mean"], row["_build.total_s.std"] = selected_training
             row["_build.training_record_is_full_run"] = True
         elif checkpoint_load_only:
             # A bridge load is not training/statistics construction.
