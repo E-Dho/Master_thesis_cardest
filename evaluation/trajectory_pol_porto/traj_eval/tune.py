@@ -12,6 +12,11 @@ serialized model size and the method's theoretical size, and build seconds.
 Choosing a configuration (under the memory budget) is a separate, documented
 decision.
 
+A combination the method's builder refuses by an explicit size guard
+(``SettingTooLarge``, e.g. CASE+-Temporal's dense counts on Porto's
+20.6 M-cell 25 m grid) is skipped: it is listed in ``tuning_skipped.json``
+with the guard's message and the sweep goes on. Any other error stops it.
+
     python -m evaluation.trajectory_pol_porto.traj_eval.tune \\
         --config evaluation/trajectory_pol_porto/configs/pol_v3/trahist_temporal.yaml \\
         --validation-jsonl .../qgen_pol_v3_validation_seed20261026/benchmark.jsonl \\
@@ -34,6 +39,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from evaluation.eval_core.config import experiment_config_from_raw, load_raw_config
 from evaluation.eval_core.runner import run_seed
+
+from .temporal import SettingTooLarge
 
 COLUMNS = ("variant_id", "parameters", "query_count", "scored_count", "coverage_fraction",
            "q_p50", "q_p90", "q_p95", "q_p99", "q_max", "q_gmean", "zero_estimate_count", "serialized_bytes",
@@ -167,16 +174,32 @@ def sweep(config_path: Path, validation_jsonl: Path, grid: List[Tuple[str, List[
     base = load_raw_config(config_path)
     keys = [key for key, _ in grid]
     rows: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
     output.mkdir(parents=True, exist_ok=True)
+    _write_skipped(skipped, output)  # an empty list: nothing skipped (also clears an earlier sweep's file)
     for values in itertools.product(*(values for _, values in grid)):
         parameters = dict(zip(keys, values))
         raw = tuning_raw(base, parameters, validation_jsonl, expected_queries)
         config = experiment_config_from_raw(raw, config_path)
         log(f"tuning {config.variant_id}")
-        run = run_seed(config, 0)
+        try:
+            run = run_seed(config, 0)
+        except SettingTooLarge as error:
+            log(f"skipped {config.variant_id}: {error}")
+            skipped.append({"variant_id": config.variant_id, "parameters": json.dumps(parameters, sort_keys=True),
+                            "reason": str(error)})
+            _write_skipped(skipped, output)
+            continue
         rows.append(row_of(run, parameters, config.variant_id))
         _write(rows, output)
+    if not rows:
+        raise SettingTooLarge(f"every combination was refused as too large ({len(skipped)}); see "
+                              f"{output / 'tuning_skipped.json'}")
     return rows
+
+
+def _write_skipped(skipped: List[Dict[str, Any]], output: Path) -> None:
+    (output / "tuning_skipped.json").write_text(json.dumps(skipped, indent=2), encoding="utf-8")
 
 
 def _write(rows: Iterable[Dict[str, Any]], output: Path) -> None:
@@ -200,7 +223,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("at least one --grid is required")
     rows = sweep(args.config.resolve(), args.validation_jsonl.resolve(), parse_grid(args.grid),
                  args.expected_queries, args.output)
-    print(json.dumps({"combinations": len(rows), "output": str(args.output)}, indent=2))
+    skipped = json.loads((args.output / "tuning_skipped.json").read_text(encoding="utf-8"))
+    print(json.dumps({"combinations": len(rows), "skipped_too_large": len(skipped), "output": str(args.output)},
+                     indent=2))
     return 0
 
 

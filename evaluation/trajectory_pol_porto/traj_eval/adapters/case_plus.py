@@ -64,13 +64,14 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 
-from ..temporal import TimeBuckets
+from ..temporal import SettingTooLarge, TimeBuckets
 from .base import Estimate, InProcessTrajectoryAdapter, grid_extent
 from .space_time import parse_space_time
 
 TRIP_TIME_DIAGNOSTIC = "approx:trip_time_as_segment_time"
 UNIT_BYTES = 8
 KEY_LIMIT = 1 << 62
+MAX_COUNT_BYTES = 4_000_000_000  # dense per-key cell/edge counts: refused above this
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +186,7 @@ def _unique_keys(*parts: Tuple[np.ndarray, int]) -> np.ndarray:
     for _, radix in parts:
         size *= max(int(radix), 1)
     if size >= KEY_LIMIT:
-        raise OverflowError("key space too large; use fewer cells or time buckets")
+        raise SettingTooLarge("key space too large; use fewer cells or time buckets")
     key = np.zeros(parts[0][0].size, dtype=np.int64)
     for values, radix in parts:
         key = key * int(radix) + np.asarray(values, dtype=np.int64)
@@ -255,7 +256,7 @@ def _piece_table(span_i: np.ndarray, span_j: np.ndarray, max_pieces: int) -> Tup
     counts = length * (length + 1) // 2
     total = int(counts.sum())
     if total > max_pieces:
-        raise MemoryError(f"{total} restricted trajectories (longest span {int(length.max())} buckets); "
+        raise SettingTooLarge(f"{total} restricted trajectories (longest span {int(length.max())} buckets); "
                           "use fewer time buckets")
     owner = np.repeat(np.arange(span_i.size, dtype=np.int64), counts)
     lo = np.empty(total, dtype=np.int64)
@@ -369,8 +370,8 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
                                          return_inverse=True)
     K = key_values.size
     keys = np.column_stack(_split(key_values, B, B, B)).astype(np.int32).reshape(K, 4)
-    if K * (3 * ny * nx + 4 * ny * nx) * 4 > 4_000_000_000:
-        raise MemoryError(f"{K} keys x {ny * nx} cells is too large; use a coarser grid or fewer buckets")
+    if K * (3 * ny * nx + 4 * ny * nx) * 4 > MAX_COUNT_BYTES:
+        raise SettingTooLarge(f"{K} keys x {ny * nx} cells is too large; use a coarser grid or fewer buckets")
 
     arrays: Dict[str, np.ndarray] = {
         "grid/origin": grid.origin, "grid/unit": np.array([grid.unit]), "grid/shape": np.array([ny, nx]),

@@ -38,6 +38,15 @@ import numpy as np
 KEY_LIMIT = 1 << 62  # combined integer keys must stay below this
 
 
+class SettingTooLarge(MemoryError, OverflowError):
+    """A histogram setting refused by an explicit size guard before anything that large is allocated.
+
+    ``tune.sweep`` skips such a setting and goes on with the next one (a real
+    allocation failure or any other error still stops the sweep). Subclasses
+    both MemoryError and OverflowError, the types these guards raised before.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Time buckets
 # ---------------------------------------------------------------------------
@@ -110,7 +119,7 @@ def _check_key_space(*sizes: int) -> None:
     for size in sizes:
         product *= max(int(size), 1)
     if product >= KEY_LIMIT:
-        raise OverflowError(f"key space {sizes} exceeds 2^62; use fewer cells or buckets")
+        raise SettingTooLarge(f"key space {sizes} exceeds 2^62; use fewer cells or buckets")
 
 
 def _csr(stat: np.ndarray, n_stats: int) -> np.ndarray:

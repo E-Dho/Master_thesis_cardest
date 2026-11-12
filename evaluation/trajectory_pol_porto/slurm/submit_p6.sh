@@ -6,7 +6,9 @@
 #   STAGE=run  ./submit_p6.sh   test runs with the committed configs, then aggregate and
 #                               compare with the earlier POL methods
 #   CONFIG_NAMES="trahist_temporal" ...   a subset
-#   UNIT_SIZES / TIME_BUCKETS             override the sweep grids (values separated by /)
+#   UNIT_SIZES / TIME_BUCKETS             override the sweep grids (values separated by /; unit sizes
+#                                         default per dataset, Porto coarse first; settings refused as
+#                                         too large are skipped, see tuning_skipped.json)
 #   AFTER_JOB=<id>                        start after that job succeeded
 #   RUN_MEM=64G                           memory of the test runs (the tuning jobs had 64G;
 #                                         CASE+-Temporal best holds a 1.17 GB model)
@@ -19,7 +21,7 @@ REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
 source "$SCRIPT_DIR/_submit_dataset.sh"
 STAGE=${STAGE:?set STAGE=tune or STAGE=run}
 CONFIG_NAMES=${CONFIG_NAMES:-"trahist trahist_temporal case_plus case_plus_temporal case_plus_temporal_best"}
-UNIT_SIZES=${UNIT_SIZES:-"25/50/100/200/400"}
+UNIT_SIZES=${UNIT_SIZES:-$DATASET_UNIT_SIZES}
 TIME_BUCKETS=${TIME_BUCKETS:-"25/50/100/200/400"}
 VALIDATION_JSONL=${VALIDATION_JSONL:-$DATASET_VALIDATION_JSONL}
 VALIDATION_MULTI=${VALIDATION_MULTI:-1800}

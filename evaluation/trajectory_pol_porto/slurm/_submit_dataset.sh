@@ -11,10 +11,14 @@ _traj_runs=/work_beegfs/sunip956/master_thesis_trajectories
 case "$TRAJ_DATASET" in
   pol_v3)
     DATASET_DB_JOB_NAME=pol_mobilitydb
+    DATASET_UNIT_SIZES="25/50/100/200/400"
     DATASET_VALIDATION_JSONL=$_traj_runs/mobilitydb/query_runs/qgen_pol_v3_validation_seed20261026/benchmark.jsonl
     ;;
   porto_v3)
     DATASET_DB_JOB_NAME=porto_mobilitydb
+    # coarse first: the window domain has 20.6 M cells at 25 m (POL: 39.5 k); settings the
+    # builders refuse as too large are skipped by tune.py, the coarser ones are already done
+    DATASET_UNIT_SIZES="800/400/200/100/50/25"
     DATASET_VALIDATION_JSONL=$_traj_runs/mobilitydb_porto/query_runs/qgen_porto_v3_validation_seed20261103/benchmark.jsonl
     ;;
   *) echo "TRAJ_DATASET must be pol_v3 or porto_v3, got $TRAJ_DATASET" >&2; exit 2 ;;

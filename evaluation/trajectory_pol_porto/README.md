@@ -501,8 +501,12 @@ on the grid and the bucket count.
 set): every grid point re-runs the method on the validation benchmark's multi
 queries under the experiment id `<experiment>_tuning` and writes
 `tuning.csv` (coverage, smoothed Q-error, zero estimates, serialized and
-theoretical bytes, build seconds). The chosen `unit_size_m` / `time_buckets`
-are then committed to the configs.
+theoretical bytes, build seconds). A setting the builder refuses by an
+explicit size guard (`SettingTooLarge`: CASE+-Temporal's dense counts above
+4 GB, its restricted-trajectory or key-space limits) is listed in
+`tuning_skipped.json` and the sweep continues; any other error stops it, and a
+sweep in which every setting is refused fails. The chosen `unit_size_m` /
+`time_buckets` are then committed to the configs.
 
 ```bash
 # the pinned upstream checkout (once)
@@ -630,7 +634,10 @@ segment ends outside it fall into the border cells (its traversal already
 clips cells); TraHist gets the vertices clipped onto the box before upstream's
 CountGrid, which is the same assignment (upstream treats out-of-grid query
 samples the same way). One-sided windows still reach the outliers through the
-border cells. `model_meta.json` records `grid_extent_box` (and, for TraHist,
+border cells. The window domain has 20.6 M cells at 25 m (POL: 39.5 k), so
+`submit_p6.sh` sweeps Porto from 800 m down to 25 m, coarsest first
+(`DATASET_UNIT_SIZES`); CASE+-Temporal at 25 m exceeds its 4 GB guard on Porto
+and is skipped. `model_meta.json` records `grid_extent_box` (and, for TraHist,
 `points_outside_grid_extent`). POL configs have no such key and are unchanged.
 
 **NULL `origin_stand`** (most Porto trips; NaN in the snapshot, NULL never

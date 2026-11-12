@@ -357,6 +357,65 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class PortoTuningTest(_PortoRoot):
+    """A setting the builder refuses as too large is skipped, not fatal (review of aa6b5e1)."""
+
+    def _shipped(self, name: str) -> Path:
+        return _fixture_configs(self.root, [name])[name]  # the fixture benchmark stands in for validation
+
+    def test_oversized_porto_setting_is_skipped_and_the_sweep_goes_on(self) -> None:
+        from evaluation.trajectory_pol_porto.traj_eval import tune
+        from evaluation.trajectory_pol_porto.traj_eval.temporal import SettingTooLarge
+
+        config = self._shipped("case_plus_temporal")
+        output = self.root / "tuning" / "case_plus_temporal"
+        messages = []
+        # 25 m on the window domain: 20,562,894 cells x the keys exceed the dense-count guard
+        rows = tune.sweep(config, self.root / "benchmark.jsonl",
+                          tune.parse_grid(["unit_size_m=25,2000", "time_buckets=4"]), 8 * MULTI, output,
+                          log=messages.append)
+        self.assertEqual([json.loads(row["parameters"])["unit_size_m"] for row in rows], [2000])
+        skipped = json.loads((output / "tuning_skipped.json").read_text())
+        self.assertEqual([json.loads(item["parameters"]) for item in skipped], [{"unit_size_m": 25, "time_buckets": 4}])
+        self.assertIn("20562894 cells is too large", skipped[0]["reason"])
+        self.assertTrue(any(message.startswith("skipped ") for message in messages))
+        self.assertEqual(len(list(csv_rows(output / "tuning.csv"))), 1)
+        # nothing feasible at all: the sweep fails instead of writing an empty table
+        with self.assertRaises(SettingTooLarge):
+            tune.sweep(config, self.root / "benchmark.jsonl", tune.parse_grid(["unit_size_m=25", "time_buckets=4"]),
+                       8 * MULTI, self.root / "tuning" / "none", log=lambda message: None)
+
+    def test_other_errors_still_stop_the_sweep(self) -> None:
+        from unittest import mock
+
+        from evaluation.trajectory_pol_porto.traj_eval import tune
+
+        config = self._shipped("case_plus")
+        real = tune.run_seed
+        calls = []
+
+        def failing(config_, seed):
+            calls.append(config_.variant_id)
+            if len(calls) == 2:
+                raise MemoryError("a real allocation failure")  # not a guard: must not be skipped
+            return real(config_, seed)
+
+        output = self.root / "tuning" / "stops"
+        with mock.patch.object(tune, "run_seed", failing), self.assertRaises(MemoryError) as caught:
+            tune.sweep(config, self.root / "benchmark.jsonl", tune.parse_grid(["unit_size_m=4000,2000,1000"]),
+                       8 * MULTI, output, log=lambda message: None)
+        self.assertEqual(str(caught.exception), "a real allocation failure")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(list(csv_rows(output / "tuning.csv"))), 1)  # the finished setting is kept
+
+
+def csv_rows(path: Path):
+    import csv as _csv
+
+    with path.open(encoding="utf-8", newline="") as handle:
+        yield from _csv.DictReader(handle)
+
+
 class SubmitScriptsDatasetTest(unittest.TestCase):
     """TRAJ_DATASET=porto_v3 points every submit script at the Porto configs, results and database job."""
 
@@ -378,7 +437,8 @@ class SubmitScriptsDatasetTest(unittest.TestCase):
             log = Path(tmp) / "sbatch.log"
             fake.write_text('#!/bin/bash\necho "$@" >> "$FAKE_SBATCH_LOG"\necho 4242\n')
             fake.chmod(0o755)
-            env = {k: v for k, v in os.environ.items() if k not in ("TRAJ_DATASET", "COMPARE_WITH", "CONFIG_NAMES")}
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("TRAJ_DATASET", "COMPARE_WITH", "CONFIG_NAMES", "UNIT_SIZES", "TIME_BUCKETS")}
             env.update({"PATH": f"{tmp}:{os.environ['PATH']}", "FAKE_SBATCH_LOG": str(log), "REPO_ROOT": str(repo),
                         **env_extra})
             result = subprocess.run(["bash", str(repo / "evaluation/trajectory_pol_porto/slurm" / script)],
@@ -401,6 +461,8 @@ class SubmitScriptsDatasetTest(unittest.TestCase):
             if script == "submit_p6.sh":
                 self.assertIn("qgen_porto_v3_validation_seed20261103", text)
                 self.assertIn("traj_phase1_porto_v3_tuning/case_plus_temporal", text)
+                # coarse first on Porto's 20.6 M-cell window domain (review of aa6b5e1)
+                self.assertIn("GRIDS=unit_size_m=800/400/200/100/50/25+time_buckets=", text)
             if script not in ("submit_p6.sh",):
                 self.assertIn("results/traj_phase1_porto_v3/", text, script)
 
@@ -413,6 +475,8 @@ class SubmitScriptsDatasetTest(unittest.TestCase):
             self.assertIn("configs/pol_v3/", text, script)
             if script in ("submit_p4.sh", "submit_timing.sh"):
                 self.assertIn("--job-name=pol_mobilitydb", text, script)
+            if script == "submit_p6.sh":
+                self.assertIn("GRIDS=unit_size_m=25/50/100/200/400+time_buckets=", text)
 
     def test_unknown_dataset_is_refused(self) -> None:
         result, submitted = self._submit("submit_p3.sh", {"TRAJ_DATASET": "porto"})
