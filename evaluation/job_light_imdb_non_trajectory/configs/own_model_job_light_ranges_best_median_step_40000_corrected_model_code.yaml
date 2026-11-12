@@ -3,3 +3,12 @@ extends: own_model_job_light_ranges_best_median_step_40000.yaml
 experiment:
   variant_id: duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code
   display_name: Own model best smoothed-median checkpoint step 40,000 (corrected model code)
+
+# The accuracy run used four CPU compute threads while the standardized CPU
+# profile pins one core.  The same checkpoint is repeatable within each mode,
+# but their floating reductions differ by at most 0.6245% on nine of 1,000
+# range queries; retain that measured cross-thread guard instead of rejecting
+# an otherwise valid timing-only run.
+timing:
+  estimate_consistency:
+    relative_tolerance: 0.01

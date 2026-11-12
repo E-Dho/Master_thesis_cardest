@@ -182,7 +182,7 @@ def row_label(result: dict[str, Any]) -> str:
     if method == "postgresql":
         return "PostgreSQL 16.10"
     if method == "mscn":
-        return "MSCN (adapted)" if result.get("protocol") == "adapted" else "MSCN"
+        return "MSCN (adapted)" if variant == "mscn_job_light_ranges_adapted" else "MSCN"
     if method == "deepdb":
         if result.get("protocol") == "adapted":
             return "DeepDB (adapted)"
