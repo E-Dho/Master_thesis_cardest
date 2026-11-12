@@ -68,9 +68,13 @@ def _substitute(value):
     return value
 
 
-def _fixture_configs(root: Path, names) -> dict:
-    """The shipped Porto configs with only the cluster paths and the query counts swapped."""
-    target = root / "shipped"
+def _fixture_configs(root: Path, names, tag: str = "") -> dict:
+    """The shipped Porto configs with only the cluster paths and the query counts swapped.
+
+    ``tag`` gives the copies their own directory and results root, so runs of the same
+    config and setting (run directory = timestamp + hash, one-second resolution) never collide.
+    """
+    target = root / f"shipped{tag}"
     target.mkdir(exist_ok=True)
     out = {}
     for name in ("_base",) + tuple(names):
@@ -80,7 +84,7 @@ def _fixture_configs(root: Path, names) -> dict:
         text = text.replace("../../../../query_generation/benchmark_v3/porto_v3_config.json", str(PORTO_CONFIG))
         text = text.replace("expected_query_count: 6000", f"expected_query_count: {8 * MULTI}")
         text = text.replace("expected_query_count: 2000", f"expected_query_count: {8 * SINGLE}")
-        text = text.replace("results_root: ../../results", f"results_root: {root / 'results'}")
+        text = text.replace("results_root: ../../results", f"results_root: {root / f'results{tag}'}")
         text = re.sub(r"sample_trips: \d+", "sample_trips: 60", text)
         text = text.replace("/work_beegfs/sunip956/master_thesis_trajectories/external/trahist", str(TRAHIST_SOURCE))
         # MSCN: the published recipe, scaled down for the fixture
@@ -360,14 +364,15 @@ if __name__ == "__main__":
 class PortoTuningTest(_PortoRoot):
     """A setting the builder refuses as too large is skipped, not fatal (review of aa6b5e1)."""
 
-    def _shipped(self, name: str) -> Path:
-        return _fixture_configs(self.root, [name])[name]  # the fixture benchmark stands in for validation
+    def _shipped(self, name: str, tag: str) -> Path:
+        # the fixture benchmark stands in for validation; every scenario gets its own results root
+        return _fixture_configs(self.root, [name], tag=f"_{tag}")[name]
 
     def test_oversized_porto_setting_is_skipped_and_the_sweep_goes_on(self) -> None:
         from evaluation.trajectory_pol_porto.traj_eval import tune
         from evaluation.trajectory_pol_porto.traj_eval.temporal import SettingTooLarge
 
-        config = self._shipped("case_plus_temporal")
+        config = self._shipped("case_plus_temporal", "skip")
         output = self.root / "tuning" / "case_plus_temporal"
         messages = []
         # 25 m on the window domain: 20,562,894 cells x the keys exceed the dense-count guard
@@ -381,8 +386,9 @@ class PortoTuningTest(_PortoRoot):
         self.assertTrue(any(message.startswith("skipped ") for message in messages))
         self.assertEqual(len(list(csv_rows(output / "tuning.csv"))), 1)
         # nothing feasible at all: the sweep fails instead of writing an empty table
+        # (its own results root: the same config and setting again, within the same second)
         with self.assertRaises(SettingTooLarge):
-            tune.sweep(config, self.root / "benchmark.jsonl", tune.parse_grid(["unit_size_m=25", "time_buckets=4"]),
+            tune.sweep(self._shipped("case_plus_temporal", "none"), self.root / "benchmark.jsonl", tune.parse_grid(["unit_size_m=25", "time_buckets=4"]),
                        8 * MULTI, self.root / "tuning" / "none", log=lambda message: None)
 
     def test_other_errors_still_stop_the_sweep(self) -> None:
@@ -390,7 +396,7 @@ class PortoTuningTest(_PortoRoot):
 
         from evaluation.trajectory_pol_porto.traj_eval import tune
 
-        config = self._shipped("case_plus")
+        config = self._shipped("case_plus", "stops")
         real = tune.run_seed
         calls = []
 
