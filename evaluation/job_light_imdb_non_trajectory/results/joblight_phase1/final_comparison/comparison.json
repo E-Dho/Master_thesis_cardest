@@ -5232,7 +5232,7 @@
       "zero_estimate_count.std": 3.605551275463989
     },
     {
-      "actual_hardware": "CPU",
+      "actual_hardware": "AMD EPYC 7313 16-Core Processor",
       "coverage_complete_all_seeds": true,
       "coverage_fraction.mean": 1.0,
       "coverage_fraction.std": 0.0,
@@ -5255,15 +5255,15 @@
       "evaluate_stage_inference.throughput_queries_per_second.mean": 99.34143498861796,
       "evaluate_stage_inference.throughput_queries_per_second.std": 0.0,
       "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 10.066293084195681,
+      "inference.mean_ms.mean": 10.187817100169402,
       "inference.mean_ms.std": 0.0,
-      "inference.p50_ms.mean": 8.220079354941845,
+      "inference.p50_ms.mean": 8.34178482182324,
       "inference.p50_ms.std": 0.0,
-      "inference.p95_ms.mean": 18.022497091442347,
+      "inference.p95_ms.mean": 18.13531117513776,
       "inference.p95_ms.std": 0.0,
-      "inference.p99_ms.mean": 22.456083763390776,
+      "inference.p99_ms.mean": 22.231805394403636,
       "inference.p99_ms.std": 0.0,
-      "inference.throughput_queries_per_second.mean": 99.34143498861796,
+      "inference.throughput_queries_per_second.mean": 98.15645394570069,
       "inference.throughput_queries_per_second.std": 0.0,
       "inference_device": "cpu",
       "inference_profiles": {
@@ -5341,7 +5341,184 @@
       "smoothed_q_error_true_zero.p95.std": null,
       "smoothed_q_error_true_zero.p99.mean": null,
       "smoothed_q_error_true_zero.p99.std": null,
-      "standardized_timing": {},
+      "standardized_timing": {
+        "cpu_1core": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": null
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "max_relative_difference": 0.0,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 0
+            }
+          ],
+          "gpu_names": [],
+          "guard_warning_count": 0,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 10.187817100169402,
+              "std": 0.0
+            },
+            "p50_ms": {
+              "mean": 8.34178482182324,
+              "std": 0.0
+            },
+            "p95_ms": {
+              "mean": 18.13531117513776,
+              "std": 0.0
+            },
+            "p99_ms": {
+              "mean": 22.231805394403636,
+              "std": 0.0
+            },
+            "throughput_queries_per_second": {
+              "mean": 98.15645394570069,
+              "std": 0.0
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              700
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "n158"
+          ],
+          "report_table": "CPU latency, one physical core",
+          "scopes": [
+            "predicate_encoding_and_estimation"
+          ],
+          "seed_count": 1,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/seed_0/corrected_model_code_step18000-f92db5a425fa2b87c1f33e3ab8db7a590957c904ad208cee200a95594084cb30/timing/cpu_1core/20261112T090324Z-534e1a7eaf1dabb9"
+          ]
+        },
+        "gpu_single_query": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": "NVIDIA L40S"
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "max_relative_difference": 5.087386886918086e-06,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 0
+            }
+          ],
+          "gpu_names": [
+            "NVIDIA L40S"
+          ],
+          "guard_warning_count": 2,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 17.616191788443498,
+              "std": 0.0
+            },
+            "p50_ms": {
+              "mean": 15.706378035247326,
+              "std": 0.0
+            },
+            "p95_ms": {
+              "mean": 25.764800887554884,
+              "std": 0.0
+            },
+            "p99_ms": {
+              "mean": 30.15710908919573,
+              "std": 0.0
+            },
+            "throughput_queries_per_second": {
+              "mean": 56.76595781932937,
+              "std": 0.0
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              700
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "gpu001"
+          ],
+          "report_table": "GPU latency, one GPU with four pinned support cores",
+          "scopes": [
+            "predicate_encoding_and_estimation"
+          ],
+          "seed_count": 1,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/seed_0/corrected_model_code_step18000-f92db5a425fa2b87c1f33e3ab8db7a590957c904ad208cee200a95594084cb30/timing/gpu_single_query/20261112T090324Z-e6ee1f8ee2206e26"
+          ]
+        }
+      },
+      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.cpu_1core.gpu_names": "",
+      "timing.cpu_1core.hardware_consistent": true,
+      "timing.cpu_1core.hardware_status": "consistent",
+      "timing.cpu_1core.mean_ms.mean": 10.187817100169402,
+      "timing.cpu_1core.mean_ms.std": 0.0,
+      "timing.cpu_1core.p50_ms.mean": 8.34178482182324,
+      "timing.cpu_1core.p50_ms.std": 0.0,
+      "timing.cpu_1core.p95_ms.mean": 18.13531117513776,
+      "timing.cpu_1core.p95_ms.std": 0.0,
+      "timing.cpu_1core.p99_ms.mean": 22.231805394403636,
+      "timing.cpu_1core.p99_ms.std": 0.0,
+      "timing.cpu_1core.throughput_queries_per_second.mean": 98.15645394570069,
+      "timing.cpu_1core.throughput_queries_per_second.std": 0.0,
+      "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
+      "timing.gpu_single_query.hardware_consistent": true,
+      "timing.gpu_single_query.hardware_status": "consistent",
+      "timing.gpu_single_query.mean_ms.mean": 17.616191788443498,
+      "timing.gpu_single_query.mean_ms.std": 0.0,
+      "timing.gpu_single_query.p50_ms.mean": 15.706378035247326,
+      "timing.gpu_single_query.p50_ms.std": 0.0,
+      "timing.gpu_single_query.p95_ms.mean": 25.764800887554884,
+      "timing.gpu_single_query.p95_ms.std": 0.0,
+      "timing.gpu_single_query.p99_ms.mean": 30.15710908919573,
+      "timing.gpu_single_query.p99_ms.std": 0.0,
+      "timing.gpu_single_query.throughput_queries_per_second.mean": 56.76595781932937,
+      "timing.gpu_single_query.throughput_queries_per_second.std": 0.0,
       "true_zero_matching_count.mean": 0.0,
       "true_zero_matching_count.std": 0.0,
       "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code",
@@ -5791,6 +5968,79 @@
       "smoothed_q_error_true_zero.p99.mean": null,
       "smoothed_q_error_true_zero.p99.std": null,
       "standardized_timing": {
+        "cpu_1core": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": null
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "max_relative_difference": 0.006244513868284393,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 0
+            }
+          ],
+          "gpu_names": [],
+          "guard_warning_count": 0,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 17.703047833545135,
+              "std": 0.0
+            },
+            "p50_ms": {
+              "mean": 16.36948436498642,
+              "std": 0.0
+            },
+            "p95_ms": {
+              "mean": 24.93260803166777,
+              "std": 0.0
+            },
+            "p99_ms": {
+              "mean": 27.192252362146974,
+              "std": 0.0
+            },
+            "throughput_queries_per_second": {
+              "mean": 56.487448342376446,
+              "std": 0.0
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              10000
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "n230"
+          ],
+          "report_table": "CPU latency, one physical core",
+          "scopes": [
+            "predicate_encoding_and_estimation"
+          ],
+          "seed_count": 1,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/seed_0/corrected_model_code_step40000-6630902353803ba2120454b1a337fd928b57fff812b92179d389d1fb38e45750/timing/cpu_1core/20261112T091047Z-73960c7df1b802fd"
+          ]
+        },
         "gpu_single_query": {
           "available": true,
           "config_drift": [],
@@ -5867,6 +6117,20 @@
           ]
         }
       },
+      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.cpu_1core.gpu_names": "",
+      "timing.cpu_1core.hardware_consistent": true,
+      "timing.cpu_1core.hardware_status": "consistent",
+      "timing.cpu_1core.mean_ms.mean": 17.703047833545135,
+      "timing.cpu_1core.mean_ms.std": 0.0,
+      "timing.cpu_1core.p50_ms.mean": 16.36948436498642,
+      "timing.cpu_1core.p50_ms.std": 0.0,
+      "timing.cpu_1core.p95_ms.mean": 24.93260803166777,
+      "timing.cpu_1core.p95_ms.std": 0.0,
+      "timing.cpu_1core.p99_ms.mean": 27.192252362146974,
+      "timing.cpu_1core.p99_ms.std": 0.0,
+      "timing.cpu_1core.throughput_queries_per_second.mean": 56.487448342376446,
+      "timing.cpu_1core.throughput_queries_per_second.std": 0.0,
       "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
       "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
       "timing.gpu_single_query.hardware_consistent": true,
