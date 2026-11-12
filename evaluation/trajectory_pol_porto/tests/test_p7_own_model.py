@@ -172,9 +172,17 @@ def _metadata(data):
         columns.append(ColumnMetadata(f"{table}:{name}", ColumnKind.DATA, domain, table=table))
     for table in ("agents", "trips", "segments"):
         columns.append(ColumnMetadata(f"I_{table}", ColumnKind.INDICATOR, (0, 1), table=table))
+    trips_per_agent = np.bincount(np.searchsorted(np.asarray(data["agents"]["agent_id"]),
+                                                  np.asarray(data["trips"]["agent_id"])))
+    segments_per_trip = np.bincount(np.searchsorted(np.asarray(data["trips"]["trip_id"]),
+                                                    np.asarray(data["segments"]["trip_id"])))
+    for name, table, source, counts in (("F_agents_to_trips", "agents", "agents->trips", trips_per_agent),
+                                        ("F_trips_to_segments", "trips", "trips->segments", segments_per_trip)):
+        columns.append(ColumnMetadata(name, ColumnKind.FANOUT, tuple(range(1, int(counts.max()) + 1)), table=table,
+                                      fanout_source=source))
     return ModelMetadata(columns=tuple(columns), full_join_cardinality=len(data["segments"]["trip_id"]),
-                         join_root="trips", join_tables=("agents", "trips", "segments"),
-                         join_edges=(("trips", "agents"), ("trips", "segments")))
+                         join_root="agents", join_tables=("agents", "trips", "segments"),
+                         join_edges=(("agents", "trips"), ("trips", "segments")))  # as the POL preparation
 
 
 @unittest.skipUnless(_model_available(), "needs torch and the model package")
@@ -359,6 +367,22 @@ class BridgeTest(unittest.TestCase):
         predictions, _, components, _ = self._evaluate({"relation": "single"}, "single")
         self.assertTrue(predictions and all(p["status"] == "ok" for p in predictions))
         self.assertEqual({c["route"] for c in components}, {"rows"})
+        # segments-only queries are answered on their root-connected FK join (review 2026-11-12)
+        rows = [r for r in _fixture.benchmark_rows() if r["category"]["relation"] == "single"]
+        for prediction, row in zip(predictions, rows):
+            self.assertEqual("fk_ancestors:agents,trips" in prediction["diagnostic"], row["tables"] == ["segments"])
+
+    def test_root_connected_tables(self) -> None:
+        from model.src.predicates.generation import inverse_fanouts_for_table_subset
+
+        metadata = _metadata(_fixture.synthetic_data())
+        closure = _bridge().root_connected_tables
+        self.assertEqual(closure(metadata, ["segments"]), (["agents", "trips", "segments"], ("agents", "trips")))
+        self.assertEqual(inverse_fanouts_for_table_subset(metadata, {"segments"}), {"F_agents_to_trips"})
+        self.assertEqual(inverse_fanouts_for_table_subset(metadata, {"agents", "trips", "segments"}), frozenset())
+        for unchanged in (["trips"], ["agents"], ["trips", "segments"], ["agents", "trips"],
+                          ["agents", "trips", "segments"]):
+            self.assertEqual(closure(metadata, unchanged), (unchanged, ()))
 
     def test_prepare_build_and_smoke(self) -> None:
         bridge = _bridge()

@@ -146,7 +146,13 @@ class OwnModel:
         self.payload_step = payload.get("step")
 
     def translate_row(self, row: Dict[str, Any]):
-        return self.translate.translate(row, clamp=self.clamp, srid=self.srid)
+        translation = self.translate.translate(row, clamp=self.clamp, srid=self.srid)
+        tables, added = root_connected_tables(self.metadata, translation.record["tables"])
+        if not added:
+            return translation
+        record = {**translation.record, "tables": tables}
+        return type(translation)(record=record, route=translation.route,
+                                 notes=translation.notes + (f"fk_ancestors:{','.join(added)}",))
 
     def estimate(self, translation) -> Dict[str, Any]:
         from model.src.data.trajectory_distinct import trajectory_query_has_zero_support
@@ -179,6 +185,36 @@ class OwnModel:
         if self.device.type == "cuda":
             return str(self.torch.cuda.get_device_name(self.device))
         return "CPU"
+
+
+def root_connected_tables(metadata, tables) -> tuple:
+    """The query's tables plus their join ancestors, when that changes the fanout scaling.
+
+    The model is trained on root-connected table subsets (NeuroCard's rooted
+    table dropout) and scales a subset by the inverse fanout of every edge
+    whose child table is missing. A subset that leaves out an ancestor of an
+    included table (POL single queries on ``segments``: no ``agents``, no
+    ``trips``) would be divided by the ``agents -> trips`` fanout although
+    every segment row occurs once in the full join (P7 review 2026-11-12:
+    estimates about 1/300 of the truth). Along a foreign key every child row
+    has exactly one parent row, so adding the ancestors leaves the count
+    unchanged and gives the subset the model was trained on. Subsets whose
+    fanout scaling does not change (every multi query, single ``trips`` and
+    ``agents``) are returned as they are. Returns ``(tables, added)``.
+    """
+    from model.src.predicates.generation import infer_join_graph, inverse_fanouts_for_table_subset
+
+    graph = infer_join_graph(metadata)
+    parent = {child: parent_table for parent_table, child in graph.edges}
+    closure = set(tables)
+    for table in tables:
+        while table in parent:
+            table = parent[table]
+            closure.add(table)
+    if inverse_fanouts_for_table_subset(metadata, set(tables)) == inverse_fanouts_for_table_subset(metadata, closure):
+        return list(tables), ()
+    added = tuple(table for table in graph.tables if table in closure - set(tables))
+    return [table for table in graph.tables if table in closure], added
 
 
 def reported_estimate(route: str, parts: Dict[str, Any], estimate_kind: str) -> float:
