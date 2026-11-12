@@ -97,6 +97,7 @@ class LatexTablesTest(unittest.TestCase):
         base = {
             "workload": "job_light", "seed_count": 3, "coverage_complete_all_seeds": True,
             "timing.cpu_1core.mean_ms.mean": None,
+            "timing.gpu_single_query.mean_ms.mean": 2.0,
         }
         rows = MODULE["prepare_rows"]([
             dict(base, method_id="mscn", variant_id="m", **{"timing.cpu_1core.mean_ms.mean": 0.7}),
@@ -106,6 +107,18 @@ class LatexTablesTest(unittest.TestCase):
         self.assertIn(r"MSCN$^{\circ}$", table)
         self.assertIn("job_light/inference/deepdb/d/cpu_mean_ms", store.best)
         self.assertNotIn("job_light/inference/mscn/m/cpu_mean_ms", store.best)
+
+    def test_partial_standardized_timing_is_marked_and_explained(self) -> None:
+        row = {
+            "workload": "job_light", "method_id": "own_model", "variant_id": "v",
+            "coverage_complete_all_seeds": True, "seed_count": 1,
+            "timing.cpu_1core.mean_ms.mean": 1.0,
+            "timing.gpu_single_query.mean_ms.mean": None,
+        }
+        rows = MODULE["prepare_rows"]([row], "job_light")
+        table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
+        self.assertIn(r"$^{\P}$", table)
+        self.assertIn("missing its standardized GPU timing profile", table)
 
 
 if __name__ == "__main__":

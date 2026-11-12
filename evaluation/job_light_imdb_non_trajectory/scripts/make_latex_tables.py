@@ -647,14 +647,25 @@ def _append_footnote_marker(label: str, marker: str) -> str:
     return label + f"$^{{{marker}}}$"
 
 
+def _missing_timing_profiles(row: dict) -> list[str]:
+    missing = []
+    if _cpu_profile(row) is None:
+        missing.append("CPU")
+    if _is_missing(row.get("timing.gpu_single_query.mean_ms.mean")):
+        missing.append("GPU")
+    return missing
+
+
 def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only")]
     for row in rows:
         if _cpu_profile(row) == "cpu_postgres_2core":
             row["_label"] += r"$^{\ast}$"
-        if _cpu_profile(row) is None and _is_missing(
-                row.get("timing.gpu_single_query.mean_ms.mean")):
+        missing_profiles = _missing_timing_profiles(row)
+        if len(missing_profiles) == 2:
             row["_label"] = _append_footnote_marker(row["_label"], r"\ddagger")
+        elif missing_profiles:
+            row["_label"] = _append_footnote_marker(row["_label"], r"\P")
         if row["method_id"] in INFERENCE_OUT_OF_COMPETITION:
             row["_eligible"] = False
             row["_label"] = _append_footnote_marker(row["_label"], r"\circ")
@@ -713,9 +724,10 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
     notes.append(own_model_single_run_note(rows))
     if any(_cpu_profile(r) == "cpu_postgres_2core" for r in rows):
         notes.append(r"$^{\ast}$Measured with client and PostgreSQL backend pinned to one core each.")
-    missing = [r for r in rows if _cpu_profile(r) is None
-               and _is_missing(r.get("timing.gpu_single_query.mean_ms.mean"))]
-    for row in missing:
+    for row in rows:
+        missing_profiles = _missing_timing_profiles(row)
+        if not missing_profiles:
+            continue
         mean = row.get("evaluate_stage_inference.mean_ms.mean")
         device = row.get("evaluate_stage_device")
         if _is_missing(mean):
@@ -729,7 +741,15 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
                 verify_printed(f"${fmt_number(float(mean))}$", [float(mean)]),
             )
             extra = f"; the non-profile-controlled evaluate-stage mean is {value}\\,ms ({device})"
-        notes.append(rf"$^{{\ddagger}}${row_label(row)} was not measured under a standardized profile{extra}.")
+        if len(missing_profiles) == 2:
+            notes.append(
+                rf"$^{{\ddagger}}${row_label(row)} was not measured under a standardized profile{extra}."
+            )
+        else:
+            profiles = " and ".join(missing_profiles)
+            notes.append(
+                rf"$^{{\P}}${row_label(row)} is missing its standardized {profiles} timing profile{extra}."
+            )
     notes.append(coverage_note(rows, data))
     workload_slug = workload.replace("_", "-")
     return render_table(
