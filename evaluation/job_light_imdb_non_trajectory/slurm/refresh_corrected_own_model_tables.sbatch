@@ -38,13 +38,17 @@ from pathlib import Path
 results = Path(os.environ["RESULTS"])
 old_comparison = results / "final_comparison" / "comparison.json"
 previous = json.loads(old_comparison.read_text(encoding="utf-8"))
-obsolete = {
+replaceable = {
     str(results / "own_model" / variant / "aggregate" / "comparison.json")
     for variant in (
         "duet_neurocard_distjoin_rare_aux_best_median_step_18000",
         "duet_neurocard_distjoin_rare_aux_step_11000",
         "duet_neurocard_distjoin_rare_aux_best_median_step_40000",
         "duet_neurocard_distjoin_rare_aux_best_p99_step_19500",
+        "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code",
+        "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code",
+        "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code",
+        "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
     )
 }
 replacement = [
@@ -56,7 +60,7 @@ replacement = [
         "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
     )
 ]
-inputs = [Path(path) for path in previous["inputs"] if path not in obsolete] + replacement
+inputs = [Path(path) for path in previous["inputs"] if path not in replaceable] + replacement
 if len(inputs) != len(set(inputs)):
     raise RuntimeError("comparison input list contains duplicates")
 command = [
