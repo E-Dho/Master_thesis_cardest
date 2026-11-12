@@ -491,19 +491,32 @@ Fig. 12; no public code):
   Equal to CASE+ built on the cut trajectories (test) and, for the full
   range, to the base (gate). Most trips lie in one or two buckets.
 
-Storage: real and virtual counts per key (dense); `theoretical_bytes` counts
-each histogram dense or as (index, value) pairs, whichever is smaller. The
-number of keys grows with the number of distinct trajectory spans (a few
-times the number of buckets), so the temporal variant's size depends strongly
-on the grid and the bucket count.
+Storage (sparse, decided 2026-11-12; until then dense per key): only
+non-zero counts are stored. Real counts as (element, key, count) sorted by
+element; the virtual counts of a planarized piece are its cell MBR minus its
+real elements, so they are stored as the MBR rectangles per key (with
+multiplicity) plus the real counts of the planarized pieces. Queries give
+exactly the dense results (tested against a dense reference built from the
+stored data, and checked against the dense implementation on POL, Porto and a
+20,000-trip synthetic set: identical on every query). A virtual sum is the
+rectangles' overlap with the region minus the planarized real counts in it;
+the CASE+ minimum is built on the blocks the rectangles cut the region into,
+not per cell. Sizes drop by one to two orders of magnitude for the temporal
+variant (most per-key counts are zero) and slightly for the base; a query
+costs time proportional to the stored entries inside its region instead of
+O(1) prefix-sum lookups, so latency is higher for large windows. Elements,
+keys and counts use the smallest unsigned integer type that holds them.
+`theoretical_bytes`: 8 bytes per stored number. The build refuses a setting
+whose traversal finds more than 600 M (restricted trajectory, element) pairs
+of one kind (`SettingTooLarge`).
 
 **Tuning on the validation workload** (`traj_eval/tune.py`, never the test
 set): every grid point re-runs the method on the validation benchmark's multi
 queries under the experiment id `<experiment>_tuning` and writes
 `tuning.csv` (coverage, smoothed Q-error, zero estimates, serialized and
 theoretical bytes, build seconds). A setting the builder refuses by an
-explicit size guard (`SettingTooLarge`: CASE+-Temporal's dense counts above
-4 GB, its restricted-trajectory or key-space limits) is listed in
+explicit size guard (`SettingTooLarge`: CASE+'s element-pair, restricted-
+trajectory or key-space limits) is listed in
 `tuning_skipped.json` and the sweep continues; any other error stops it, and a
 sweep in which every setting is refused fails. The chosen `unit_size_m` /
 `time_buckets` are then committed to the configs.
@@ -636,8 +649,7 @@ CountGrid, which is the same assignment (upstream treats out-of-grid query
 samples the same way). One-sided windows still reach the outliers through the
 border cells. The window domain has 20.6 M cells at 25 m (POL: 39.5 k), so
 `submit_p6.sh` sweeps Porto from 800 m down to 25 m, coarsest first
-(`DATASET_UNIT_SIZES`); CASE+-Temporal at 25 m exceeds its 4 GB guard on Porto
-and is skipped. `model_meta.json` records `grid_extent_box` (and, for TraHist,
+(`DATASET_UNIT_SIZES`); settings over a builder's size guard are skipped. `model_meta.json` records `grid_extent_box` (and, for TraHist,
 `points_outside_grid_extent`). POL configs have no such key and are unchanged.
 
 **NULL `origin_stand`** (most Porto trips; NaN in the snapshot, NULL never

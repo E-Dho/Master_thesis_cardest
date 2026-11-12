@@ -9,6 +9,9 @@
 - CASE+-Temporal with the full time range equals the base exactly (gate 6),
   and over buckets a..b it equals CASE+ built on every trajectory cut to
   a..b (a cut trajectory is planarized on its own);
+- the sparse storage (2026-11-12) answers exactly what the dense histograms
+  answer: a dense reference rebuilt from the stored counts and rectangles, with
+  the dense query formulas, on POL and Porto data;
 - coverage rules and a pipeline run.
 """
 
@@ -51,6 +54,70 @@ def _trajectories(paths, times=None):
     return segments, {"offset": np.asarray(offsets, dtype=np.int64)}
 
 
+def dense(arrays):
+    """The dense per-key histograms the sparse storage stands for: real/<kind> and virtual/<kind>."""
+    ny, nx = (int(v) for v in np.asarray(arrays["grid/shape"]))
+    K = np.asarray(arrays["keys"]).reshape(-1, 4).shape[0]
+    shapes = {"cell": (ny, nx), "vedge": (ny, max(nx - 1, 1)), "hedge": (max(ny - 1, 1), nx),
+              "vertex": (max(ny - 1, 1), max(nx - 1, 1))}
+    out = {}
+    for prefix in ("real", "preal"):
+        for kind in case_plus.HISTOGRAMS:
+            h, w = shapes[kind]
+            array = np.zeros((K, h, w), dtype=np.int64)
+            element = np.asarray(arrays[f"{prefix}/{kind}/element"]).astype(np.int64)
+            np.add.at(array, (np.asarray(arrays[f"{prefix}/{kind}/key"]).astype(np.int64), element // w, element % w),
+                      np.asarray(arrays[f"{prefix}/{kind}/count"]).astype(np.int64))
+            out[f"{prefix}/{kind}"] = array
+    bounds = np.asarray(arrays["rect/bounds"]).astype(np.int64).reshape(-1, 5)
+    for kind in case_plus.VIRTUAL:
+        array = np.zeros((K,) + shapes[kind], dtype=np.int64)
+        for (key, r0, r1, c0, c1), count in zip(bounds, np.asarray(arrays["rect/count"]).astype(np.int64)):
+            r1 = r1 - (kind in ("hedge", "vertex"))
+            c1 = c1 - (kind in ("vedge", "vertex"))
+            if r1 >= r0 and c1 >= c0:
+                array[key, r0:r1 + 1, c0:c1 + 1] += count
+        if kind in case_plus.HISTOGRAMS:
+            array -= out[f"preal/{kind}"]
+        assert array.min() >= 0, kind
+        out[f"virtual/{kind}"] = array
+    return out
+
+
+def dense_count(arrays, model, rect, a, b, plus):
+    """The dense CASE / CASE+ query (the formulas of the dense implementation before 2026-11-12)."""
+    hist = dense(arrays)
+    keys = model.selected(a, b)
+    r0, r1, c0, c1 = rect
+
+    def total(name, r0, r1, c0, c1):
+        return 0 if r1 < r0 or c1 < c0 else int(hist[name][keys, r0:r1 + 1, c0:c1 + 1].sum())
+
+    def minimum(name, r0, r1, c0, c1):
+        if r1 < r0 or c1 < c0:
+            return None
+        return 0 if keys.size == 0 else int(hist[name][keys, r0:r1 + 1, c0:c1 + 1].sum(axis=0).min())
+
+    faces = total("real/cell", r0, r1, c0, c1)
+    if faces == 0:
+        return 0.0
+    edges = total("real/vedge", r0, r1, c0, c1 - 1) + total("real/hedge", r0, r1 - 1, c0, c1)
+    vfaces = total("virtual/cell", r0, r1, c0, c1)
+    vedges = total("virtual/vedge", r0, r1, c0, c1 - 1) + total("virtual/hedge", r0, r1 - 1, c0, c1)
+    line = r1 == r0 or c1 == c0
+    n = (faces + vfaces) - (edges + vedges) + (0 if line else total("virtual/vertex", r0, r1 - 1, c0, c1 - 1))
+    if plus:
+        minima = [minimum("virtual/cell", r0, r1, c0, c1)]
+        edge = [m for m in (minimum("virtual/vedge", r0, r1, c0, c1 - 1), minimum("virtual/hedge", r0, r1 - 1, c0, c1))
+                if m is not None]
+        if edge:
+            minima.append(min(edge))
+        if not line:
+            minima.append(minimum("virtual/vertex", r0, r1 - 1, c0, c1 - 1))
+        n -= min(m for m in minima if m is not None)
+    return float(max(n, 0))
+
+
 def _model(segments, trips, unit=1.0, plus=True, temporal=False, buckets=1, extent=None):
     arrays, meta = build_case(segments, trips, unit_size_m=unit, temporal=temporal, time_buckets=buckets,
                               extent=extent)
@@ -85,7 +152,7 @@ class CaseHistogramTest(unittest.TestCase):
         path = [(0.5, 0.5), (0.5, 4.5), (4.5, 4.5), (4.5, 0.5)]
         model, arrays, meta = _model(*_trajectories([path]), extent=(0, 0, 5, 5))
         self.assertEqual(meta["planarized_trajectories"], 1)
-        real = arrays["real/cell"][0]
+        real = dense(arrays)["real/cell"][0]
         for r0, r1, c0, c1 in product(range(5), range(5), range(5), range(5)):
             if r1 < r0 or c1 < c0:
                 continue
@@ -112,7 +179,8 @@ class CaseHistogramTest(unittest.TestCase):
     def test_straight_trajectory_is_not_planarized(self) -> None:
         model, arrays, meta = _model(*_trajectories([[(0.5, 0.5), (3.5, 0.5)]]), extent=(0, 0, 5, 5))
         self.assertEqual(meta["planarized_trajectories"], 0)
-        self.assertEqual(int(arrays["virtual/cell"].sum()), 0)
+        self.assertEqual(int(dense(arrays)["virtual/cell"].sum()), 0)
+        self.assertEqual(arrays["rect/count"].size, 0)
         self.assertEqual(model.count((0, 0, 0, 3), 0, 0), 1.0)
         self.assertEqual(model.count((0, 0, 1, 2), 0, 0), 1.0)
 
@@ -242,6 +310,73 @@ class CaseTemporalTest(unittest.TestCase):
             self.assertEqual(summary["workloads"]["pol_v3_single"]["extension"]["coverage"]["scored_count"], 0)
             meta = json.loads((run / "model" / "model_meta.json").read_text())
             self.assertGreater(meta["theoretical_bytes"], 0)
+
+
+class SparseStorageTest(unittest.TestCase):
+    """The sparse histograms answer exactly what the dense ones answer (and are far smaller)."""
+
+    def _check(self, segments, trips, settings, unit, temporal, buckets, extent, rng, queries):
+        arrays, meta = build_case(segments, trips, unit_size_m=unit, temporal=temporal, time_buckets=buckets,
+                                  extent=extent)
+        self.assertEqual(meta["storage"].split()[0], "sparse")
+        ny, nx = (int(v) for v in arrays["grid/shape"])
+        cells = np.asarray(arrays["real/cell/element"]).astype(np.int64)
+        rows, cols = cells // nx, cells % nx
+        checked = nonzero = 0
+        for plus in (False, True):
+            model = CaseModel(settings, arrays, {**meta, "plus": plus})
+            T = model.time.count
+            for index in range(queries):
+                if index % 5 == 0:  # the whole grid, the largest one-sided windows
+                    rect = (0, ny - 1, 0, nx - 1)
+                else:  # around the data
+                    r0, r1 = sorted(int(v) for v in rng.integers(rows.min() - 2, rows.max() + 3, 2))
+                    c0, c1 = sorted(int(v) for v in rng.integers(cols.min() - 2, cols.max() + 3, 2))
+                    rect = (max(r0, 0), min(r1, ny - 1), max(c0, 0), min(c1, nx - 1))
+                a, b = sorted(int(v) for v in rng.integers(0, T, 2))
+                value = model.count(rect, a, b)
+                self.assertEqual(value, dense_count(arrays, model, rect, a, b, plus), (rect, a, b, plus))
+                checked += 1
+                nonzero += value > 0
+        self.assertGreater(nonzero, checked // 4)
+        stored = sum(np.asarray(v).nbytes for v in arrays.values())
+        dense_bytes = meta["keys"] * 7 * ny * nx * 4  # the int32 dense histograms
+        return stored, dense_bytes
+
+    def test_pol_base_and_temporal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_synthetic_snapshot(Path(tmp) / "snapshot")
+            data, trips = snapshot_module.load_snapshot(root), snapshot_module.load_trip_index(root)
+        rng = np.random.default_rng(21)
+        for unit, temporal, buckets in ((UNIT, False, 1), (UNIT, True, 12), (60.0, True, 7)):
+            stored, dense_bytes = self._check(data["segments"], trips, synthetic_settings(), unit, temporal, buckets,
+                                              None, rng, 60)
+            if temporal:
+                self.assertLess(stored * 10, dense_bytes)
+
+    def test_porto_window_domain(self) -> None:
+        from evaluation.trajectory_pol_porto.traj_eval.adapters.base import grid_extent
+
+        from ._porto_fixture import porto_settings, write_porto_snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_porto_snapshot(Path(tmp) / "snapshot")
+            data, trips = snapshot_module.load_snapshot(root), snapshot_module.load_trip_index(root)
+        settings = porto_settings()
+        extent = grid_extent(settings, "window_domain")
+        rng = np.random.default_rng(22)
+        # GPS jumps planarize trajectories whose rectangles reach the border cells
+        stored, dense_bytes = self._check(data["segments"], trips, settings, 2000.0, True, 5, extent, rng, 60)
+        self.assertLess(stored * 20, dense_bytes)
+
+    def test_size_guard_on_found_elements(self) -> None:
+        from unittest import mock
+
+        from evaluation.trajectory_pol_porto.traj_eval.temporal import SettingTooLarge
+
+        segments, trips = _trajectories([[(0.5, 0.5), (3.5, 0.5), (3.5, 3.5)]])
+        with mock.patch.object(case_plus, "MAX_ELEMENTS", 3), self.assertRaises(SettingTooLarge):
+            build_case(segments, trips, unit_size_m=1.0, temporal=False, time_buckets=1, extent=(0, 0, 5, 5))
 
 
 class ShippedCaseConfigTest(unittest.TestCase):

@@ -13,8 +13,8 @@ Choosing a configuration (under the memory budget) is a separate, documented
 decision.
 
 A combination the method's builder refuses by an explicit size guard
-(``SettingTooLarge``, e.g. CASE+-Temporal's dense counts on Porto's
-20.6 M-cell 25 m grid) is skipped: it is listed in ``tuning_skipped.json``
+(``SettingTooLarge``, e.g. CASE+'s limit on the element pairs its traversal
+finds) is skipped: it is listed in ``tuning_skipped.json``
 with the guard's message and the sweep goes on. Any other error stops it.
 
     python -m evaluation.trajectory_pol_porto.traj_eval.tune \\

@@ -71,7 +71,13 @@ from .space_time import parse_space_time
 TRIP_TIME_DIAGNOSTIC = "approx:trip_time_as_segment_time"
 UNIT_BYTES = 8
 KEY_LIMIT = 1 << 62
-MAX_COUNT_BYTES = 4_000_000_000  # dense per-key cell/edge counts: refused above this
+#: (piece, element) pairs found by the traversal: refused above this (each kind is an int64
+#: array of this length during the build)
+MAX_ELEMENTS = 600_000_000
+#: entries gathered at once by a rectangle query (bounds the query's temporary memory)
+QUERY_CHUNK = 8_000_000
+HISTOGRAMS = ("cell", "vedge", "hedge")
+VIRTUAL = ("cell", "vedge", "hedge", "vertex")
 
 
 # ---------------------------------------------------------------------------
@@ -237,19 +243,6 @@ def _member(keys: np.ndarray, sorted_keys: np.ndarray) -> np.ndarray:
     return sorted_keys[position] == keys
 
 
-def _rect_add(shape: Tuple[int, int, int], pair: np.ndarray, r0, r1, c0, c1) -> np.ndarray:
-    """Per pair, the number of rectangles [r0..r1] x [c0..c1] covering each element (empty rectangles skipped)."""
-    P, ny, nx = shape
-    keep = (r1 >= r0) & (c1 >= c0)
-    pair, r0, r1, c0, c1 = pair[keep], r0[keep], r1[keep], c0[keep], c1[keep]
-    diff = np.zeros((P, ny + 1, nx + 1), dtype=np.int64)
-    np.add.at(diff, (pair, r0, c0), 1)
-    np.add.at(diff, (pair, r0, c1 + 1), -1)
-    np.add.at(diff, (pair, r1 + 1, c0), -1)
-    np.add.at(diff, (pair, r1 + 1, c1 + 1), 1)
-    return np.cumsum(np.cumsum(diff, axis=1), axis=2)[:, :ny, :nx]
-
-
 def _piece_table(span_i: np.ndarray, span_j: np.ndarray, max_pieces: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Every bucket range ``lo..hi`` inside each trajectory's span: (owner, lo, hi, offsets per trajectory)."""
     length = span_j - span_i + 1
@@ -269,6 +262,26 @@ def _piece_table(span_i: np.ndarray, span_j: np.ndarray, max_pieces: int) -> Tup
         lo[index] = (span_i[trajectories][:, None] + pairs[None, :, 0]).ravel()
         hi[index] = (span_i[trajectories][:, None] + pairs[None, :, 1]).ravel()
     return owner, lo, hi, offsets
+
+
+def _index_dtype(maximum: int) -> np.dtype:
+    """The smallest unsigned integer type that holds 0..maximum."""
+    for dtype in (np.uint8, np.uint16, np.uint32):
+        if maximum <= np.iinfo(dtype).max:
+            return np.dtype(dtype)
+    return np.dtype(np.int64)
+
+
+def _sparse(name: str, key: np.ndarray, element: np.ndarray, n_keys: int, size: int) -> Dict[str, np.ndarray]:
+    """Counts per (key, element), non-zero only, sorted by element then key."""
+    if key.size == 0:
+        combined, count = np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    else:
+        combined, count = np.unique(np.asarray(element, dtype=np.int64) * n_keys + np.asarray(key, dtype=np.int64),
+                                    return_counts=True)
+    return {f"{name}/element": (combined // n_keys).astype(_index_dtype(max(size - 1, 0))),
+            f"{name}/key": (combined % n_keys).astype(_index_dtype(max(n_keys - 1, 0))),
+            f"{name}/count": count.astype(_index_dtype(int(count.max(initial=0))))}
 
 
 def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarray], *, unit_size_m: float,
@@ -329,6 +342,7 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
 
     # elements of every piece (deduplicated), chunk by chunk over segments
     found: Dict[str, list] = {kind: [] for kind in sizes}
+    found_count = {kind: 0 for kind in sizes}
     for start in range(0, n_seg, chunk_segments):
         stop = min(start + chunk_segments, n_seg)
         visited = traverse(grid, sx[start:stop], sy[start:stop], ex[start:stop], ey[start:stop])
@@ -340,6 +354,10 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
             local = np.arange(index.size, dtype=np.int64) - np.repeat(np.cumsum(repeat) - repeat, repeat)
             piece = member_piece[seg_member_offset[seg[index]] + local]
             found[kind].append(_unique_keys((piece, n_pieces), (element[index], sizes[kind])))
+            found_count[kind] += found[kind][-1].size
+            if found_count[kind] > MAX_ELEMENTS:
+                raise SettingTooLarge(f"more than {MAX_ELEMENTS} (restricted trajectory, {kind}) pairs at "
+                                      f"{grid.ny * grid.nx} cells; use a coarser grid or fewer buckets")
     elements = {kind: (np.unique(np.concatenate(parts)) if parts else np.zeros(0, dtype=np.int64))
                 for kind, parts in found.items()}
     del found
@@ -370,57 +388,39 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
                                          return_inverse=True)
     K = key_values.size
     keys = np.column_stack(_split(key_values, B, B, B)).astype(np.int32).reshape(K, 4)
-    if K * (3 * ny * nx + 4 * ny * nx) * 4 > MAX_COUNT_BYTES:
-        raise SettingTooLarge(f"{K} keys x {ny * nx} cells is too large; use a coarser grid or fewer buckets")
 
     arrays: Dict[str, np.ndarray] = {
         "grid/origin": grid.origin, "grid/unit": np.array([grid.unit]), "grid/shape": np.array([ny, nx]),
         "time/boundaries": buckets.boundaries, "keys": keys,
     }
+    # Sparse storage (2026-11-12): only non-zero counts. Real counts per (key, element); the
+    # virtual counts of a planarized piece are its cell MBR (as a rectangle per kind) minus its
+    # real elements, so they are stored as the rectangles (with multiplicity) plus the real
+    # counts of the planarized pieces. Queries are exactly those of the dense histograms.
+    planar = np.flatnonzero(problem & (faces > 0))
+    is_planar = np.zeros(n_pieces, dtype=bool)
+    is_planar[planar] = True
+    entries = 0
     for kind in sizes:
         piece, element = elements[kind] // sizes[kind], elements[kind] % sizes[kind]
-        counts = np.bincount(key_of_piece[piece] * sizes[kind] + element, minlength=K * sizes[kind])
-        arrays[f"real/{kind}"] = counts.reshape((K,) + shapes[kind]).astype(np.int32)
-
-    # virtual counts of the planarized pieces: their cell MBR minus their real elements
+        for prefix, keep in (("real", None), ("preal", is_planar[piece])):
+            p, e = (piece, element) if keep is None else (piece[keep], element[keep])
+            arrays.update(_sparse(f"{prefix}/{kind}", key_of_piece[p], e, K, sizes[kind]))
+            entries += arrays[f"{prefix}/{kind}/count"].size
     piece_of_cell = elements["cell"] // sizes["cell"]
     cell = elements["cell"] % sizes["cell"]
     big = np.iinfo(np.int64).max
     r0 = np.full(n_pieces, big); r1 = np.full(n_pieces, -1); c0 = np.full(n_pieces, big); c1 = np.full(n_pieces, -1)
     np.minimum.at(r0, piece_of_cell, cell // nx); np.maximum.at(r1, piece_of_cell, cell // nx)
     np.minimum.at(c0, piece_of_cell, cell % nx); np.maximum.at(c1, piece_of_cell, cell % nx)
-    planar = np.flatnonzero(problem & (faces > 0))
-    kp = key_of_piece[planar]
-    cover = {
-        "cell": _rect_add((K, ny, nx), kp, r0[planar], r1[planar], c0[planar], c1[planar]),
-        "vedge": _rect_add((K,) + shapes["vedge"], kp, r0[planar], r1[planar], c0[planar], c1[planar] - 1),
-        "hedge": _rect_add((K,) + shapes["hedge"], kp, r0[planar], r1[planar] - 1, c0[planar], c1[planar]),
-        "vertex": _rect_add((K, max(ny - 1, 1), max(nx - 1, 1)), kp, r0[planar], r1[planar] - 1, c0[planar], c1[planar] - 1),
-    }
-    is_planar = np.zeros(n_pieces, dtype=bool)
-    is_planar[planar] = True
-    for kind in sizes:
-        piece, element = elements[kind] // sizes[kind], elements[kind] % sizes[kind]
-        keep = is_planar[piece]
-        flat = np.ascontiguousarray(cover[kind]).reshape(K, -1)  # a copy for a strided slice
-        np.subtract.at(flat, (key_of_piece[piece[keep]], element[keep]), 1)
-        if np.any(flat < 0):
-            raise AssertionError(f"negative virtual {kind} counts")
-        cover[kind] = flat.reshape(cover[kind].shape)
-    if nx == 1:
-        cover["vedge"][:] = 0
-        cover["vertex"][:] = 0
-    if ny == 1:
-        cover["hedge"][:] = 0
-        cover["vertex"][:] = 0
-    for kind, values in cover.items():
-        arrays[f"virtual/{kind}"] = values.astype(np.int32)
+    rect_rows = np.column_stack((key_of_piece[planar], r0[planar], r1[planar], c0[planar], c1[planar]))
+    rect_rows, rect_count = (np.unique(rect_rows, axis=0, return_counts=True) if planar.size
+                             else (np.zeros((0, 5), dtype=np.int64), np.zeros(0, dtype=np.int64)))
+    arrays["rect/bounds"] = rect_rows.astype(_index_dtype(max(int(rect_rows.max(initial=0)), K)))
+    arrays["rect/count"] = rect_count.astype(_index_dtype(int(rect_count.max(initial=0))))
+    del piece_of_cell, cell
 
-    def stored(array: np.ndarray) -> int:  # dense or (index, value) pairs, whichever is smaller
-        return int(min(array.size, 2 * np.count_nonzero(array)))
-
-    units = sum(stored(arrays[f"real/{k}"]) for k in sizes) + sum(stored(v) for v in cover.values())
-    units += 4 * K + buckets.boundaries.size
+    units = 3 * entries + 6 * rect_count.size + 4 * K + buckets.boundaries.size
     whole = (lo == span_i[owner]) & (hi == span_j[owner])
     meta = {
         "method": "case_plus_temporal" if temporal else "case_plus", "temporal": bool(temporal),
@@ -436,7 +436,11 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
                         "crossed edges; additionally every trajectory whose cells and crossed edges are not a tree "
                         "(a cycle, or a jump between segments) is planarized"),
         "theoretical_bytes": int(units * UNIT_BYTES),
-        "theoretical_bytes_rule": "8 bytes per entry; each histogram dense or as (index, value) pairs, whichever is smaller",
+        "theoretical_bytes_rule": ("8 bytes per number: (element, key, count) per non-zero real count and per "
+                                   "non-zero real count of a planarized piece, (key, 4 bounds, multiplicity) per "
+                                   "virtual rectangle, 4 per key, the bucket boundaries"),
+        "storage": "sparse (non-zero counts; virtual counts as rectangles minus planarized real counts)",
+        "nonzero_entries": int(entries), "virtual_rectangles": int(rect_count.size),
     }
     return arrays, meta
 
@@ -446,20 +450,80 @@ def build_case(segments: Mapping[str, np.ndarray], trips: Mapping[str, np.ndarra
 # ---------------------------------------------------------------------------
 
 
-def _prefix(array: np.ndarray) -> np.ndarray:
-    """Inclusive prefix sums over the last two axes, padded with a zero row/column."""
-    out = np.zeros(array.shape[:-2] + (array.shape[-2] + 1, array.shape[-1] + 1), dtype=np.int64)
-    out[..., 1:, 1:] = np.cumsum(np.cumsum(array.astype(np.int64), axis=-2), axis=-1)
-    return out
+class SparseCounts:
+    """One histogram's non-zero counts per (key, element), sorted by element (row-major) then key."""
 
+    def __init__(self, arrays: Mapping[str, np.ndarray], name: str, shape: Tuple[int, int], n_keys: int):
+        # elements and keys stay in their compact stored types; counts are summed, so int64
+        self.element = np.asarray(arrays[f"{name}/element"])
+        self.key = np.asarray(arrays[f"{name}/key"])
+        self.count = np.asarray(arrays[f"{name}/count"]).astype(np.int64)
+        self.rows, self.width = int(shape[0]), int(shape[1])
+        # whole-grid totals per key (a region covering the grid needs no scan)
+        self.key_total = np.bincount(self.key, weights=self.count, minlength=n_keys).astype(np.int64)
 
-def _rect_sum(prefix: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> np.ndarray:
-    if r1 < r0 or c1 < c0:
-        return np.zeros(prefix.shape[:-2], dtype=np.int64)
-    return (prefix[..., r1 + 1, c1 + 1] - prefix[..., r0, c1 + 1] - prefix[..., r1 + 1, c0] + prefix[..., r0, c0])
+    def _whole(self, r0: int, r1: int, c0: int, c1: int) -> bool:
+        return r0 <= 0 and c0 <= 0 and r1 >= self.rows - 1 and c1 >= self.width - 1
+
+    def _blocks(self, r0: int, r1: int, c0: int, c1: int):
+        """Entry indices inside rows r0..r1, columns c0..c1, in blocks of at most QUERY_CHUNK entries."""
+        rows = np.arange(r0, r1 + 1, dtype=np.int64)
+        dtype = self.element.dtype  # same type as the stored elements: no conversion of the whole array
+        lo = np.searchsorted(self.element, (rows * self.width + c0).astype(dtype), side="left")
+        hi = np.searchsorted(self.element, (rows * self.width + c1).astype(dtype), side="right")
+        if c0 == 0 and c1 == self.width - 1:  # whole rows: one contiguous range
+            lo, hi = lo[:1], hi[-1:]
+        sizes = hi - lo
+        start = 0
+        while start < sizes.size:
+            stop, total = start, 0
+            while stop < sizes.size and (stop == start or total + sizes[stop] <= QUERY_CHUNK):
+                total += int(sizes[stop]); stop += 1
+            if total:
+                n = sizes[start:stop]
+                first = np.repeat(lo[start:stop] - (np.cumsum(n) - n), n)
+                yield first + np.arange(total, dtype=np.int64)
+            start = stop
+
+    def total(self, selected: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> int:
+        """Sum of the counts of the selected keys (boolean mask over keys) inside the rectangle."""
+        if r1 < r0 or c1 < c0:
+            return 0
+        if self._whole(r0, r1, c0, c1):
+            return int(self.key_total[selected].sum())
+        out = 0
+        for index in self._blocks(r0, r1, c0, c1):
+            keep = selected[self.key[index]]
+            out += int(self.count[index][keep].sum())
+        return out
+
+    def per_element(self, selected: np.ndarray, r0: int, r1: int, c0: int, c1: int
+                    ) -> Tuple[np.ndarray, np.ndarray]:
+        """(element, summed count of the selected keys) inside the rectangle, elements unique."""
+        elements, counts = [], []
+        for index in self._blocks(r0, r1, c0, c1):
+            index = index[selected[self.key[index]]]
+            elements.append(self.element[index]); counts.append(self.count[index])
+        if not elements:
+            return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+        element, count = np.concatenate(elements), np.concatenate(counts)
+        if element.size == 0:
+            return element, count
+        # entries are sorted by element (blocks in row order, rows ascending): group runs
+        starts = np.flatnonzero(np.concatenate(([True], element[1:] != element[:-1])))
+        return element[starts], np.add.reduceat(count, starts)
 
 
 class CaseModel:
+    """CASE+ / CASE+-Temporal queries on the sparse histograms (exactly the dense formulas).
+
+    For a query over buckets ``a..b`` the selected keys are one per trajectory span; real
+    sums add the selected keys' counts inside the rectangle; a virtual sum is the selected
+    rectangles' overlap with it minus the planarized pieces' real counts inside it; a virtual
+    minimum (CASE+) builds the per-element virtual counts over the query rectangle only (it is
+    0 without building anything when the selected rectangles cannot cover every element).
+    """
+
     def __init__(self, settings: Any, arrays: Mapping[str, np.ndarray], meta: Mapping[str, Any]):
         self.settings = settings
         self.temporal = bool(meta["temporal"])
@@ -469,32 +533,95 @@ class CaseModel:
                          (int(shape[0]), int(shape[1])))
         self.time = TimeBuckets(np.asarray(arrays["time/boundaries"], dtype=np.int64))
         self.keys = np.asarray(arrays["keys"], dtype=np.int64).reshape(-1, 4)
-        self.raw = {f"real/{k}": np.asarray(arrays[f"real/{k}"]) for k in ("cell", "vedge", "hedge")}
-        self.raw.update({f"virtual/{k}": np.asarray(arrays[f"virtual/{k}"]) for k in ("cell", "vedge", "hedge", "vertex")})
-        self.prefix = {name: _prefix(values) for name, values in self.raw.items()}
+        ny, nx = self.grid.ny, self.grid.nx
+        shapes = {"cell": (ny, nx), "vedge": (ny, max(nx - 1, 1)), "hedge": (max(ny - 1, 1), nx)}
+        K = self.keys.shape[0]
+        self.real = {kind: SparseCounts(arrays, f"real/{kind}", shapes[kind], K) for kind in HISTOGRAMS}
+        self.preal = {kind: SparseCounts(arrays, f"preal/{kind}", shapes[kind], K) for kind in HISTOGRAMS}
+        bounds = np.asarray(arrays["rect/bounds"]).astype(np.int64).reshape(-1, 5)
+        self.rect_key = bounds[:, 0]
+        self.rect_count = np.asarray(arrays["rect/count"]).astype(np.int64)
+        r0, r1, c0, c1 = bounds[:, 1], bounds[:, 2], bounds[:, 3], bounds[:, 4]
+        # each piece's virtual elements per kind: its cells, interior edges and interior vertices
+        self.rects = {"cell": (r0, r1, c0, c1), "vedge": (r0, r1, c0, c1 - 1),
+                      "hedge": (r0, r1 - 1, c0, c1), "vertex": (r0, r1 - 1, c0, c1 - 1)}
 
     def selected(self, a: int, b: int) -> np.ndarray:
         """Per trajectory span intersecting ``a..b``, the key of its restriction to ``a..b``."""
         i, j, lo, hi = self.keys.T
         return np.flatnonzero((i <= b) & (j >= a) & (lo == np.maximum(a, i)) & (hi == np.minimum(b, j)))
 
-    def _sum(self, name: str, keys: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> int:
-        if keys.size == 0 or r1 < r0 or c1 < c0:
-            return 0
-        prefix = self.prefix[name]  # gather the four corners per key, never whole grids
-        return int((prefix[keys, r1 + 1, c1 + 1] - prefix[keys, r0, c1 + 1]
-                    - prefix[keys, r1 + 1, c0] + prefix[keys, r0, c0]).sum())
+    def _mask(self, keys: np.ndarray) -> np.ndarray:
+        mask = np.zeros(self.keys.shape[0], dtype=bool)
+        mask[keys] = True
+        return mask
 
-    def _min(self, name: str, keys: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> Optional[int]:
+    def _clipped(self, kind: str, mask: np.ndarray, r0: int, r1: int, c0: int, c1: int):
+        """The selected rectangles of ``kind`` clipped to the region (non-empty only) and their multiplicity."""
+        pr0, pr1, pc0, pc1 = self.rects[kind]
+        keep = mask[self.rect_key]
+        a0, a1 = np.maximum(pr0[keep], r0), np.minimum(pr1[keep], r1)
+        b0, b1 = np.maximum(pc0[keep], c0), np.minimum(pc1[keep], c1)
+        count = self.rect_count[keep]
+        nonempty = (a1 >= a0) & (b1 >= b0)
+        return a0[nonempty], a1[nonempty], b0[nonempty], b1[nonempty], count[nonempty]
+
+    def _sum(self, name: str, mask: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> int:
+        if r1 < r0 or c1 < c0:
+            return 0
+        prefix, kind = name.split("/")
+        if prefix == "real":
+            return self.real[kind].total(mask, r0, r1, c0, c1)
+        a0, a1, b0, b1, count = self._clipped(kind, mask, r0, r1, c0, c1)
+        covered = int((count * (a1 - a0 + 1) * (b1 - b0 + 1)).sum())
+        return covered - (self.preal[kind].total(mask, r0, r1, c0, c1) if kind in self.preal else 0)
+
+    def _min(self, name: str, mask: np.ndarray, r0: int, r1: int, c0: int, c1: int) -> Optional[int]:
+        """Minimum over the region's elements of the selected keys' summed virtual counts.
+
+        The rectangles' coverage is piecewise constant on the blocks their (clipped) bounds cut
+        the region into, so it is built on those blocks, not per element. A block keeps its
+        coverage as a candidate if some element of it has no planarized real count; every element
+        with one is a candidate with coverage minus its summed count. Exact, as the dense minimum.
+        """
         if r1 < r0 or c1 < c0:
             return None  # no such elements in the region
-        if keys.size == 0:
-            return 0
-        return int(self.raw[name][keys, r0:r1 + 1, c0:c1 + 1].sum(axis=0).min())
+        kind = name.split("/")[1]
+        a0, a1, b0, b1, count = self._clipped(kind, mask, r0, r1, c0, c1)
+        h, w = r1 - r0 + 1, c1 - c0 + 1
+        if int((count * (a1 - a0 + 1) * (b1 - b0 + 1)).sum()) < h * w:
+            return 0  # some element is covered by no selected rectangle: its virtual count is 0
+        rows = np.unique(np.concatenate(([r0, r1 + 1], a0, a1 + 1)))
+        cols = np.unique(np.concatenate(([c0, c1 + 1], b0, b1 + 1)))
+        nr, nc = rows.size - 1, cols.size - 1
+        diff = np.zeros((nr + 1, nc + 1), dtype=np.int64)
+        i0, i1 = np.searchsorted(rows, a0), np.searchsorted(rows, a1 + 1)
+        j0, j1 = np.searchsorted(cols, b0), np.searchsorted(cols, b1 + 1)
+        np.add.at(diff, (i0, j0), count)
+        np.add.at(diff, (i0, j1), -count)
+        np.add.at(diff, (i1, j0), -count)
+        np.add.at(diff, (i1, j1), count)
+        cover = np.cumsum(np.cumsum(diff, axis=0), axis=1)[:nr, :nc]
+        if kind not in self.preal or int(cover.min()) == 0:
+            return int(cover.min())  # an uncovered block has no planarized real counts either
+        element, summed = self.preal[kind].per_element(mask, r0, r1, c0, c1)
+        if element.size == 0:
+            return int(cover.min())
+        width = self.preal[kind].width
+        element = element.astype(np.int64)
+        bi = np.searchsorted(rows, element // width, side="right") - 1
+        bj = np.searchsorted(cols, element % width, side="right") - 1
+        occupied = np.bincount(bi * nc + bj, minlength=nr * nc).reshape(nr, nc)
+        free = occupied < np.diff(rows)[:, None] * np.diff(cols)[None, :]
+        values = cover[bi, bj] - summed
+        best = int(values.min())
+        if free.any():
+            best = min(best, int(cover[free].min()))
+        return best
 
     def count(self, rect: Tuple[int, int, int, int], a: int, b: int) -> float:
         r0, r1, c0, c1 = rect
-        keys = self.selected(a, b)
+        keys = self._mask(self.selected(a, b))
         faces = self._sum("real/cell", keys, r0, r1, c0, c1)
         if faces == 0:
             return 0.0

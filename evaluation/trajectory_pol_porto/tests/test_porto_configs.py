@@ -369,27 +369,34 @@ class PortoTuningTest(_PortoRoot):
         return _fixture_configs(self.root, [name], tag=f"_{tag}")[name]
 
     def test_oversized_porto_setting_is_skipped_and_the_sweep_goes_on(self) -> None:
+        from unittest import mock
+
         from evaluation.trajectory_pol_porto.traj_eval import tune
+        from evaluation.trajectory_pol_porto.traj_eval.adapters import case_plus
         from evaluation.trajectory_pol_porto.traj_eval.temporal import SettingTooLarge
 
         config = self._shipped("case_plus_temporal", "skip")
         output = self.root / "tuning" / "case_plus_temporal"
         messages = []
-        # 25 m on the window domain: 20,562,894 cells x the keys exceed the dense-count guard
-        rows = tune.sweep(config, self.root / "benchmark.jsonl",
-                          tune.parse_grid(["unit_size_m=25,2000", "time_buckets=4"]), 8 * MULTI, output,
-                          log=messages.append)
-        self.assertEqual([json.loads(row["parameters"])["unit_size_m"] for row in rows], [2000])
-        skipped = json.loads((output / "tuning_skipped.json").read_text())
-        self.assertEqual([json.loads(item["parameters"]) for item in skipped], [{"unit_size_m": 25, "time_buckets": 4}])
-        self.assertIn("20562894 cells is too large", skipped[0]["reason"])
-        self.assertTrue(any(message.startswith("skipped ") for message in messages))
-        self.assertEqual(len(list(csv_rows(output / "tuning.csv"))), 1)
-        # nothing feasible at all: the sweep fails instead of writing an empty table
-        # (its own results root: the same config and setting again, within the same second)
-        with self.assertRaises(SettingTooLarge):
-            tune.sweep(self._shipped("case_plus_temporal", "none"), self.root / "benchmark.jsonl", tune.parse_grid(["unit_size_m=25", "time_buckets=4"]),
-                       8 * MULTI, self.root / "tuning" / "none", log=lambda message: None)
+        # the build-size guard scaled to the fixture: 25 m finds more than 100,000 (restricted
+        # trajectory, element) pairs on the window domain, 2000 m fewer than 10,000
+        with mock.patch.object(case_plus, "MAX_ELEMENTS", 100_000):
+            rows = tune.sweep(config, self.root / "benchmark.jsonl",
+                              tune.parse_grid(["unit_size_m=25,2000", "time_buckets=4"]), 8 * MULTI, output,
+                              log=messages.append)
+            self.assertEqual([json.loads(row["parameters"])["unit_size_m"] for row in rows], [2000])
+            skipped = json.loads((output / "tuning_skipped.json").read_text())
+            self.assertEqual([json.loads(item["parameters"]) for item in skipped],
+                             [{"unit_size_m": 25, "time_buckets": 4}])
+            self.assertIn("pairs at 20562894 cells", skipped[0]["reason"])
+            self.assertTrue(any(message.startswith("skipped ") for message in messages))
+            self.assertEqual(len(list(csv_rows(output / "tuning.csv"))), 1)
+            # nothing feasible at all: the sweep fails instead of writing an empty table
+            # (its own results root: the same config and setting again, within the same second)
+            with self.assertRaises(SettingTooLarge):
+                tune.sweep(self._shipped("case_plus_temporal", "none"), self.root / "benchmark.jsonl",
+                           tune.parse_grid(["unit_size_m=25", "time_buckets=4"]), 8 * MULTI,
+                           self.root / "tuning" / "none", log=lambda message: None)
 
     def test_other_errors_still_stop_the_sweep(self) -> None:
         from unittest import mock
