@@ -114,6 +114,35 @@ interval bounds are averaged too). It writes `trajectory_summary_v1.csv` and
 `.md` next to `comparison.*`; `compare` writes the cross-method version. The
 core's own tables are unchanged.
 
+### Same-query comparison
+
+The strata above score each method on the queries *it* answers, so methods
+with different coverage are compared on different queries.
+`traj_eval/same_query.py` scores them on common queries only, overall and per
+query type (`category`), smoothed Q-error p50/p90/p95/p99/max and geometric
+mean per seed, then mean ± std over seeds, plus `wins` (share of the queries
+on which a method has the lowest per-query error):
+
+- `intersection`: the queries every run of every method answers (methods that
+  answer none of a workload, e.g. Exact-MBR on single queries, are listed as
+  not compared);
+- `pairs` (`--reference method:variant`): the reference against every other
+  method on the queries both answer.
+
+`aggregate_compare.sbatch` writes it to `<comparison>/same_query/`
+(`same_query.md|csv|json`) after every comparison, with
+`own_model:segments_first_dedup` as reference when present
+(`SAME_QUERY_REFERENCES` overrides). For existing comparisons:
+
+```bash
+python -m evaluation.trajectory_pol_porto.traj_eval.same_query \
+  --config configs/pol_v3/own_model.yaml --config configs/pol_v3/mscn.yaml ... \
+  --reference own_model:segments_first_dedup --output <comparison>/same_query
+```
+
+`--config` reads each config's current aggregate (`.../aggregate/comparison.json`);
+all runs of a workload must have evaluated the same benchmark file.
+
 ## Shared data snapshot (P2)
 
 `traj_eval/snapshot.py` exports the benchmark database once into numpy arrays:
