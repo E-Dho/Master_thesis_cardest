@@ -63,6 +63,35 @@ def query_row(record: Any) -> Dict[str, Any]:
     }
 
 
+GRID_EXTENTS = ("data", "window_domain")
+
+
+def grid_extent(settings: Any, choice: Any) -> Optional[Tuple[float, float, float, float]]:
+    """The spatial extent of a histogram grid (``adapter.grid_extent``).
+
+    ``data`` (default): ``None``, i.e. the data extent. ``window_domain``: the
+    segment geometry's configured window domain ``(min_x, min_y, max_x,
+    max_y)``; it must be listed in the v3 config's ``window_domains`` (Porto:
+    the 0.1 %/99.9 % box, while GPS outliers lie up to 1,131 km away and would
+    stretch a data-extent grid to billions of cells).
+    """
+    choice = "data" if choice in (None, "") else str(choice)
+    if choice not in GRID_EXTENTS:
+        raise ValueError(f"adapter.grid_extent must be one of {GRID_EXTENTS}, got {choice!r}")
+    if choice == "data":
+        return None
+    table, attribute = settings.segments.table, settings.segments.spatial_attribute
+    if f"{table}.{attribute}" not in settings.window_domains:
+        raise ValueError(f"adapter.grid_extent: window_domain needs {table}.{attribute} in the v3 config's "
+                         "window_domains")
+    spec = next(a for a in settings.table(table)["attributes"] if a["name"] == attribute)
+    domain = spec["domain"]
+    extent = tuple(float(domain[key]) for key in ("min_x", "min_y", "max_x", "max_y"))
+    if not (extent[0] < extent[2] and extent[1] < extent[3]):
+        raise ValueError(f"empty window domain {extent}")
+    return extent
+
+
 def _peak_rss_bytes() -> int:
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
 

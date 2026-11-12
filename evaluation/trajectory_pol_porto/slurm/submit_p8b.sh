@@ -1,5 +1,5 @@
 #!/bin/bash
-# P8b: MSCN on POL v3 (in process, geo-mlp/torch, CPU training with 8 threads).
+# P8b: MSCN on POL v3, TRAJ_DATASET=porto_v3: Porto v3 (in process, geo-mlp/torch, CPU training with 8 threads).
 # Needs the P2 snapshot (sample bitmaps) and the POL training workload.
 #   ./submit_p8b.sh                              the main variant (single + multi)
 #   CONFIG_NAMES="mscn mscn_multi_only" ./submit_p8b.sh   also the fallback variant
@@ -7,11 +7,10 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
-CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
+source "$SCRIPT_DIR/_submit_dataset.sh"
 CONFIG_NAMES=${CONFIG_NAMES:-mscn}
 COMPARE_WITH=${COMPARE_WITH-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 traj_sampling_n100000 traj_sampling_n1000000 mobilitydb_v3_sql mobilitydb_segment_stbox mobilitydb_trip_stbox"}
-COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/p8b_comparison}
-base_export="ALL,REPO_ROOT=$REPO_ROOT"
+COMPARISON_DIR=${COMPARISON_DIR:-$RESULTS_DIR/p8b_comparison}
 
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }
 

@@ -3,7 +3,9 @@
 **Base: CASE / CASE+** (Fanaeepour, Kulik, Tanin, Rubinstein, "The CASE
 histogram", GeoInformatica 19(4), 2015; no public code, re-implemented from
 Algorithms 1-3 and Fig. 12). On a regular grid (cell size ``unit_size_m``
-over the data extent):
+over the data extent, or with ``adapter.grid_extent: window_domain`` over the
+configured window domain, Porto; segment ends outside it fall into the border
+cells):
 
 - *Construction* (Algorithm 1), per trajectory: the cells its segments
   intersect and the cell edges they cross, each counted once per trajectory
@@ -63,7 +65,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 
 from ..temporal import TimeBuckets
-from .base import Estimate, InProcessTrajectoryAdapter
+from .base import Estimate, InProcessTrajectoryAdapter, grid_extent
 from .space_time import parse_space_time
 
 TRIP_TIME_DIAGNOSTIC = "approx:trip_time_as_segment_time"
@@ -539,11 +541,14 @@ class CasePlusAdapter(InProcessTrajectoryAdapter):
 
     def _build_model(self, data, trips) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         adapter = self.config.adapter
+        extent = grid_extent(self.settings, adapter.get("grid_extent"))
         arrays, meta = build_case(data[self.settings.segments.table], trips,
                                   unit_size_m=float(adapter.get("unit_size_m", 100.0)),
                                   temporal=self._flag("temporal", False),
-                                  time_buckets=int(adapter.get("time_buckets", 100)))
+                                  time_buckets=int(adapter.get("time_buckets", 100)), extent=extent)
         meta["plus"] = self._flag("plus", True)
+        if extent is not None:
+            meta.update({"grid_extent": "window_domain", "grid_extent_box": list(extent)})
         return arrays, meta
 
     def _load_model(self, arrays, meta) -> CaseModel:

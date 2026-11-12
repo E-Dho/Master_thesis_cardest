@@ -1,0 +1,56 @@
+# Shared settings of every Porto v3 method config (method configs `extends` it).
+# Same methods and settings as configs/pol_v3 except for the dataset paths, the
+# P6 grid extent and tuning, and the own model's checkpoints
+# (tests/test_porto_configs.py checks that they do not drift apart).
+# Lists are replaced, not merged, by a child config (e.g. seeds).
+schema_version: 1
+experiment:
+  experiment_id: traj_phase1_porto_v3
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/E-Dho/Master_thesis_cardest.git
+  installed_version: this repository; the commit is recorded in run_manifest.json
+paths:
+  results_root: ../../results
+workloads:
+  porto_v3_multi:
+    format: traj_v3_jsonl
+    queries_jsonl: /work_beegfs/sunip956/master_thesis_trajectories/mobilitydb_porto/query_runs/qgen_porto_v3_exact_st_seed20261102/benchmark.jsonl
+    select:
+      relation: multi
+    expected_query_count: 6000
+    benchmark_config: ../../../../query_generation/benchmark_v3/porto_v3_config.json
+  porto_v3_single:
+    format: traj_v3_jsonl
+    queries_jsonl: /work_beegfs/sunip956/master_thesis_trajectories/mobilitydb_porto/query_runs/qgen_porto_v3_exact_st_seed20261102/benchmark.jsonl
+    select:
+      relation: single
+    expected_query_count: 2000
+    benchmark_config: ../../../../query_generation/benchmark_v3/porto_v3_config.json
+timing:
+  device: cpu
+  comparison_basis: native_cpu_in_process
+  published_reference_hardware: none (project-implemented estimator)
+  # accuracy runs time one pass only; the reported latency comes from `time`
+  # under the cpu_1core profile (timing keys do not change the accuracy hash)
+  warmup_passes: 0
+  repetitions: 1
+  # passes of the `time` stage (cpu_1core / cpu_postgres_2core launcher runs)
+  timing_warmup_passes: 1
+  timing_repetitions: 3
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+  primary_profile: cpu_1core
+  profiles: [cpu_1core]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-12
+    absolute_tolerance: 0.0
+resources:
+  profile: cpu_in_process
+  cpu_threads: 1
+artifacts:
+  snapshot_root: /work_beegfs/sunip956/master_thesis_trajectories/traj_snapshots/porto_v3
+adapter:
+  benchmark_config: ../../../../query_generation/benchmark_v3/porto_v3_config.json

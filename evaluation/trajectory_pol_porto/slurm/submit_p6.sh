@@ -1,5 +1,6 @@
 #!/bin/bash
 # P6: TraHist, TraHist-Temporal, CASE+ and CASE+-Temporal on POL v3. No database.
+# TRAJ_DATASET=porto_v3: the Porto configs, validation workload and tuning root.
 #   STAGE=tune ./submit_p6.sh   sweeps on the validation workload (1,800 multi queries):
 #                               base: unit_size_m; temporal: unit_size_m x time_buckets
 #   STAGE=run  ./submit_p6.sh   test runs with the committed configs, then aggregate and
@@ -15,18 +16,17 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
-CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
+source "$SCRIPT_DIR/_submit_dataset.sh"
 STAGE=${STAGE:?set STAGE=tune or STAGE=run}
 CONFIG_NAMES=${CONFIG_NAMES:-"trahist trahist_temporal case_plus case_plus_temporal case_plus_temporal_best"}
 UNIT_SIZES=${UNIT_SIZES:-"25/50/100/200/400"}
 TIME_BUCKETS=${TIME_BUCKETS:-"25/50/100/200/400"}
-VALIDATION_JSONL=${VALIDATION_JSONL:-/work_beegfs/sunip956/master_thesis_trajectories/mobilitydb/query_runs/qgen_pol_v3_validation_seed20261026/benchmark.jsonl}
+VALIDATION_JSONL=${VALIDATION_JSONL:-$DATASET_VALIDATION_JSONL}
 VALIDATION_MULTI=${VALIDATION_MULTI:-1800}
 RUN_MEM=${RUN_MEM:-64G}
-TUNING_ROOT=${TUNING_ROOT:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3_tuning}
+TUNING_ROOT=${TUNING_ROOT:-${RESULTS_DIR}_tuning}
 COMPARE_WITH=${COMPARE_WITH-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 traj_sampling_n100000 traj_sampling_n1000000 mobilitydb_v3_sql mobilitydb_segment_stbox mobilitydb_trip_stbox deepdb_mbr mscn"}
-COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/p6_comparison}
-base_export="ALL,REPO_ROOT=$REPO_ROOT"
+COMPARISON_DIR=${COMPARISON_DIR:-$RESULTS_DIR/p6_comparison}
 if [ -n "${PYTHON:-}" ]; then base_export="$base_export,PYTHON=$PYTHON"; fi
 
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }

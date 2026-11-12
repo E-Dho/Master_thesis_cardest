@@ -1,0 +1,60 @@
+# P7: the own model on Porto v3 (predicate ResMADE with the traj_dedup_factor
+# head, table order segments-trips: config porto_traj_dedup_single_anchor_mbr_
+# segments_first_20k = the POL evaluation config's meta settings on the Porto
+# columns, origin_stand NULL modelled as a value; decided 2026-11-09). One seed
+# for now ("train one model first"). Seed s reads p7_models/porto_v3/seed_<s>/
+# (links to the run directory). Answers every query: multi with segments =
+# matching segments x traj_dedup_factor, single = table rows (Porto has no
+# trips-only multi queries). Spatial windows use the segment MBR
+# (approx:segment_mbr), spatio-temporal space and time separately
+# (approx:decoupled_space_time); see traj_eval/own_model_translate.py.
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_porto_v3
+  method_id: own_model
+  variant_id: segments_first_dedup
+  display_name: Own model (ResMADE + traj_dedup_factor)
+  protocol: native
+  adaptation: Own model; the v3 segment line test and the coupled space-time test are approximated by the segment bounding box and separate space and time conditions (approx diagnostics); closed intervals as start <= U and end >= L.
+  seeds: [0]
+source:
+  url: https://github.com/E-Dho/Master_thesis_cardest.git
+  installed_version: model trained at model/porto-segments-first (2048142, config porto_traj_dedup_single_anchor_mbr_segments_first_20k, seed 0); inference code of this repository (the bridge records the model package it imported)
+timing:
+  device: cpu
+  synchronize_cuda: false
+  comparison_basis: neural_cpu_inference_with_gpu_supplement
+  published_reference_hardware: own model; cluster AMD EPYC 7313 (cpu_1core) and NVIDIA L40S (gpu_single_query)
+  primary_profile: cpu_1core
+  profiles: [cpu_1core, gpu_single_query]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-4
+    absolute_tolerance: 1.0e-6
+    # GPU float32 kernels vs the CPU accuracy run (decided 2026-11-10 after GPU timing
+    # 22923145): 5 of 24,000 estimates differed by more than 1e-4 relative; the largest
+    # was 2.4 % of an estimate of 0.78 (both smoothed to 1), all others <= 0.11 % or
+    # 1.33 tuples. Within 0.1 % or one tuple counts as the same estimate.
+    profiles:
+      gpu_single_query:
+        relative_tolerance: 1.0e-3
+        absolute_tolerance: 1.0
+resources:
+  profile: pretrained_checkpoint_inference
+  cpu_threads: 8
+artifacts:
+  checkpoint_template: /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/checkpoint_best.pt
+  training_config_template: /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/training_config.yaml
+adapter:
+  type: external
+  working_directory: ../../../..
+  environment:
+    PYTHONPATH: null
+  require_smoke_before_build: true
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py prepare --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/checkpoint_best.pt --output-directory {exchange_directory}
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py smoke --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/checkpoint_best.pt --estimate dedup --output-directory {exchange_directory} --queries-jsonl /work_beegfs/sunip956/master_thesis_trajectories/mobilitydb_porto/query_runs/qgen_porto_v3_exact_st_seed20261102/benchmark.jsonl --select-json '{{"relation": "multi"}}' --query-limit {query_limit}
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py build --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/checkpoint_best.pt --output-directory {exchange_directory}
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py evaluate --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/checkpoint_best.pt --estimate dedup --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv} --device cpu
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py evaluate --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/checkpoint_best.pt --estimate dedup --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv} --warmup-passes 1 --repetitions 3 --device cpu
+    gpu_single_query: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/trajectory_pol_porto/scripts/own_model_traj_bridge.py evaluate --training-config /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/p7_models/porto_v3/seed_{seed}/checkpoint_best.pt --estimate dedup --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv} --warmup-passes 1 --repetitions 3 --device cuda

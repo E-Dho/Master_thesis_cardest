@@ -1,0 +1,36 @@
+# P6: TraHist (Jo et al., PACMMOD 2026) on Porto v3, spatial only. Upstream code
+# (YJ960/TraHist, pinned below) runs from its checkout; see
+# traj_eval/adapters/trahist.py. unit_size_m and time_buckets are tuned on the
+# validation workload (slurm/submit_p6.sh STAGE=tune) before the test runs.
+# NOT TUNED YET (Porto): unit_size_m is POL's pick as a placeholder.
+# Tune on the Porto validation workload first (TRAJ_DATASET=porto_v3
+# slurm/submit_p6.sh STAGE=tune), then select with traj_eval/select_tuned.py
+# under the Porto 1x budget (the Porto own model's inference-only size, set as
+# adapter.budget_bytes once its checkpoint exists) and commit the picks here.
+# Grid over the Porto window domain (adapter.grid_extent: window_domain, the
+# 0.1 %/99.9 % endpoint box of porto_v3_config.json): GPS outliers up to
+# 1,131 km away would stretch a data-extent grid to billions of cells; they
+# fall into the border cells.
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_porto_v3
+  method_id: trahist
+  variant_id: base
+  display_name: TraHist (spatial only)
+  protocol: adapted
+  adaptation: Upstream TraHist (YJ960/TraHist 870e8ce, unchanged construction and estimator) on the trip polyline vertices; query rectangles clipped to the grid extent before upstream's cell-resolution sampling; spatial only, so queries with a time predicate, attribute predicates and single-table queries are unsupported.
+  seeds: [0]
+adapter:
+  type: traj_trahist
+  benchmark_config: ../../../../query_generation/benchmark_v3/porto_v3_config.json
+  trahist_source: /work_beegfs/sunip956/master_thesis_trajectories/external/trahist
+  trahist_revision: 870e8ce6db0e6363eeca80dce193623034c858ab
+  temporal: false
+  unit_size_m: 25
+  alpha: 0.5
+  beta: 1.0
+  kappa: 3
+  connectivity: axis
+  agg_mode: mean
+  ratio_eps: 1.0
+  grid_extent: window_domain

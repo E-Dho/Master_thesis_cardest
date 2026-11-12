@@ -1,0 +1,48 @@
+# P4: MobilityDB / PostgreSQL planner estimate, variant v3_sql. Deterministic:
+# one seed. The adapter never runs ANALYZE (adapter.analyze: false) and
+# records a fingerprint of pg_stats in database_identity.json, so all three
+# variants are planned on the same statistics. Keep the three mobilitydb_*
+# configs identical except for experiment.variant_id/display_name/adaptation
+# and adapter.variant (the loader supports one level of extends only).
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_porto_v3
+  method_id: mobilitydb
+  variant_id: v3_sql
+  display_name: PostgreSQL planner (label SQL)
+  adaptation: EXPLAIN row estimate of the benchmark's own label SQL (Liang-Barsky segment test); multi queries planned as GROUP BY trip_id, single queries as SELECT 1.
+  protocol: adapted
+  seeds: [0]
+source:
+  url: https://github.com/MobilityDB/MobilityDB.git
+  installed_version: the cluster's mobilitydb environment; versions are recorded in database_identity.json
+timing:
+  comparison_basis: native_cpu_inference
+  published_reference_hardware: CPU (PostgreSQL planner with PostGIS/MobilityDB selectivity functions)
+  primary_profile: cpu_postgres_2core
+  profiles: [cpu_postgres_2core]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 0.0
+    absolute_tolerance: 0.0
+resources:
+  profile: cpu_primary
+  cpu_threads: 1
+adapter:
+  type: traj_mobilitydb
+  variant: v3_sql
+  benchmark_config: ../../../../query_generation/benchmark_v3/porto_v3_config.json
+  dsn: host=${MOBILITYDB_SOCKET_DIR} port=${MOBILITYDB_PORT} dbname=${MOBILITYDB_DB}
+  analyze: false
+  # Porto: the tgeompoints are built from EXTRACT(EPOCH FROM t_s/t_e) of the
+  # naive timestamps (porto_taxi_loader/load.sql) and the server TimeZone is
+  # UTC (init_porto_mobilitydb.sh), so the tgeompoint times are the naive
+  # times read as UTC, as on POL; sessions run in UTC and literals carry +00.
+  session_timezone: UTC
+  # MobilityDB 1.4.0 syntax (all three forms parse; probe 2026-10-30). The
+  # spatial forms need the data SRID; prepare executes each template once.
+  # Literal text only: the adapter writes stbox '<text>' (no quotes here).
+  stbox:
+    xt: SRID={srid};STBOX XT((({xmin},{ymin}),({xmax},{ymax})),[{tmin}+00, {tmax}+00])
+    x: SRID={srid};STBOX X(({xmin},{ymin}),({xmax},{ymax}))
+    t: STBOX T([{tmin}+00, {tmax}+00])

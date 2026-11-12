@@ -1,5 +1,6 @@
 #!/bin/bash
-# P3: Exact-MBR and the trajectory sampling ladder on POL v3, then aggregate
+# P3: Exact-MBR and the trajectory sampling ladder on POL v3 (TRAJ_DATASET=porto_v3:
+# Porto v3, configs/porto_v3), then aggregate
 # and compare. Needs the P2 snapshot (pass AFTER_JOB=<gate merge job id> to
 # start right after P2, or submit once the gate reports passed).
 #   ./submit_p3.sh                      all P3 configs
@@ -8,10 +9,9 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
-CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
+source "$SCRIPT_DIR/_submit_dataset.sh"
 CONFIG_NAMES=${CONFIG_NAMES:-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 traj_sampling_n100000 traj_sampling_n1000000"}
-COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/p3_comparison}
-base_export="ALL,REPO_ROOT=$REPO_ROOT"
+COMPARISON_DIR=${COMPARISON_DIR:-$RESULTS_DIR/p3_comparison}
 if [ -n "${PYTHON:-}" ]; then base_export="$base_export,PYTHON=$PYTHON"; fi
 
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }

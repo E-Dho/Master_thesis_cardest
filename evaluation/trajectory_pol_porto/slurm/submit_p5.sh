@@ -1,5 +1,5 @@
 #!/bin/bash
-# P5: DeepDB-MBR on POL v3. Shared preparation (trip-table export from the P2
+# P5: DeepDB-MBR on POL v3 (TRAJ_DATASET=porto_v3: Porto v3). Shared preparation (trip-table export from the P2
 # snapshot + DeepDB HDF), then one array task per seed, then aggregate and
 # compare with the earlier methods. No database.
 #   ./submit_p5.sh
@@ -8,11 +8,10 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
-CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
+source "$SCRIPT_DIR/_submit_dataset.sh"
 CONFIG="$CONFIG_DIR/deepdb_mbr.yaml"
 COMPARE_WITH=${COMPARE_WITH-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 traj_sampling_n100000 traj_sampling_n1000000 mobilitydb_v3_sql mobilitydb_segment_stbox mobilitydb_trip_stbox"}
-COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/p5_comparison}
-base_export="ALL,REPO_ROOT=$REPO_ROOT"
+COMPARISON_DIR=${COMPARISON_DIR:-$RESULTS_DIR/p5_comparison}
 
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }
 

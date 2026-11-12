@@ -43,7 +43,11 @@ Adaptations, all documented in the README:
   would count them repeatedly; v3's one-sided windows reach 1,000 km past
   the data);
 - a time predicate on the trip table (``trips.trip_time``) is answered with
-  the point times and carries ``approx:trip_time_as_point_time``.
+  the point times and carries ``approx:trip_time_as_point_time``;
+- ``adapter.grid_extent: window_domain`` (Porto) clips the vertices onto the
+  configured window domain before upstream's CountGrid, so vertices outside
+  it fall into the border cells (what upstream does with out-of-grid query
+  samples); the default ``data`` leaves upstream's data-extent grid unchanged.
 
 Unsupported: single-table queries (row counts), attribute predicates (decided
 2026-10-26: CASE+/TraHist cover space and time only), segment-level attribute
@@ -62,7 +66,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 
 from ..temporal import BucketCounts, Occurrences, TemporalDistinct, TimeBuckets
-from .base import Estimate, InProcessTrajectoryAdapter
+from .base import Estimate, InProcessTrajectoryAdapter, grid_extent
 from .space_time import parse_space_time
 
 TRIP_TIME_DIAGNOSTIC = "approx:trip_time_as_point_time"
@@ -237,6 +241,16 @@ class TraHistModel:
         return Sp, ST, ratio
 
 
+def clip_to_extent(points: Mapping[str, np.ndarray], extent: Tuple[float, float, float, float]
+                   ) -> Tuple[Dict[str, np.ndarray], int]:
+    """The points with x/y clipped onto ``extent`` (xmin, ymin, xmax, ymax), and how many were outside."""
+    x, y = np.asarray(points["x"], dtype=np.float64), np.asarray(points["y"], dtype=np.float64)
+    outside = int(np.count_nonzero((x < extent[0]) | (x > extent[2]) | (y < extent[1]) | (y > extent[3])))
+    clipped = dict(points)
+    clipped["x"], clipped["y"] = np.clip(x, extent[0], extent[2]), np.clip(y, extent[1], extent[3])
+    return clipped, outside
+
+
 def build_arrays(upstream: Any, points: Mapping[str, np.ndarray], *, unit_size_m: float, alpha: float, beta: float,
                  kappa: int, connectivity: str, agg_mode: str, ratio_eps: float, temporal: bool,
                  time_buckets: int) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
@@ -329,6 +343,10 @@ class TraHistAdapter(InProcessTrajectoryAdapter):
     def _build_model(self, data, trips) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         adapter = self.config.adapter
         points = trajectory_points(data, trips, self.settings.segments.table)
+        extent = grid_extent(self.settings, adapter.get("grid_extent"))
+        outside = 0
+        if extent is not None:
+            points, outside = clip_to_extent(points, extent)
         arrays, meta = build_arrays(
             self.upstream, points,
             unit_size_m=float(adapter.get("unit_size_m", 100.0)), alpha=float(adapter.get("alpha", 0.5)),
@@ -337,6 +355,9 @@ class TraHistAdapter(InProcessTrajectoryAdapter):
             ratio_eps=float(adapter.get("ratio_eps", 1.0)), temporal=self._flag("temporal"),
             time_buckets=int(adapter.get("time_buckets", 100)))
         meta["trahist_revision"] = adapter.get("trahist_revision")
+        if extent is not None:
+            meta.update({"grid_extent": "window_domain", "grid_extent_box": list(extent),
+                         "points_outside_grid_extent": outside})
         return arrays, meta
 
     def _load_model(self, arrays, meta) -> TraHistModel:

@@ -20,8 +20,8 @@ different. The plan behind it is the project doc
 | P5 | DeepDB-MBR | done, timed |
 | P8b | MSCN | done, timed |
 | P6 | TraHist, TraHist-Temporal, CASE+, CASE+-Temporal (shared temporal module, tuning on validation) | done on POL, timed |
-| P7 | Own model (ResMADE + `traj_dedup_factor`), dedup-head ablation, error split | implemented; seeds 1-2 training, cluster runs pending |
-| P9 | Porto | open (RIS: no-go for now) |
+| P7 | Own model (ResMADE + `traj_dedup_factor`), dedup-head ablation, error split | done on POL (r2: FK-ancestor closure); timing pending |
+| P9 | Porto v3: every method's config (`configs/porto_v3`), grid extent of the histograms, submit scripts per dataset | configs and tests done; cluster runs pending, P6 tuning and the Porto budget after the Porto model |
 
 `traj_eval/plugin.py` registers the in-process adapters: `traj_exact_mbr` and
 `traj_sampling` (P3), `traj_mobilitydb` (P4), `traj_mscn` (P8b),
@@ -540,8 +540,10 @@ Spatial windows are answered with the segment bounding box
 (`approx:segment_mbr`); spatio-temporal queries also test space and time
 separately (`approx:decoupled_space_time`). The segment-MBR overcount statistic
 measures what that costs on the benchmark itself. `--clamp table:attribute=lo:hi`
-(Porto `origin_stand`: NULL modelled as 0, domain 1..63) intersects every
-condition with the domain so the NULL value never matches. `test_p7_own_model.py`
+intersects every condition with a domain, for a model that encodes NULL as a
+number outside it. The Porto model does not need it: it keeps NULL as its own
+`__SQL_NULL__` domain value (decided 2026-11-09), which no range condition
+includes, so the Porto configs pass no `--clamp`. `test_p7_own_model.py`
 evaluates the translated tokens exactly on the fixture data: every non-spatial
 fixture query reproduces its label, every spatial one the MBR count.
 
@@ -570,6 +572,57 @@ STAGE=truth slurm/submit_p7.sh                                         # matchin
 STAGE=run   slurm/submit_p7.sh                                         # seeds 0-2 of own_model and own_model_no_dedup
 PROFILES="cpu_1core gpu_single_query" CPU_CONFIGS=own_model GPU_CONFIGS=own_model \
   TIMING_SBATCH_ARGS="--nodelist=<EPYC 7313 node>" slurm/submit_timing.sh
+```
+
+## P9 Porto v3
+
+`configs/porto_v3` holds one config per POL method, identical to
+`configs/pol_v3` except where Porto must differ; `tests/test_porto_configs.py`
+checks that the two directories never drift apart:
+
+- dataset paths: workloads `porto_v3_multi` / `porto_v3_single` (8 x 750 /
+  8 x 250) of `mobilitydb_porto/query_runs/qgen_porto_v3_exact_st_seed20261102`,
+  `porto_v3_config.json`, the snapshot `traj_snapshots/porto_v3`, the DeepDB
+  export `traj_snapshots/porto_v3_deepdb_mbr`, the MSCN training and
+  validation workloads (seeds 20261104 and 20261103), the own model's
+  `p7_models/porto_v3/seed_<s>`;
+- P6: `adapter.grid_extent: window_domain` (below); `unit_size_m` and
+  `time_buckets` are POL's picks as placeholders and no `budget_bytes` yet,
+  until the Porto sweeps and the Porto own model's size exist;
+- own model: one seed (`porto_traj_dedup_single_anchor_mbr_segments_first_20k`,
+  branch `model/porto-segments-first`).
+
+**Grid extent.** Porto's GPS outliers lie up to 1,131 km from the city; a grid
+over the data extent would have billions of cells at 25 m. With
+`adapter.grid_extent: window_domain` the histograms cover the configured
+window domain (`porto_v3_config.json`: the 0.1 %/99.9 % endpoint box, 81.9 x
+156.8 km, where every window is drawn). CASE+ builds its grid on that box and
+segment ends outside it fall into the border cells (its traversal already
+clips cells); TraHist gets the vertices clipped onto the box before upstream's
+CountGrid, which is the same assignment (upstream treats out-of-grid query
+samples the same way). One-sided windows still reach the outliers through the
+border cells. `model_meta.json` records `grid_extent_box` (and, for TraHist,
+`points_outside_grid_extent`). POL configs have no such key and are unchanged.
+
+**NULL `origin_stand`** (most Porto trips; NaN in the snapshot, NULL never
+matches in the labels): Exact-MBR, sampling and the MSCN bitmaps evaluate the
+v3 predicates on the snapshot, so NaN never matches. DeepDB-MBR exports NaN
+(`nan` in the CSV) and DeepDB's own NULL handling applies (a per-column null
+value in `prepare_single_tables`, removed from every range in
+`_interval_probability`); tested against Exact-MBR with DeepDB itself. The
+own model encodes NULL as the `__SQL_NULL__` domain value, which no range
+condition includes. MobilityDB answers in SQL.
+
+**Running.** Every submit script takes `TRAJ_DATASET=porto_v3` (default
+`pol_v3`, `slurm/_submit_dataset.sh`): configs from `configs/porto_v3`, results
+under `results/traj_phase1_porto_v3`, the database job name
+`porto_mobilitydb`, the Porto validation workload for `submit_p6.sh STAGE=tune`,
+and `TRAJ_DATASET` passed to every job (snapshot, database and benchmarks in
+`traj_env.sh`). `submit_p7.sh` already used `traj_env.sh`.
+
+```bash
+TRAJ_DATASET=porto_v3 REPO_ROOT=$PWD evaluation/trajectory_pol_porto/slurm/submit_p3.sh
+TRAJ_DATASET=porto_v3 REPO_ROOT=$PWD STAGE=tune evaluation/trajectory_pol_porto/slurm/submit_p6.sh
 ```
 
 ## Memory budget
@@ -640,8 +693,12 @@ with the IMDB timing package directory on `PYTHONPATH` (psycopg).
 python -m pytest -q evaluation/trajectory_pol_porto/tests
 # the TraHist gates need the pinned upstream checkout:
 TRAJ_EVAL_TRAHIST_SOURCE=/path/to/TraHist python -m pytest -q evaluation/trajectory_pol_porto/tests/test_p6_trahist.py
+# DeepDB itself (P5, and Porto's NULL handling) needs a Python 3.8 DeepDB environment:
+TRAJ_EVAL_DEEPDB_PYTHON=... TRAJ_EVAL_DEEPDB_SOURCE=/path/to/deepdb-public python -m pytest -q evaluation/trajectory_pol_porto/tests
 ```
 
-The fixtures build a real v3 benchmark on the synthetic POL data with the v3
+The fixtures build a real v3 benchmark on the synthetic POL data (and, for
+Porto, on the v3 generator's synthetic Porto data: NULL `origin_stand`, GPS
+jumps outside the window domain, no agents) with the v3
 generator itself, so a change of the v3 record schema breaks these tests
 rather than the cluster runs.

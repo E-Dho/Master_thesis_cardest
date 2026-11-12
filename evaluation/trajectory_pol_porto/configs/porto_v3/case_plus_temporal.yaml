@@ -1,0 +1,31 @@
+# P6: CASE+-Temporal (extension by us, spec "Temporal extension for CASE+ and
+# TraHist") on Porto v3: CASE+'s grid and counts with per-time-bucket real
+# counts (F/L distinct statistics) and virtual counts per trajectory time span.
+# unit_size_m and time_buckets are tuned on the validation workload
+# (slurm/submit_p6.sh STAGE=tune) before the test runs.
+# NOT TUNED YET (Porto): unit_size_m and time_buckets are POL's picks as placeholders.
+# Tune on the Porto validation workload first (TRAJ_DATASET=porto_v3
+# slurm/submit_p6.sh STAGE=tune), then select with traj_eval/select_tuned.py
+# under the Porto 1x budget (the Porto own model's inference-only size, set as
+# adapter.budget_bytes once its checkpoint exists) and commit the picks here.
+# Grid over the Porto window domain (adapter.grid_extent: window_domain, the
+# 0.1 %/99.9 % endpoint box of porto_v3_config.json): GPS outliers up to
+# 1,131 km away would stretch a data-extent grid to billions of cells; they
+# fall into the border cells.
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_porto_v3
+  method_id: case_plus
+  variant_id: temporal
+  display_name: CASE+-Temporal (extended by us)
+  protocol: adapted
+  adaptation: Project-defined temporal extension of the CASE+ re-implementation - real face/edge counts per equi-depth time bucket with links between consecutive occupied buckets (exact distinct counts per cell/edge over bucket-aligned intervals); a planarized trajectory's virtual counts apply when the query buckets contain its whole time span; Algorithm 2 and the CASE+ correction unchanged; trip-time predicates via segment times (approx); attribute predicates and single-table queries unsupported. With the full time range it reproduces CASE+ exactly.
+  seeds: [0]
+adapter:
+  type: traj_case_plus
+  benchmark_config: ../../../../query_generation/benchmark_v3/porto_v3_config.json
+  plus: true
+  temporal: true
+  time_buckets: 3200
+  unit_size_m: 200
+  grid_extent: window_domain

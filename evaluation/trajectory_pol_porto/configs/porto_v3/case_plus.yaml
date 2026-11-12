@@ -1,0 +1,29 @@
+# P6: CASE+ (Fanaeepour et al., GeoInformatica 2015; no public code,
+# re-implemented from Algorithms 1-3) on Porto v3, spatial only. See
+# traj_eval/adapters/case_plus.py. unit_size_m is tuned on the validation
+# workload (slurm/submit_p6.sh STAGE=tune) before the test runs.
+# NOT TUNED YET (Porto): unit_size_m is POL's pick as a placeholder.
+# Tune on the Porto validation workload first (TRAJ_DATASET=porto_v3
+# slurm/submit_p6.sh STAGE=tune), then select with traj_eval/select_tuned.py
+# under the Porto 1x budget (the Porto own model's inference-only size, set as
+# adapter.budget_bytes once its checkpoint exists) and commit the picks here.
+# Grid over the Porto window domain (adapter.grid_extent: window_domain, the
+# 0.1 %/99.9 % endpoint box of porto_v3_config.json): GPS outliers up to
+# 1,131 km away would stretch a data-extent grid to billions of cells; they
+# fall into the border cells.
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_porto_v3
+  method_id: case_plus
+  variant_id: base
+  display_name: CASE+ (spatial only)
+  protocol: adapted
+  adaptation: Re-implementation of CASE+ from the paper (no public code) on the trip segments - exact grid traversal, Stage 2 read as two visited cells of a row/column not joined by a straight run of visited cells with crossed edges, MBR planarization with virtual counts, Algorithm 2 on the cells the query rectangle intersects, CASE+ minimum-virtual-object correction; spatial only, so queries with a time predicate, attribute predicates and single-table queries are unsupported.
+  seeds: [0]
+adapter:
+  type: traj_case_plus
+  benchmark_config: ../../../../query_generation/benchmark_v3/porto_v3_config.json
+  plus: true
+  temporal: false
+  unit_size_m: 25
+  grid_extent: window_domain

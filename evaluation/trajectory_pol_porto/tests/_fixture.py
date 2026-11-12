@@ -50,11 +50,15 @@ def synthetic_data():
     return data
 
 
-def write_synthetic_snapshot(root: Path, data=None) -> Path:
-    """A P2-format snapshot of the synthetic data (no database needed)."""
+def write_synthetic_snapshot(root: Path, data=None, settings=None, config: Path = V3_CONFIG) -> Path:
+    """A P2-format snapshot of the synthetic data (no database needed).
+
+    ``settings``/``config``: another v3 dataset (the Porto fixture), default POL.
+    """
     from evaluation.trajectory_pol_porto.traj_eval import snapshot as snap
 
     data = synthetic_data() if data is None else data
+    settings = synthetic_settings() if settings is None else settings
     tables = {}
     for table, arrays in data.items():
         columns = {}
@@ -66,8 +70,8 @@ def write_synthetic_snapshot(root: Path, data=None) -> Path:
             np.save(path, np.asarray(array))
             columns[name] = {}
         tables[table] = {"columns": columns}
-    snap.derive_trips(synthetic_settings(), root)
-    manifest = {"snapshot_version": snap.SNAPSHOT_VERSION, "config_sha256": load_settings(V3_CONFIG).sha256,
+    snap.derive_trips(settings, root)
+    manifest = {"snapshot_version": snap.SNAPSHOT_VERSION, "config_sha256": load_settings(config).sha256,
                 "tables": tables, "aliases": {"segments": {"segment_time.start": "ts", "segment_time.end": "te"}},
                 "files": {}}
     (root / "manifest.json").write_text(json.dumps(manifest))

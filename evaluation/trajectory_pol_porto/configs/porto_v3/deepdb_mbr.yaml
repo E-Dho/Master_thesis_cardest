@@ -1,0 +1,46 @@
+# P5: DeepDB-MBR on Porto v3: native DeepDB (pinned revision, the IMDB DeepDB
+# environment) on one row per trajectory (bounding box + trip attributes).
+# trips.origin_stand is NULL for most trips (NaN in the export): DeepDB's own
+# NULL handling (prepare_single_tables: a per-column null value, excluded from
+# every range in _interval_probability) keeps NULL from matching a predicate. The trip table and its DeepDB HDF are shared by all seeds and
+# made once by slurm/submit_p5.sh (deepdb_mbr_prepare_shared.sbatch).
+extends: _base.yaml
+experiment:
+  experiment_id: traj_phase1_porto_v3
+  method_id: deepdb_mbr
+  variant_id: k1_trip_box
+  display_name: DeepDB-MBR (one box per trajectory)
+  protocol: adapted
+  adaptation: Project-defined adaptation - DeepDB's single-table SPN over one row per trajectory (x/y/t bounding box plus trip and agent attributes); segment windows and intervals become box-overlap range predicates, the question Exact-MBR answers exactly; single-table queries and segment-level attribute predicates (segment_idx) unsupported.
+  seeds: [0, 1, 2]
+source:
+  url: https://github.com/DataManagementLab/deepdb-public.git
+  revision: 655ada13a043a4226a239b0c0a65bcdefef87a02
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb
+timing:
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-9
+    absolute_tolerance: 0.0
+resources:
+  profile: cpu_external_deepdb
+  cpu_threads: 8
+artifacts:
+  deepdb_shared: /work_beegfs/sunip956/master_thesis_trajectories/traj_snapshots/porto_v3_deepdb_mbr
+adapter:
+  type: external
+  working_directory: ../../../..
+  environment:
+    PYTHONPATH: null
+  require_smoke_before_build: true
+  recipe:
+    model: single-table SPN (create_naive_all_split_ensemble)
+    sample_size: 10000000
+    rdc_threshold: 0.3
+    post_sampling_factor: 1
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/trajectory_pol_porto/scripts/deepdb_mbr_bridge.py prepare --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/traj_snapshots/porto_v3_deepdb_mbr --seed {seed} --output {exchange_directory}/prepare_manifest.json
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/trajectory_pol_porto/scripts/deepdb_mbr_bridge.py smoke --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/traj_snapshots/porto_v3_deepdb_mbr --seed {seed} --output-directory {exchange_directory}/smoke --rows 20000
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/trajectory_pol_porto/scripts/deepdb_mbr_bridge.py build --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/traj_snapshots/porto_v3_deepdb_mbr --seed {seed} --output-directory {exchange_directory} --sample-size 10000000 --rdc-threshold 0.3 --post-sampling-factor 1
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/trajectory_pol_porto/scripts/deepdb_mbr_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/traj_snapshots/porto_v3_deepdb_mbr --seed {seed} --checkpoint-directory {exchange_directory}/ensemble --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv}
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/deepdb/bin/python evaluation/trajectory_pol_porto/scripts/deepdb_mbr_bridge.py evaluate --source-root /work_beegfs/sunip956/master_thesis_trajectories/external/deepdb --revision 655ada13a043a4226a239b0c0a65bcdefef87a02 --shared-root /work_beegfs/sunip956/master_thesis_trajectories/traj_snapshots/porto_v3_deepdb_mbr --seed {seed} --checkpoint-directory {exchange_directory}/ensemble --queries-jsonl {queries_jsonl} --select-json '{workload_select_json}' --predictions {predictions_csv} --latency {latency_csv} --warmup-passes 1 --repetitions 3

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Profile-controlled latency of the POL v3 trajectory methods, then a fresh
+# Profile-controlled latency of the POL v3 trajectory methods (TRAJ_DATASET=porto_v3:
+# Porto v3; the planner timing then starts the Porto server), then a fresh
 # aggregate and comparison that includes it.
 #   ./submit_timing.sh                         both profiles (P3 on cpu_1core, P4 on cpu_postgres_2core)
 #   PROFILES=cpu_1core ./submit_timing.sh      one profile
@@ -19,16 +20,15 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
-CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/pol_v3"
+source "$SCRIPT_DIR/_submit_dataset.sh"
 PROFILES=${PROFILES:-"cpu_1core cpu_postgres_2core"}
 CPU_CONFIGS=${CPU_CONFIGS:-"exact_mbr traj_sampling_n1000 traj_sampling_n10000 traj_sampling_n100000 traj_sampling_n1000000"}
 PG_CONFIGS=${PG_CONFIGS:-"mobilitydb_v3_sql mobilitydb_segment_stbox mobilitydb_trip_stbox"}
 GPU_CONFIGS=${GPU_CONFIGS:-own_model}
-COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_pol_v3/timed_comparison}
-DB_JOB_NAME=${DB_JOB_NAME:-pol_mobilitydb}
+COMPARISON_DIR=${COMPARISON_DIR:-$RESULTS_DIR/timed_comparison}
+DB_JOB_NAME=${DB_JOB_NAME:-$DATASET_DB_JOB_NAME}
 COMPARE_WITH=${COMPARE_WITH:-}
 read -r -a extra_sbatch <<< "${TIMING_SBATCH_ARGS:-}"
-base_export="ALL,REPO_ROOT=$REPO_ROOT"
 
 submit() { local id; id=$(sbatch --parsable "$@"); echo "${id%%;*}"; }
 paths_of() {
