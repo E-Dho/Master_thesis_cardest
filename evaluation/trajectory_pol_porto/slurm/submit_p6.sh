@@ -41,7 +41,7 @@ case "$STAGE" in
       if [ ! -f "$config" ]; then echo "missing config $config" >&2; exit 2; fi
       grids="unit_size_m=$UNIT_SIZES"
       if grep -qE '^  temporal: true' "$config"; then grids="$grids+time_buckets=$TIME_BUCKETS"; fi
-      job=$(submit "${dependency_args[@]}" \
+      job=$(submit ${dependency_args[@]+"${dependency_args[@]}"} \
         --export="$base_export,TUNE_CONFIG=$config,VALIDATION_JSONL=$VALIDATION_JSONL,EXPECTED_QUERIES=$VALIDATION_MULTI,GRIDS=$grids,OUTPUT=$TUNING_ROOT/$name" \
         "$SCRIPT_DIR/tune.sbatch")
       echo "$name: tuning job $job ($grids) -> $TUNING_ROOT/$name"
@@ -53,7 +53,7 @@ case "$STAGE" in
     for name in $CONFIG_NAMES; do
       config="$CONFIG_DIR/$name.yaml"
       if [ ! -f "$config" ]; then echo "missing config $config" >&2; exit 2; fi
-      job=$(submit "${dependency_args[@]}" --array=0 --mem="$RUN_MEM" --export="$base_export,CONFIG=$config" \
+      job=$(submit ${dependency_args[@]+"${dependency_args[@]}"} --array=0 --mem="$RUN_MEM" --export="$base_export,CONFIG=$config" \
         "$SCRIPT_DIR/run_inprocess.sbatch")
       echo "$name: job $job (seed 0; deterministic)"
       jobs+=("$job")

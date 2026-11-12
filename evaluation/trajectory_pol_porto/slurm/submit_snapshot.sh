@@ -49,7 +49,7 @@ for workload in $WORKLOADS; do
   dependency="$gate_dependency"
   if [ -n "${GATE_AFTER_OK:-}" ]; then dependency="${dependency:+$dependency,}afterok:$GATE_AFTER_OK"; fi
   if [ -n "$dependency" ]; then dependency_args=(--dependency="$dependency"); fi
-  gate=$(submit "${dependency_args[@]}" --array=0-$((shards - 1)) \
+  gate=$(submit ${dependency_args[@]+"${dependency_args[@]}"} --array=0-$((shards - 1)) \
     --export="$export_vars,WORKLOAD=$workload,GATE_SHARDS=$shards" "$SCRIPT_DIR/snapshot_gate.sbatch")
   merge=$(submit --dependency="afterany:$gate" --export="$export_vars,WORKLOAD=$workload" \
     "$SCRIPT_DIR/snapshot_gate_merge.sbatch")

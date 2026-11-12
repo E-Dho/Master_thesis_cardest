@@ -31,7 +31,7 @@ for name in $CONFIG_NAMES; do
   config="$CONFIG_DIR/$name.yaml"
   if [ ! -f "$config" ]; then echo "missing config $config" >&2; exit 2; fi
   seeds=$(seeds_of "$config")
-  job=$(submit "${dependency_args[@]}" --array="$seeds" --export="$base_export,CONFIG=$config" \
+  job=$(submit ${dependency_args[@]+"${dependency_args[@]}"} --array="$seeds" --export="$base_export,CONFIG=$config" \
     "$SCRIPT_DIR/run_inprocess.sbatch")
   echo "$name: job $job (seeds $seeds)"
   jobs+=("$job")

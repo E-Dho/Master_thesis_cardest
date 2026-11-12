@@ -48,13 +48,13 @@ for profile in $PROFILES; do
       configs=$(paths_of "$CPU_CONFIGS")
       cpu_after=()
       if [ -n "${CPU_AFTER_JOB:-}" ]; then cpu_after=(--dependency="afterok:$CPU_AFTER_JOB"); fi
-      job=$(submit "${extra_sbatch[@]}" "${cpu_after[@]}" --export="$base_export,CONFIGS=$configs" "$SCRIPT_DIR/timing_cpu_1core.sbatch")
+      job=$(submit ${extra_sbatch[@]+"${extra_sbatch[@]}"} ${cpu_after[@]+"${cpu_after[@]}"} --export="$base_export,CONFIGS=$configs" "$SCRIPT_DIR/timing_cpu_1core.sbatch")
       ;;
     cpu_postgres_2core)
       configs=$(paths_of "$PG_CONFIGS")
       deps="singleton"
       if [ -n "${AFTER_JOB:-}" ]; then deps="afterok:$AFTER_JOB,singleton"; fi
-      job=$(submit "${extra_sbatch[@]}" --job-name="$DB_JOB_NAME" --dependency="$deps" --export="$base_export,CONFIGS=$configs" \
+      job=$(submit ${extra_sbatch[@]+"${extra_sbatch[@]}"} --job-name="$DB_JOB_NAME" --dependency="$deps" --export="$base_export,CONFIGS=$configs" \
         "$SCRIPT_DIR/timing_cpu_postgres_2core.sbatch")
       ;;
     gpu_single_query)
@@ -62,7 +62,7 @@ for profile in $PROFILES; do
       gpu_after=()
       if [ -n "${GPU_AFTER_JOB:-}" ]; then gpu_after=(--dependency="afterok:$GPU_AFTER_JOB"); fi
       # the GPU job selects its node class itself (--constraint=L40); TIMING_SBATCH_ARGS is for the CPU jobs
-      job=$(submit "${gpu_after[@]}" --export="$base_export,CONFIGS=$configs" "$SCRIPT_DIR/timing_gpu_single_query.sbatch")
+      job=$(submit ${gpu_after[@]+"${gpu_after[@]}"} --export="$base_export,CONFIGS=$configs" "$SCRIPT_DIR/timing_gpu_single_query.sbatch")
       ;;
     *) echo "unknown profile $profile (cpu_1core, cpu_postgres_2core or gpu_single_query)" >&2; exit 2 ;;
   esac

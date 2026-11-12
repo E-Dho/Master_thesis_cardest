@@ -23,7 +23,7 @@ if [ "${SKIP_SHARED:-0}" != "1" ]; then
   dependency=(--dependency="afterok:$shared")
 fi
 seeds=$(grep -E '^  seeds:' "$CONFIG" | sed -E 's/.*\[(.*)\].*/\1/' | tr -d ' ')
-runs=$(submit "${dependency[@]}" --array="$seeds" --export="$base_export,CONFIG=$CONFIG" "$SCRIPT_DIR/run_external.sbatch")
+runs=$(submit ${dependency[@]+"${dependency[@]}"} --array="$seeds" --export="$base_export,CONFIG=$CONFIG" "$SCRIPT_DIR/run_external.sbatch")
 echo "deepdb_mbr: job $runs (seeds $seeds)"
 configs=("$CONFIG")
 for name in $COMPARE_WITH; do configs+=("$CONFIG_DIR/$name.yaml"); done

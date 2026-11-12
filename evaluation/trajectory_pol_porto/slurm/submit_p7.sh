@@ -33,7 +33,7 @@ case "$STAGE" in
   check)
     MODEL_ROOT=${MODEL_ROOT:?set MODEL_ROOT to the worktree of model/pol-segments-first-training-state}
     CHECK_DIR=${CHECK_DIR:-$THESIS_WORK_ROOT/p7_checks/${TRAJ_DATASET}_code_check_$(date -u +%Y%m%dT%H%M%SZ)}
-    job=$(submit "${after[@]}" --export="$base_export,MODEL_ROOT=$MODEL_ROOT,MODELS=$P7_MODELS/seed_0,CHECK_DIR=$CHECK_DIR,CHECK_QUERIES=${CHECK_QUERIES:-500}" \
+    job=$(submit ${after[@]+"${after[@]}"} --export="$base_export,MODEL_ROOT=$MODEL_ROOT,MODELS=$P7_MODELS/seed_0,CHECK_DIR=$CHECK_DIR,CHECK_QUERIES=${CHECK_QUERIES:-500}" \
       "$SCRIPT_DIR/own_model_check.sbatch")
     echo "code check: job $job -> $CHECK_DIR/check.json"
     ;;
@@ -42,7 +42,7 @@ case "$STAGE" in
     SEGTRUTH_ROOT=${SEGTRUTH_ROOT:-$SNAPSHOT_DIR/analysis/segment_truth/v$version}
     SHARDS=${SEGTRUTH_SHARDS:-16}
     export_vars="$base_export,SEGTRUTH_ROOT=$SEGTRUTH_ROOT,WORKLOAD=$WORKLOAD,SNAPSHOT_DIR=$SNAPSHOT_DIR,V3_CONFIG=$V3_CONFIG,TEST_BENCHMARK=$TEST_BENCHMARK,VALIDATION_BENCHMARK=$VALIDATION_BENCHMARK"
-    verify=$(submit "${after[@]}" --mem=4G --time=01:00:00 --export="$export_vars,SEGTRUTH_STEP=verify" "$SCRIPT_DIR/segment_truth.sbatch")
+    verify=$(submit ${after[@]+"${after[@]}"} --mem=4G --time=01:00:00 --export="$export_vars,SEGTRUTH_STEP=verify" "$SCRIPT_DIR/segment_truth.sbatch")
     array=$(submit --dependency="afterok:$verify" --array=0-$((SHARDS - 1)) \
       --export="$export_vars,SEGTRUTH_STEP=run,SEGTRUTH_SHARDS=$SHARDS" "$SCRIPT_DIR/segment_truth.sbatch")
     merge=$(submit --dependency="afterany:$array" --mem=8G --time=00:30:00 --export="$export_vars,SEGTRUTH_STEP=merge" \
@@ -63,7 +63,7 @@ case "$STAGE" in
         exit 2
       fi
       seeds=$(grep -E '^  seeds:' "$config" | sed -E 's/.*\[(.*)\].*/\1/' | tr -d ' ')
-      job=$(submit "${after[@]}" --job-name=traj_own_model --array="$seeds" --export="$base_export,CONFIG=$config" \
+      job=$(submit ${after[@]+"${after[@]}"} --job-name=traj_own_model --array="$seeds" --export="$base_export,CONFIG=$config" \
         "$SCRIPT_DIR/run_external.sbatch")
       echo "$name: job $job (seeds $seeds)"
       jobs+=("$job")

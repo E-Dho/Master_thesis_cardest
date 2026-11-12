@@ -481,6 +481,13 @@ class SubmitP7Test(unittest.TestCase):
         self.assertEqual(len(submitted), 3)  # two seed arrays and the comparison
         self.assertTrue(all("--array=0,1,2" in line for line in submitted[:2]))
 
+    def test_after_job_reaches_the_first_submission(self) -> None:
+        # also guards the empty-array expansion (bash 3.2 with set -u rejected "${after[@]}")
+        result, submitted = self._submit({"AFTER_JOB": "123"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all("--dependency=afterok:123" in line for line in submitted[:2]))
+        self.assertNotIn("afterok:123", submitted[2])  # the comparison waits for the arrays instead
+
     def test_other_directory_is_refused_before_submitting(self) -> None:
         result, submitted = self._submit({"P7_MODELS": "/elsewhere/p7_models/pol_v3"})
         self.assertEqual(result.returncode, 2)
