@@ -16,10 +16,10 @@
     "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/aggregate/comparison.json",
     "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/aggregate/comparison.json",
     "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/aggregate/comparison.json",
-    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/aggregate/comparison.json",
-    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000/aggregate/comparison.json",
-    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000/aggregate/comparison.json",
-    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_p99_step_19500/aggregate/comparison.json"
+    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/aggregate/comparison.json",
+    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/aggregate/comparison.json",
+    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/aggregate/comparison.json",
+    "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code/aggregate/comparison.json"
   ],
   "results": [
     {
@@ -34,6 +34,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 5.16551495895588,
       "inference.mean_ms.std": 0.0,
@@ -77,6 +78,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 5.16551495895588, \"std\": 0.0}, \"p50_ms\": {\"mean\": 3.220982034690678, \"std\": 0.0}, \"p95_ms\": {\"mean\": 7.220010890159756, \"std\": 0.0}, \"p99_ms\": {\"mean\": 51.33572811493647, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 193.5915408136061, \"std\": 0.0}}}}",
       "method_id": "postgresql",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (PostgreSQL planner; no GPU inference path)",
       "raw_q_error.max.mean": 3534.754966887417,
@@ -228,6 +230,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 4.008851716155187,
       "inference.mean_ms.std": 0.0,
@@ -271,6 +274,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 4.008851716155187, \"std\": 0.0}, \"p50_ms\": {\"mean\": 3.3157659927383065, \"std\": 0.0}, \"p95_ms\": {\"mean\": 5.590110621415078, \"std\": 0.0}, \"p99_ms\": {\"mean\": 24.61782534606774, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 249.44798930080682, \"std\": 0.0}}}}",
       "method_id": "postgresql",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (PostgreSQL planner; no GPU inference path)",
       "raw_q_error.max.mean": 4501590.0,
@@ -422,6 +426,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 0.9846000085096983,
       "inference.mean_ms.std": 0.012499988149775947,
@@ -465,6 +470,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 0.9846000085096983, \"std\": 0.012499988149775947}, \"p50_ms\": {\"mean\": 0.9818105027079582, \"std\": 0.010946380108815618}, \"p95_ms\": {\"mean\": 1.0047856097420056, \"std\": 0.01886506925943117}, \"p99_ms\": {\"mean\": 1.0619110520929098, \"std\": 0.07230385054849471}, \"throughput_queries_per_second\": {\"mean\": 1015.7492324761828, \"std\": 12.804384948751245}}}}",
       "method_id": "mscn",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "AWS ml.p2.xlarge using CUDA (original MSCN); NVIDIA V100 (NeuroCard comparison)",
       "raw_q_error.max.mean": 776.9967087924169,
@@ -829,6 +835,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 0.9992302826916178,
       "inference.mean_ms.std": 0.007350661209719301,
@@ -872,6 +879,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 0.9992302826916178, \"std\": 0.007350661209719301}, \"p50_ms\": {\"mean\": 0.9964024648070335, \"std\": 0.008482522910158065}, \"p95_ms\": {\"mean\": 1.0141594956318538, \"std\": 0.004817549537461936}, \"p99_ms\": {\"mean\": 1.079443022608757, \"std\": 0.06344456598594142}, \"throughput_queries_per_second\": {\"mean\": 1000.8065617598536, \"std\": 7.391919127197488}}}}",
       "method_id": "mscn",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "AWS ml.p2.xlarge using CUDA (original MSCN); NVIDIA V100 (NeuroCard comparison)",
       "raw_q_error.max.mean": 205015.0522875817,
@@ -1236,6 +1244,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.3333333333333333,
       "estimate_lt_1_count.std": 0.5773502691896258,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 9.101208982811796,
       "inference.mean_ms.std": 0.14449960375629933,
@@ -1279,6 +1288,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"CPU\"], \"metrics\": {\"mean_ms\": {\"mean\": 9.101208982811796, \"std\": 0.14449960375629933}, \"p50_ms\": {\"mean\": 8.44120915280655, \"std\": 0.15259915288813167}, \"p95_ms\": {\"mean\": 16.075983888003975, \"std\": 0.3606632865645681}, \"p99_ms\": {\"mean\": 19.84924846328795, \"std\": 0.08287317845101329}, \"throughput_queries_per_second\": {\"mean\": 109.89413446969765, \"std\": 1.7593657816461434}}}}",
       "method_id": "deepdb",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (NeuroCard comparison executes DeepDB on CPU)",
       "raw_q_error.max.mean": 40.46395505629004,
@@ -1492,6 +1502,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 1.6666666666666667,
       "estimate_lt_1_count.std": 0.5773502691896257,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 12.985451454032756,
       "inference.mean_ms.std": 0.02366617547103637,
@@ -1535,6 +1546,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"CPU\"], \"metrics\": {\"mean_ms\": {\"mean\": 12.985451454032756, \"std\": 0.02366617547103637}, \"p50_ms\": {\"mean\": 12.739606628504893, \"std\": 0.06809768004469355}, \"p95_ms\": {\"mean\": 20.556692988611758, \"std\": 0.0035586579297087976}, \"p99_ms\": {\"mean\": 22.96667386700089, \"std\": 0.2804847793318767}, \"throughput_queries_per_second\": {\"mean\": 77.00942979281172, \"std\": 0.14020499411336806}}}}",
       "method_id": "deepdb",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (NeuroCard comparison executes DeepDB on CPU)",
       "raw_q_error.max.mean": 128.24262380304967,
@@ -1748,6 +1760,7 @@
       "estimate_lt_0_1_count.std": 0.5773502691896257,
       "estimate_lt_1_count.mean": 39.0,
       "estimate_lt_1_count.std": 1.0,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 18.291278849891388,
       "inference.mean_ms.std": 0.5637952557498557,
@@ -1791,6 +1804,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"CPU\"], \"metrics\": {\"mean_ms\": {\"mean\": 18.291278849891388, \"std\": 0.5637952557498557}, \"p50_ms\": {\"mean\": 18.93704184719051, \"std\": 0.4101866922241817}, \"p95_ms\": {\"mean\": 31.009958084905517, \"std\": 0.8973527878306684}, \"p99_ms\": {\"mean\": 34.27873523090966, \"std\": 1.682042273309718}, \"throughput_queries_per_second\": {\"mean\": 54.705975334378486, \"std\": 1.7088531489656547}}}}",
       "method_id": "deepdb",
+      "primary_timing_profile": null,
       "protocol": "adapted",
       "published_reference_hardware": "CPU (NeuroCard comparison executes DeepDB on CPU)",
       "raw_q_error.max.mean": 136494.5197099339,
@@ -1994,7 +2008,7 @@
       "zero_estimate_count.std": 0.0
     },
     {
-      "actual_hardware": "NVIDIA L40S",
+      "actual_hardware": "AMD EPYC 7313 16-Core Processor",
       "coverage_complete_all_seeds": true,
       "coverage_fraction.mean": 1.0,
       "coverage_fraction.std": 0.0,
@@ -2005,18 +2019,29 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
+      "evaluate_stage_inference.mean_ms.mean": 16.556356320867227,
+      "evaluate_stage_inference.mean_ms.std": 0.13088967687196468,
+      "evaluate_stage_inference.p50_ms.mean": 16.584347157428663,
+      "evaluate_stage_inference.p50_ms.std": 0.14500007785085253,
+      "evaluate_stage_inference.p95_ms.mean": 22.005985615154106,
+      "evaluate_stage_inference.p95_ms.std": 0.070961353265876,
+      "evaluate_stage_inference.p99_ms.mean": 23.725632320468623,
+      "evaluate_stage_inference.p99_ms.std": 0.15515818501626158,
+      "evaluate_stage_inference.throughput_queries_per_second.mean": 60.402288760387506,
+      "evaluate_stage_inference.throughput_queries_per_second.std": 0.47920689973405306,
       "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 16.556356320867227,
-      "inference.mean_ms.std": 0.13088967687196468,
-      "inference.p50_ms.mean": 16.584347157428663,
-      "inference.p50_ms.std": 0.14500007785085253,
-      "inference.p95_ms.mean": 22.005985615154106,
-      "inference.p95_ms.std": 0.070961353265876,
-      "inference.p99_ms.mean": 23.725632320468623,
-      "inference.p99_ms.std": 0.15515818501626158,
-      "inference.throughput_queries_per_second.mean": 60.402288760387506,
-      "inference.throughput_queries_per_second.std": 0.47920689973405306,
-      "inference_device": "cuda",
+      "inference.mean_ms.mean": 1182.986456647604,
+      "inference.mean_ms.std": 20.351330514039713,
+      "inference.p50_ms.mean": 1170.1913848519325,
+      "inference.p50_ms.std": 13.239547447180962,
+      "inference.p95_ms.mean": 1457.2696258469175,
+      "inference.p95_ms.std": 34.87753944202025,
+      "inference.p99_ms.mean": 1593.1307013208668,
+      "inference.p99_ms.std": 7.228762865852359,
+      "inference.throughput_queries_per_second.mean": 0.8454838737130664,
+      "inference.throughput_queries_per_second.std": 0.014444519446165944,
+      "inference_device": "cpu",
       "inference_profiles": {
         "cuda": {
           "device_names": [
@@ -2048,6 +2073,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 16.556356320867227, \"std\": 0.13088967687196468}, \"p50_ms\": {\"mean\": 16.584347157428663, \"std\": 0.14500007785085253}, \"p95_ms\": {\"mean\": 22.005985615154106, \"std\": 0.070961353265876}, \"p99_ms\": {\"mean\": 23.725632320468623, \"std\": 0.15515818501626158}, \"throughput_queries_per_second\": {\"mean\": 60.402288760387506, \"std\": 0.47920689973405306}}}}",
       "method_id": "neurocard",
+      "primary_timing_profile": "cpu_1core",
       "protocol": "native",
       "published_reference_hardware": "AWS EC2 NVIDIA V100 GPU and 32 vCPUs",
       "raw_q_error.max.mean": 27.5,
@@ -2091,7 +2117,220 @@
       "smoothed_q_error_true_zero.p95.std": null,
       "smoothed_q_error_true_zero.p99.mean": null,
       "smoothed_q_error_true_zero.p99.std": null,
-      "standardized_timing": {},
+      "standardized_timing": {
+        "cpu_1core": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": null
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "max_relative_difference": 0.47262247838616717,
+              "mode": "stochastic",
+              "passed": true,
+              "seed": 0
+            },
+            {
+              "max_relative_difference": 0.5666666666666667,
+              "mode": "stochastic",
+              "passed": true,
+              "seed": 1
+            },
+            {
+              "max_relative_difference": 0.6286919831223629,
+              "mode": "stochastic",
+              "passed": true,
+              "seed": 2
+            }
+          ],
+          "gpu_names": [],
+          "guard_warning_count": 0,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 1182.986456647604,
+              "std": 20.351330514039713
+            },
+            "p50_ms": {
+              "mean": 1170.1913848519325,
+              "std": 13.239547447180962
+            },
+            "p95_ms": {
+              "mean": 1457.2696258469175,
+              "std": 34.87753944202025
+            },
+            "p99_ms": {
+              "mean": 1593.1307013208668,
+              "std": 7.228762865852359
+            },
+            "throughput_queries_per_second": {
+              "mean": 0.8454838737130664,
+              "std": 0.014444519446165944
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              700,
+              700,
+              700
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0,
+              0,
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "n245"
+          ],
+          "report_table": "CPU latency, one physical core",
+          "scopes": [
+            "predicate_encoding_and_native_progressive_sampling"
+          ],
+          "seed_count": 3,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_0/gpu-full-20260924-f05f82501b564b0a51cd2c78e7fdd2ced5cec4aa3a65c05f9781ef34e307a6b7/timing/cpu_1core/20261110T135533Z-08a0eb6063dbde5d",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_1/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426/timing/cpu_1core/20261110T141253Z-08a0eb6063dbde5d",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_2/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426/timing/cpu_1core/20261110T142854Z-08a0eb6063dbde5d"
+          ]
+        },
+        "gpu_single_query": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": "NVIDIA L40S"
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "max_relative_difference": 0.0,
+              "mode": "stochastic",
+              "passed": true,
+              "seed": 0
+            },
+            {
+              "max_relative_difference": 0.0,
+              "mode": "stochastic",
+              "passed": true,
+              "seed": 1
+            },
+            {
+              "max_relative_difference": 0.0,
+              "mode": "stochastic",
+              "passed": true,
+              "seed": 2
+            }
+          ],
+          "gpu_names": [
+            "NVIDIA L40S"
+          ],
+          "guard_warning_count": 6,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 16.63367717571202,
+              "std": 0.09209980746838495
+            },
+            "p50_ms": {
+              "mean": 16.669052032132942,
+              "std": 0.1116355088033841
+            },
+            "p95_ms": {
+              "mean": 22.138344931105774,
+              "std": 0.14663359081893132
+            },
+            "p99_ms": {
+              "mean": 23.859466947615147,
+              "std": 0.0546083418584251
+            },
+            "throughput_queries_per_second": {
+              "mean": 60.12022811416946,
+              "std": 0.33332753258649284
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              700,
+              700,
+              700
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0,
+              0,
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "gpu001"
+          ],
+          "report_table": "GPU latency, one GPU with four pinned support cores",
+          "scopes": [
+            "predicate_encoding_and_native_progressive_sampling"
+          ],
+          "seed_count": 3,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_0/gpu-full-20260924-f05f82501b564b0a51cd2c78e7fdd2ced5cec4aa3a65c05f9781ef34e307a6b7/timing/gpu_single_query/20261110T151030Z-a83b2ab42ea50d7b",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_1/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426/timing/gpu_single_query/20261110T151119Z-a83b2ab42ea50d7b",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_2/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426/timing/gpu_single_query/20261110T151147Z-a83b2ab42ea50d7b"
+          ]
+        }
+      },
+      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.cpu_1core.gpu_names": "",
+      "timing.cpu_1core.hardware_consistent": true,
+      "timing.cpu_1core.hardware_status": "consistent",
+      "timing.cpu_1core.mean_ms.mean": 1182.986456647604,
+      "timing.cpu_1core.mean_ms.std": 20.351330514039713,
+      "timing.cpu_1core.p50_ms.mean": 1170.1913848519325,
+      "timing.cpu_1core.p50_ms.std": 13.239547447180962,
+      "timing.cpu_1core.p95_ms.mean": 1457.2696258469175,
+      "timing.cpu_1core.p95_ms.std": 34.87753944202025,
+      "timing.cpu_1core.p99_ms.mean": 1593.1307013208668,
+      "timing.cpu_1core.p99_ms.std": 7.228762865852359,
+      "timing.cpu_1core.throughput_queries_per_second.mean": 0.8454838737130664,
+      "timing.cpu_1core.throughput_queries_per_second.std": 0.014444519446165944,
+      "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
+      "timing.gpu_single_query.hardware_consistent": true,
+      "timing.gpu_single_query.hardware_status": "consistent",
+      "timing.gpu_single_query.mean_ms.mean": 16.63367717571202,
+      "timing.gpu_single_query.mean_ms.std": 0.09209980746838495,
+      "timing.gpu_single_query.p50_ms.mean": 16.669052032132942,
+      "timing.gpu_single_query.p50_ms.std": 0.1116355088033841,
+      "timing.gpu_single_query.p95_ms.mean": 22.138344931105774,
+      "timing.gpu_single_query.p95_ms.std": 0.14663359081893132,
+      "timing.gpu_single_query.p99_ms.mean": 23.859466947615147,
+      "timing.gpu_single_query.p99_ms.std": 0.0546083418584251,
+      "timing.gpu_single_query.throughput_queries_per_second.mean": 60.12022811416946,
+      "timing.gpu_single_query.throughput_queries_per_second.std": 0.33332753258649284,
       "true_zero_matching_count.mean": 0.0,
       "true_zero_matching_count.std": 0.0,
       "variant_id": "native_resmade_job_light_8000psamples",
@@ -2111,6 +2350,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 31.744924179247267,
       "inference.mean_ms.std": 0.053483575811750686,
@@ -2154,6 +2394,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 31.744924179247267, \"std\": 0.053483575811750686}, \"p50_ms\": {\"mean\": 30.243840999901295, \"std\": 0.07356463250763365}, \"p95_ms\": {\"mean\": 45.31934860472878, \"std\": 0.043336002836114614}, \"p99_ms\": {\"mean\": 50.493895625695586, \"std\": 0.127687444782577}, \"throughput_queries_per_second\": {\"mean\": 31.501158638473047, \"std\": 0.05307809803192691}}}}",
       "method_id": "neurocard",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "AWS EC2 NVIDIA V100 GPU and 32 vCPUs",
       "raw_q_error.max.mean": 8169.0,
@@ -2430,6 +2671,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 14.097801766225269,
       "inference.mean_ms.std": 0.1826673385990767,
@@ -2473,6 +2715,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 14.097801766225269, \"std\": 0.1826673385990767}, \"p50_ms\": {\"mean\": 13.572895588974157, \"std\": 0.17981327864009702}, \"p95_ms\": {\"mean\": 21.782223569850117, \"std\": 0.6412684345279188}, \"p99_ms\": {\"mean\": 26.328855762258172, \"std\": 0.6314795060820555}, \"throughput_queries_per_second\": {\"mean\": 70.94103317484269, \"std\": 0.9248275507496235}}}}",
       "method_id": "distjoin",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "NVIDIA RTX4070Ti 12GB; AMD Ryzen9 7950X3D",
       "raw_q_error.max.mean": 7.75618334467892,
@@ -2644,6 +2887,7 @@
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 18.76804768204068,
       "inference.mean_ms.std": 0.306993598175654,
@@ -2687,6 +2931,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 18.76804768204068, \"std\": 0.306993598175654}, \"p50_ms\": {\"mean\": 18.153538772215445, \"std\": 0.28170057662696235}, \"p95_ms\": {\"mean\": 27.13385163806379, \"std\": 0.5693462485536074}, \"p99_ms\": {\"mean\": 30.465212886532147, \"std\": 0.5760626507419929}, \"throughput_queries_per_second\": {\"mean\": 53.291618962285554, \"std\": 0.877784417339968}}}}",
       "method_id": "distjoin",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "NVIDIA RTX4070Ti 12GB; AMD Ryzen9 7950X3D",
       "raw_q_error.max.mean": 3709.3333333333335,
@@ -2858,6 +3103,7 @@
       "estimate_lt_0_1_count.std": 1.5275252316519468,
       "estimate_lt_1_count.mean": 24.666666666666668,
       "estimate_lt_1_count.std": 1.5275252316519468,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 3.8884906370020915,
       "inference.mean_ms.std": 0.029299978900727344,
@@ -2901,6 +3147,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 3.8884906370020915, \"std\": 0.029299978900727344}, \"p50_ms\": {\"mean\": 0.14437551726587117, \"std\": 0.0056679670462519175}, \"p95_ms\": {\"mean\": 20.2110546369416, \"std\": 0.34642781018804103}, \"p99_ms\": {\"mean\": 32.38172319960237, \"std\": 0.18928933952858437}, \"throughput_queries_per_second\": {\"mean\": 257.1789023899652, \"std\": 1.9328105659633177}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 3.2355583e+19,
@@ -3070,6 +3317,7 @@
       "estimate_lt_0_1_count.std": 6.557438524302,
       "estimate_lt_1_count.mean": 725.0,
       "estimate_lt_1_count.std": 6.557438524302,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 9.349543800389316,
       "inference.mean_ms.std": 0.20130385666475095,
@@ -3113,6 +3361,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 9.349543800389316, \"std\": 0.20130385666475095}, \"p50_ms\": {\"mean\": 4.958503173838835, \"std\": 0.04654598029524193}, \"p95_ms\": {\"mean\": 24.025473312455386, \"std\": 0.25592308530089486}, \"p99_ms\": {\"mean\": 24.756068092877587, \"std\": 0.3294072826671992}, \"throughput_queries_per_second\": {\"mean\": 106.99050699409672, \"std\": 2.3281093814907283}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 2.3737806000000005e+20,
@@ -3282,6 +3531,7 @@
       "estimate_lt_0_1_count.std": 3.0,
       "estimate_lt_1_count.mean": 13.0,
       "estimate_lt_1_count.std": 3.0,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 4.262973503916458,
       "inference.mean_ms.std": 0.012847951609155927,
@@ -3325,6 +3575,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 4.262973503916458, \"std\": 0.012847951609155927}, \"p50_ms\": {\"mean\": 0.3322870397823863, \"std\": 0.0008829385407990383}, \"p95_ms\": {\"mean\": 21.65044119489418, \"std\": 0.14565358129388384}, \"p99_ms\": {\"mean\": 33.70768816520769, \"std\": 0.14347327005218602}, \"throughput_queries_per_second\": {\"mean\": 234.5794652972136, \"std\": 0.705769127769373}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 2.3985326666666665e+18,
@@ -3494,6 +3745,7 @@
       "estimate_lt_0_1_count.std": 9.539392014169456,
       "estimate_lt_1_count.mean": 579.0,
       "estimate_lt_1_count.std": 9.539392014169456,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 10.803112157715077,
       "inference.mean_ms.std": 0.07355059455740948,
@@ -3537,6 +3789,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 10.803112157715077, \"std\": 0.07355059455740948}, \"p50_ms\": {\"mean\": 5.513403586519416, \"std\": 0.036694332330657484}, \"p95_ms\": {\"mean\": 25.13975324157703, \"std\": 0.21206868517648997}, \"p99_ms\": {\"mean\": 26.034933054518962, \"std\": 0.5936693224694242}, \"throughput_queries_per_second\": {\"mean\": 92.56877033532972, \"std\": 0.6283088730192596}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 8.213275733333333e+19,
@@ -3706,6 +3959,7 @@
       "estimate_lt_0_1_count.std": 1.0,
       "estimate_lt_1_count.mean": 10.0,
       "estimate_lt_1_count.std": 1.0,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 5.668972695601128,
       "inference.mean_ms.std": 0.09738454459528141,
@@ -3749,6 +4003,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 5.668972695601128, \"std\": 0.09738454459528141}, \"p50_ms\": {\"mean\": 2.205396148686608, \"std\": 0.030301107403454274}, \"p95_ms\": {\"mean\": 22.402076857785385, \"std\": 0.5934868560809023}, \"p99_ms\": {\"mean\": 34.16961120286336, \"std\": 0.9516978141401963}, \"throughput_queries_per_second\": {\"mean\": 176.4333879963023, \"std\": 3.019999046026271}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 8.010546666666666e+17,
@@ -3918,6 +4173,7 @@
       "estimate_lt_0_1_count.std": 4.041451884327381,
       "estimate_lt_1_count.mean": 423.3333333333333,
       "estimate_lt_1_count.std": 4.041451884327381,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 13.217842991588016,
       "inference.mean_ms.std": 0.5045287862531055,
@@ -3961,6 +4217,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 13.217842991588016, \"std\": 0.5045287862531055}, \"p50_ms\": {\"mean\": 8.868458525588116, \"std\": 0.20787017514691353}, \"p95_ms\": {\"mean\": 27.193300736447174, \"std\": 1.0910918555853948}, \"p99_ms\": {\"mean\": 28.410821369228263, \"std\": 1.1470056290003103}, \"throughput_queries_per_second\": {\"mean\": 75.72839290128938, \"std\": 2.8726463352271647}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 1.6414594666666666e+19,
@@ -4130,6 +4387,7 @@
       "estimate_lt_0_1_count.std": 1.0,
       "estimate_lt_1_count.mean": 4.0,
       "estimate_lt_1_count.std": 1.0,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 30.377953427267215,
       "inference.mean_ms.std": 0.6810778728202619,
@@ -4173,6 +4431,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 30.377953427267215, \"std\": 0.6810778728202619}, \"p50_ms\": {\"mean\": 28.748430932561558, \"std\": 0.38776266832637385}, \"p95_ms\": {\"mean\": 58.78010601348552, \"std\": 0.6610880563490651}, \"p99_ms\": {\"mean\": 71.49991279700771, \"std\": 1.7071959990520025}, \"throughput_queries_per_second\": {\"mean\": 32.929527228955855, \"std\": 0.7304298242931819}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 2.1734733333333334e+17,
@@ -4342,6 +4601,7 @@
       "estimate_lt_0_1_count.std": 5.131601439446884,
       "estimate_lt_1_count.mean": 290.3333333333333,
       "estimate_lt_1_count.std": 5.131601439446884,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 47.20815469219815,
       "inference.mean_ms.std": 0.28419973643103097,
@@ -4385,6 +4645,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 47.20815469219815, \"std\": 0.28419973643103097}, \"p50_ms\": {\"mean\": 46.44967429339886, \"std\": 0.4061623237440111}, \"p95_ms\": {\"mean\": 74.35731129177536, \"std\": 0.3417357834863488}, \"p99_ms\": {\"mean\": 83.93200154416265, \"std\": 0.6076813858379361}, \"throughput_queries_per_second\": {\"mean\": 21.183291126162363, \"std\": 0.12711690636866205}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 7.77764e+17,
@@ -4554,6 +4815,7 @@
       "estimate_lt_0_1_count.std": 0.5773502691896257,
       "estimate_lt_1_count.mean": 1.6666666666666667,
       "estimate_lt_1_count.std": 0.5773502691896257,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 225.34772332990542,
       "inference.mean_ms.std": 2.243046220503537,
@@ -4597,6 +4859,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 225.34772332990542, \"std\": 2.243046220503537}, \"p50_ms\": {\"mean\": 213.99739858073494, \"std\": 2.4509421507754827}, \"p95_ms\": {\"mean\": 426.1527079856023, \"std\": 3.857161335497658}, \"p99_ms\": {\"mean\": 452.20565540871274, \"std\": 4.238674558224092}, \"throughput_queries_per_second\": {\"mean\": 4.437877914764006, \"std\": 0.043925452269039975}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 6.8396333333333336e+16,
@@ -4766,6 +5029,7 @@
       "estimate_lt_0_1_count.std": 3.605551275463989,
       "estimate_lt_1_count.mean": 187.0,
       "estimate_lt_1_count.std": 3.4641016151377544,
+      "evaluate_stage_device": "cpu",
       "experiment_id": "joblight_phase1",
       "inference.mean_ms.mean": 320.1539423677837,
       "inference.mean_ms.std": 6.11781431028808,
@@ -4809,6 +5073,7 @@
       },
       "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"x86_64\"], \"metrics\": {\"mean_ms\": {\"mean\": 320.1539423677837, \"std\": 6.11781431028808}, \"p50_ms\": {\"mean\": 316.0277384643753, \"std\": 7.451069086421913}, \"p95_ms\": {\"mean\": 488.47750305819005, \"std\": 5.580936763180423}, \"p99_ms\": {\"mean\": 543.4176939423196, \"std\": 8.002602354249872}, \"throughput_queries_per_second\": {\"mean\": 3.1242663461264537, \"std\": 0.06036174844727106}}}}",
       "method_id": "foj_sampling",
+      "primary_timing_profile": null,
       "protocol": "native",
       "published_reference_hardware": "CPU (weighted sample scan; no neural GPU inference)",
       "raw_q_error.max.mean": 1.5412466666666666e+17,
@@ -4967,346 +5232,38 @@
       "zero_estimate_count.std": 3.605551275463989
     },
     {
-      "actual_hardware": "NVIDIA L40S",
-      "coverage_complete_all_seeds": true,
-      "coverage_fraction.mean": 1.0,
-      "coverage_fraction.std": 0.0,
-      "display_name": "Own model rare-auxiliary checkpoint step 11,000",
-      "estimate_lt_0_01_count.mean": 0.0,
-      "estimate_lt_0_01_count.std": 0.0,
-      "estimate_lt_0_1_count.mean": 0.0,
-      "estimate_lt_0_1_count.std": 0.0,
-      "estimate_lt_1_count.mean": 1.6666666666666667,
-      "estimate_lt_1_count.std": 0.5773502691896257,
-      "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 17.227732444714224,
-      "inference.mean_ms.std": 0.09204101597724353,
-      "inference.p50_ms.mean": 15.319033991545439,
-      "inference.p50_ms.std": 0.09168280956038433,
-      "inference.p95_ms.mean": 25.376687804237008,
-      "inference.p95_ms.std": 0.11193453389657992,
-      "inference.p99_ms.mean": 29.659630799045164,
-      "inference.p99_ms.std": 0.09339812805742537,
-      "inference.throughput_queries_per_second.mean": 58.047047265507636,
-      "inference.throughput_queries_per_second.std": 0.30963743611922934,
-      "inference_device": "cuda",
-      "inference_profiles": {
-        "cuda": {
-          "device_names": [
-            "NVIDIA L40S"
-          ],
-          "metrics": {
-            "mean_ms": {
-              "mean": 17.227732444714224,
-              "std": 0.09204101597724353
-            },
-            "p50_ms": {
-              "mean": 15.319033991545439,
-              "std": 0.09168280956038433
-            },
-            "p95_ms": {
-              "mean": 25.376687804237008,
-              "std": 0.11193453389657992
-            },
-            "p99_ms": {
-              "mean": 29.659630799045164,
-              "std": 0.09339812805742537
-            },
-            "throughput_queries_per_second": {
-              "mean": 58.047047265507636,
-              "std": 0.30963743611922934
-            }
-          }
-        }
-      },
-      "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 17.227732444714224, \"std\": 0.09204101597724353}, \"p50_ms\": {\"mean\": 15.319033991545439, \"std\": 0.09168280956038433}, \"p95_ms\": {\"mean\": 25.376687804237008, \"std\": 0.11193453389657992}, \"p99_ms\": {\"mean\": 29.659630799045164, \"std\": 0.09339812805742537}, \"throughput_queries_per_second\": {\"mean\": 58.047047265507636, \"std\": 0.30963743611922934}}}}",
-      "method_id": "own_model",
-      "protocol": "native",
-      "published_reference_hardware": "Actual cluster CPU and NVIDIA L40S are reported",
-      "raw_q_error.max.mean": 48.51709600393435,
-      "raw_q_error.max.std": 22.318608109570967,
-      "raw_q_error.p50.mean": 1.5792775046094107,
-      "raw_q_error.p50.std": 0.11157884632141353,
-      "raw_q_error.p90.mean": 5.701276165236918,
-      "raw_q_error.p90.std": 1.9745437015105816,
-      "raw_q_error.p95.mean": 10.712898422140269,
-      "raw_q_error.p95.std": 4.745831651323089,
-      "raw_q_error.p99.mean": 39.52857007148332,
-      "raw_q_error.p99.std": 18.882259386943076,
-      "raw_q_error_true_positive.max.mean": 48.51709600393435,
-      "raw_q_error_true_positive.max.std": 22.318608109570967,
-      "raw_q_error_true_positive.p50.mean": 1.5792775046094107,
-      "raw_q_error_true_positive.p50.std": 0.11157884632141353,
-      "raw_q_error_true_positive.p90.mean": 5.701276165236918,
-      "raw_q_error_true_positive.p90.std": 1.9745437015105816,
-      "raw_q_error_true_positive.p95.mean": 10.712898422140269,
-      "raw_q_error_true_positive.p95.std": 4.745831651323089,
-      "raw_q_error_true_positive.p99.mean": 39.52857007148332,
-      "raw_q_error_true_positive.p99.std": 18.882259386943076,
-      "seed_count": 3,
-      "smoothed_q_error.max.mean": 30.706043680178976,
-      "smoothed_q_error.max.std": 21.74359286410983,
-      "smoothed_q_error.p50.mean": 1.5792775046094107,
-      "smoothed_q_error.p50.std": 0.11157884632141353,
-      "smoothed_q_error.p90.mean": 5.585642381667905,
-      "smoothed_q_error.p90.std": 1.7804193013406548,
-      "smoothed_q_error.p95.mean": 9.92532435576076,
-      "smoothed_q_error.p95.std": 3.778263889798932,
-      "smoothed_q_error.p99.mean": 22.04099710835492,
-      "smoothed_q_error.p99.std": 13.108261149290959,
-      "smoothed_q_error_true_zero.max.mean": null,
-      "smoothed_q_error_true_zero.max.std": null,
-      "smoothed_q_error_true_zero.p50.mean": null,
-      "smoothed_q_error_true_zero.p50.std": null,
-      "smoothed_q_error_true_zero.p90.mean": null,
-      "smoothed_q_error_true_zero.p90.std": null,
-      "smoothed_q_error_true_zero.p95.mean": null,
-      "smoothed_q_error_true_zero.p95.std": null,
-      "smoothed_q_error_true_zero.p99.mean": null,
-      "smoothed_q_error_true_zero.p99.std": null,
-      "standardized_timing": {
-        "cpu_1core": {
-          "available": true,
-          "config_drift": [],
-          "cpu_models": [
-            "AMD EPYC 7313 16-Core Processor"
-          ],
-          "declared_hardware": [
-            {
-              "cpu_model": "AMD EPYC 7313 16-Core Processor",
-              "gpu_name": null
-            }
-          ],
-          "estimate_consistency": [
-            {
-              "max_relative_difference": 2.872414394620825e-06,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 0
-            },
-            {
-              "max_relative_difference": 3.047655002413883e-06,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 1
-            },
-            {
-              "max_relative_difference": 2.989501162891902e-06,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 2
-            }
-          ],
-          "gpu_names": [],
-          "guard_warning_count": 0,
-          "hardware_consistent": true,
-          "hardware_declared": true,
-          "metrics": {
-            "mean_ms": {
-              "mean": 10.026514836409616,
-              "std": 0.038779953616250695
-            },
-            "p50_ms": {
-              "mean": 8.15184375581642,
-              "std": 0.03819849574645304
-            },
-            "p95_ms": {
-              "mean": 18.088827507259946,
-              "std": 0.11916527477454482
-            },
-            "p99_ms": {
-              "mean": 22.355672343013186,
-              "std": 0.3889384458602196
-            },
-            "throughput_queries_per_second": {
-              "mean": 99.7365482373263,
-              "std": 0.3860495527343976
-            }
-          },
-          "model_core": {
-            "complete": false,
-            "coverage_fraction_mean": 0.0,
-            "coverage_fraction_min": 0.0,
-            "exposed": false,
-            "latency_observation_counts": [
-              700,
-              700,
-              700
-            ],
-            "metrics": null,
-            "observation_counts": [
-              0,
-              0,
-              0
-            ],
-            "suppressed_reason": "method exposes no model-core boundary"
-          },
-          "model_core_metrics": null,
-          "nodes": [
-            "n191"
-          ],
-          "report_table": "CPU latency, one physical core",
-          "scopes": [
-            "predicate_encoding_and_estimation"
-          ],
-          "seed_count": 3,
-          "timing_directories": [
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_0/production-consistent-seed0-9bdc2fa04ea1dd5ed55ae59295df64cba88386230cfc374ae80386ccbc9c485d/timing/cpu_1core/20261013T085425Z-e1feb0115840e652",
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_1/production-20260929-c-9bdc2fa04ea1dd5ed55ae59295df64cba88386230cfc374ae80386ccbc9c485d/timing/cpu_1core/20261013T085454Z-e1feb0115840e652",
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_2/production-20260929-c-9bdc2fa04ea1dd5ed55ae59295df64cba88386230cfc374ae80386ccbc9c485d/timing/cpu_1core/20261013T085522Z-e1feb0115840e652"
-          ]
-        },
-        "gpu_single_query": {
-          "available": true,
-          "config_drift": [],
-          "cpu_models": [
-            "AMD EPYC 7313 16-Core Processor"
-          ],
-          "declared_hardware": [
-            {
-              "cpu_model": "AMD EPYC 7313 16-Core Processor",
-              "gpu_name": "NVIDIA L40S"
-            }
-          ],
-          "estimate_consistency": [
-            {
-              "max_relative_difference": 0.0,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 0
-            },
-            {
-              "max_relative_difference": 0.0,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 1
-            },
-            {
-              "max_relative_difference": 0.0,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 2
-            }
-          ],
-          "gpu_names": [
-            "NVIDIA L40S"
-          ],
-          "guard_warning_count": 6,
-          "hardware_consistent": true,
-          "hardware_declared": true,
-          "metrics": {
-            "mean_ms": {
-              "mean": 17.249536830931902,
-              "std": 0.2424549537103366
-            },
-            "p50_ms": {
-              "mean": 15.3085021302104,
-              "std": 0.2427671640812416
-            },
-            "p95_ms": {
-              "mean": 25.57237719496091,
-              "std": 0.3705359154239837
-            },
-            "p99_ms": {
-              "mean": 29.74332474792997,
-              "std": 0.23153067665289134
-            },
-            "throughput_queries_per_second": {
-              "mean": 57.98020847860204,
-              "std": 0.815074833383391
-            }
-          },
-          "model_core": {
-            "complete": false,
-            "coverage_fraction_mean": 0.0,
-            "coverage_fraction_min": 0.0,
-            "exposed": false,
-            "latency_observation_counts": [
-              700,
-              700,
-              700
-            ],
-            "metrics": null,
-            "observation_counts": [
-              0,
-              0,
-              0
-            ],
-            "suppressed_reason": "method exposes no model-core boundary"
-          },
-          "model_core_metrics": null,
-          "nodes": [
-            "gpu002"
-          ],
-          "report_table": "GPU latency, one GPU with four pinned support cores",
-          "scopes": [
-            "predicate_encoding_and_estimation"
-          ],
-          "seed_count": 3,
-          "timing_directories": [
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_0/production-consistent-seed0-9bdc2fa04ea1dd5ed55ae59295df64cba88386230cfc374ae80386ccbc9c485d/timing/gpu_single_query/20261013T085424Z-0c53a77c15f2d601",
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_1/production-20260929-c-9bdc2fa04ea1dd5ed55ae59295df64cba88386230cfc374ae80386ccbc9c485d/timing/gpu_single_query/20261013T085500Z-0c53a77c15f2d601",
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000/seed_2/production-20260929-c-9bdc2fa04ea1dd5ed55ae59295df64cba88386230cfc374ae80386ccbc9c485d/timing/gpu_single_query/20261013T085532Z-0c53a77c15f2d601"
-          ]
-        }
-      },
-      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
-      "timing.cpu_1core.gpu_names": "",
-      "timing.cpu_1core.hardware_consistent": true,
-      "timing.cpu_1core.hardware_status": "consistent",
-      "timing.cpu_1core.mean_ms.mean": 10.026514836409616,
-      "timing.cpu_1core.mean_ms.std": 0.038779953616250695,
-      "timing.cpu_1core.p50_ms.mean": 8.15184375581642,
-      "timing.cpu_1core.p50_ms.std": 0.03819849574645304,
-      "timing.cpu_1core.p95_ms.mean": 18.088827507259946,
-      "timing.cpu_1core.p95_ms.std": 0.11916527477454482,
-      "timing.cpu_1core.p99_ms.mean": 22.355672343013186,
-      "timing.cpu_1core.p99_ms.std": 0.3889384458602196,
-      "timing.cpu_1core.throughput_queries_per_second.mean": 99.7365482373263,
-      "timing.cpu_1core.throughput_queries_per_second.std": 0.3860495527343976,
-      "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
-      "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
-      "timing.gpu_single_query.hardware_consistent": true,
-      "timing.gpu_single_query.hardware_status": "consistent",
-      "timing.gpu_single_query.mean_ms.mean": 17.249536830931902,
-      "timing.gpu_single_query.mean_ms.std": 0.2424549537103366,
-      "timing.gpu_single_query.p50_ms.mean": 15.3085021302104,
-      "timing.gpu_single_query.p50_ms.std": 0.2427671640812416,
-      "timing.gpu_single_query.p95_ms.mean": 25.57237719496091,
-      "timing.gpu_single_query.p95_ms.std": 0.3705359154239837,
-      "timing.gpu_single_query.p99_ms.mean": 29.74332474792997,
-      "timing.gpu_single_query.p99_ms.std": 0.23153067665289134,
-      "timing.gpu_single_query.throughput_queries_per_second.mean": 57.98020847860204,
-      "timing.gpu_single_query.throughput_queries_per_second.std": 0.815074833383391,
-      "true_zero_matching_count.mean": 0.0,
-      "true_zero_matching_count.std": 0.0,
-      "variant_id": "duet_neurocard_distjoin_rare_aux_step_11000",
-      "workload": "job_light",
-      "zero_estimate_count.mean": 0.0,
-      "zero_estimate_count.std": 0.0
-    },
-    {
       "actual_hardware": "CPU",
       "coverage_complete_all_seeds": true,
       "coverage_fraction.mean": 1.0,
       "coverage_fraction.std": 0.0,
-      "display_name": "Own model best smoothed-median checkpoint step 18,000",
+      "display_name": "Own model best smoothed-median checkpoint step 18,000 (corrected model code)",
       "estimate_lt_0_01_count.mean": 0.0,
       "estimate_lt_0_01_count.std": 0.0,
       "estimate_lt_0_1_count.mean": 0.0,
       "estimate_lt_0_1_count.std": 0.0,
       "estimate_lt_1_count.mean": 2.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cpu",
+      "evaluate_stage_inference.mean_ms.mean": 10.066293084195681,
+      "evaluate_stage_inference.mean_ms.std": 0.0,
+      "evaluate_stage_inference.p50_ms.mean": 8.220079354941845,
+      "evaluate_stage_inference.p50_ms.std": 0.0,
+      "evaluate_stage_inference.p95_ms.mean": 18.022497091442347,
+      "evaluate_stage_inference.p95_ms.std": 0.0,
+      "evaluate_stage_inference.p99_ms.mean": 22.456083763390776,
+      "evaluate_stage_inference.p99_ms.std": 0.0,
+      "evaluate_stage_inference.throughput_queries_per_second.mean": 99.34143498861796,
+      "evaluate_stage_inference.throughput_queries_per_second.std": 0.0,
       "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 9.923305721687418,
+      "inference.mean_ms.mean": 10.066293084195681,
       "inference.mean_ms.std": 0.0,
-      "inference.p50_ms.mean": 8.044615387916565,
+      "inference.p50_ms.mean": 8.220079354941845,
       "inference.p50_ms.std": 0.0,
-      "inference.p95_ms.mean": 18.07577619329095,
+      "inference.p95_ms.mean": 18.022497091442347,
       "inference.p95_ms.std": 0.0,
-      "inference.p99_ms.mean": 22.851652875542634,
+      "inference.p99_ms.mean": 22.456083763390776,
       "inference.p99_ms.std": 0.0,
-      "inference.throughput_queries_per_second.mean": 100.7728702557754,
+      "inference.throughput_queries_per_second.mean": 99.34143498861796,
       "inference.throughput_queries_per_second.std": 0.0,
       "inference_device": "cpu",
       "inference_profiles": {
@@ -5316,30 +5273,31 @@
           ],
           "metrics": {
             "mean_ms": {
-              "mean": 9.923305721687418,
+              "mean": 10.066293084195681,
               "std": 0.0
             },
             "p50_ms": {
-              "mean": 8.044615387916565,
+              "mean": 8.220079354941845,
               "std": 0.0
             },
             "p95_ms": {
-              "mean": 18.07577619329095,
+              "mean": 18.022497091442347,
               "std": 0.0
             },
             "p99_ms": {
-              "mean": 22.851652875542634,
+              "mean": 22.456083763390776,
               "std": 0.0
             },
             "throughput_queries_per_second": {
-              "mean": 100.7728702557754,
+              "mean": 99.34143498861796,
               "std": 0.0
             }
           }
         }
       },
-      "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"CPU\"], \"metrics\": {\"mean_ms\": {\"mean\": 9.923305721687418, \"std\": 0.0}, \"p50_ms\": {\"mean\": 8.044615387916565, \"std\": 0.0}, \"p95_ms\": {\"mean\": 18.07577619329095, \"std\": 0.0}, \"p99_ms\": {\"mean\": 22.851652875542634, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 100.7728702557754, \"std\": 0.0}}}}",
+      "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"CPU\"], \"metrics\": {\"mean_ms\": {\"mean\": 10.066293084195681, \"std\": 0.0}, \"p50_ms\": {\"mean\": 8.220079354941845, \"std\": 0.0}, \"p95_ms\": {\"mean\": 18.022497091442347, \"std\": 0.0}, \"p99_ms\": {\"mean\": 22.456083763390776, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 99.34143498861796, \"std\": 0.0}}}}",
       "method_id": "own_model",
+      "primary_timing_profile": "cpu_1core",
       "protocol": "native",
       "published_reference_hardware": "Actual cluster CPU and NVIDIA L40S are reported",
       "raw_q_error.max.mean": 45.21211342845841,
@@ -5383,279 +5341,114 @@
       "smoothed_q_error_true_zero.p95.std": null,
       "smoothed_q_error_true_zero.p99.mean": null,
       "smoothed_q_error_true_zero.p99.std": null,
-      "standardized_timing": {
-        "cpu_1core": {
-          "available": true,
-          "config_drift": [],
-          "cpu_models": [
-            "AMD EPYC 7313 16-Core Processor"
-          ],
-          "declared_hardware": [
-            {
-              "cpu_model": "AMD EPYC 7313 16-Core Processor",
-              "gpu_name": null
-            }
-          ],
-          "estimate_consistency": [
-            {
-              "max_relative_difference": 0.0,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 0
-            }
-          ],
-          "gpu_names": [],
-          "guard_warning_count": 0,
-          "hardware_consistent": true,
-          "hardware_declared": true,
-          "metrics": {
-            "mean_ms": {
-              "mean": 9.99592888069206,
-              "std": 0.0
-            },
-            "p50_ms": {
-              "mean": 8.138712495565414,
-              "std": 0.0
-            },
-            "p95_ms": {
-              "mean": 17.923686039284803,
-              "std": 0.0
-            },
-            "p99_ms": {
-              "mean": 22.493844248820096,
-              "std": 0.0
-            },
-            "throughput_queries_per_second": {
-              "mean": 100.04072777384204,
-              "std": 0.0
-            }
-          },
-          "model_core": {
-            "complete": false,
-            "coverage_fraction_mean": 0.0,
-            "coverage_fraction_min": 0.0,
-            "exposed": false,
-            "latency_observation_counts": [
-              700
-            ],
-            "metrics": null,
-            "observation_counts": [
-              0
-            ],
-            "suppressed_reason": "method exposes no model-core boundary"
-          },
-          "model_core_metrics": null,
-          "nodes": [
-            "n190"
-          ],
-          "report_table": "CPU latency, one physical core",
-          "scopes": [
-            "predicate_encoding_and_estimation"
-          ],
-          "seed_count": 1,
-          "timing_directories": [
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000/seed_0/selected_median_step18000_verified-8fb59399fb61d7cc7b88aa57ede2dd3a3f087193817837159ad059cc7ab6cf83/timing/cpu_1core/20261110T094646Z-534e1a7eaf1dabb9"
-          ]
-        },
-        "gpu_single_query": {
-          "available": true,
-          "config_drift": [],
-          "cpu_models": [
-            "AMD EPYC 7313 16-Core Processor"
-          ],
-          "declared_hardware": [
-            {
-              "cpu_model": "AMD EPYC 7313 16-Core Processor",
-              "gpu_name": "NVIDIA L40S"
-            }
-          ],
-          "estimate_consistency": [
-            {
-              "max_relative_difference": 5.087386886918086e-06,
-              "mode": "deterministic",
-              "passed": true,
-              "seed": 0
-            }
-          ],
-          "gpu_names": [
-            "NVIDIA L40S"
-          ],
-          "guard_warning_count": 2,
-          "hardware_consistent": true,
-          "hardware_declared": true,
-          "metrics": {
-            "mean_ms": {
-              "mean": 17.82439020063196,
-              "std": 0.0
-            },
-            "p50_ms": {
-              "mean": 15.921816229820251,
-              "std": 0.0
-            },
-            "p95_ms": {
-              "mean": 25.982186011970043,
-              "std": 0.0
-            },
-            "p99_ms": {
-              "mean": 30.30357200652361,
-              "std": 0.0
-            },
-            "throughput_queries_per_second": {
-              "mean": 56.102901066682506,
-              "std": 0.0
-            }
-          },
-          "model_core": {
-            "complete": false,
-            "coverage_fraction_mean": 0.0,
-            "coverage_fraction_min": 0.0,
-            "exposed": false,
-            "latency_observation_counts": [
-              700
-            ],
-            "metrics": null,
-            "observation_counts": [
-              0
-            ],
-            "suppressed_reason": "method exposes no model-core boundary"
-          },
-          "model_core_metrics": null,
-          "nodes": [
-            "gpu001"
-          ],
-          "report_table": "GPU latency, one GPU with four pinned support cores",
-          "scopes": [
-            "predicate_encoding_and_estimation"
-          ],
-          "seed_count": 1,
-          "timing_directories": [
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000/seed_0/selected_median_step18000_verified-8fb59399fb61d7cc7b88aa57ede2dd3a3f087193817837159ad059cc7ab6cf83/timing/gpu_single_query/20261110T094133Z-e6ee1f8ee2206e26"
-          ]
-        }
-      },
-      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
-      "timing.cpu_1core.gpu_names": "",
-      "timing.cpu_1core.hardware_consistent": true,
-      "timing.cpu_1core.hardware_status": "consistent",
-      "timing.cpu_1core.mean_ms.mean": 9.99592888069206,
-      "timing.cpu_1core.mean_ms.std": 0.0,
-      "timing.cpu_1core.p50_ms.mean": 8.138712495565414,
-      "timing.cpu_1core.p50_ms.std": 0.0,
-      "timing.cpu_1core.p95_ms.mean": 17.923686039284803,
-      "timing.cpu_1core.p95_ms.std": 0.0,
-      "timing.cpu_1core.p99_ms.mean": 22.493844248820096,
-      "timing.cpu_1core.p99_ms.std": 0.0,
-      "timing.cpu_1core.throughput_queries_per_second.mean": 100.04072777384204,
-      "timing.cpu_1core.throughput_queries_per_second.std": 0.0,
-      "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
-      "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
-      "timing.gpu_single_query.hardware_consistent": true,
-      "timing.gpu_single_query.hardware_status": "consistent",
-      "timing.gpu_single_query.mean_ms.mean": 17.82439020063196,
-      "timing.gpu_single_query.mean_ms.std": 0.0,
-      "timing.gpu_single_query.p50_ms.mean": 15.921816229820251,
-      "timing.gpu_single_query.p50_ms.std": 0.0,
-      "timing.gpu_single_query.p95_ms.mean": 25.982186011970043,
-      "timing.gpu_single_query.p95_ms.std": 0.0,
-      "timing.gpu_single_query.p99_ms.mean": 30.30357200652361,
-      "timing.gpu_single_query.p99_ms.std": 0.0,
-      "timing.gpu_single_query.throughput_queries_per_second.mean": 56.102901066682506,
-      "timing.gpu_single_query.throughput_queries_per_second.std": 0.0,
+      "standardized_timing": {},
       "true_zero_matching_count.mean": 0.0,
       "true_zero_matching_count.std": 0.0,
-      "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_18000",
+      "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code",
       "workload": "job_light",
       "zero_estimate_count.mean": 0.0,
       "zero_estimate_count.std": 0.0
     },
     {
-      "actual_hardware": "NVIDIA L40S",
+      "actual_hardware": "AMD EPYC 7313 16-Core Processor",
       "coverage_complete_all_seeds": true,
       "coverage_fraction.mean": 1.0,
       "coverage_fraction.std": 0.0,
-      "display_name": "Own model best smoothed-median checkpoint step 40,000",
-      "estimate_lt_0_01_count.mean": 42.0,
+      "display_name": "Own model rare-auxiliary checkpoint step 11,000 (corrected model code)",
+      "estimate_lt_0_01_count.mean": 0.0,
       "estimate_lt_0_01_count.std": 0.0,
-      "estimate_lt_0_1_count.mean": 75.0,
+      "estimate_lt_0_1_count.mean": 0.0,
       "estimate_lt_0_1_count.std": 0.0,
-      "estimate_lt_1_count.mean": 110.0,
-      "estimate_lt_1_count.std": 0.0,
+      "estimate_lt_1_count.mean": 1.6666666666666667,
+      "estimate_lt_1_count.std": 0.5773502691896257,
+      "evaluate_stage_device": "cpu",
+      "evaluate_stage_inference.mean_ms.mean": 10.082017133633295,
+      "evaluate_stage_inference.mean_ms.std": 0.054038771947099176,
+      "evaluate_stage_inference.p50_ms.mean": 8.206582317749659,
+      "evaluate_stage_inference.p50_ms.std": 0.03227726998181395,
+      "evaluate_stage_inference.p95_ms.mean": 18.181139323860407,
+      "evaluate_stage_inference.p95_ms.std": 0.16754185857986267,
+      "evaluate_stage_inference.p99_ms.mean": 22.657324721415833,
+      "evaluate_stage_inference.p99_ms.std": 0.32333623664449274,
+      "evaluate_stage_inference.throughput_queries_per_second.mean": 99.18839643657934,
+      "evaluate_stage_inference.throughput_queries_per_second.std": 0.5305185269169181,
       "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 38.21914220415056,
-      "inference.mean_ms.std": 0.0,
-      "inference.p50_ms.mean": 41.44641105085611,
-      "inference.p50_ms.std": 0.0,
-      "inference.p95_ms.mean": 56.49880478158593,
-      "inference.p95_ms.std": 0.0,
-      "inference.p99_ms.mean": 68.05748336017133,
-      "inference.p99_ms.std": 0.0,
-      "inference.throughput_queries_per_second.mean": 26.164899114125095,
-      "inference.throughput_queries_per_second.std": 0.0,
-      "inference_device": "cuda",
+      "inference.mean_ms.mean": 10.842390946289967,
+      "inference.mean_ms.std": 0.20361217641175686,
+      "inference.p50_ms.mean": 8.89132753945887,
+      "inference.p50_ms.std": 0.14461214534270997,
+      "inference.p95_ms.mean": 19.24222126447906,
+      "inference.p95_ms.std": 0.2726888676409181,
+      "inference.p99_ms.mean": 23.747751554474235,
+      "inference.p99_ms.std": 0.4942071502358135,
+      "inference.throughput_queries_per_second.mean": 92.25204233321061,
+      "inference.throughput_queries_per_second.std": 1.714357062296224,
+      "inference_device": "cpu",
       "inference_profiles": {
-        "cuda": {
+        "cpu": {
           "device_names": [
-            "NVIDIA L40S"
+            "CPU"
           ],
           "metrics": {
             "mean_ms": {
-              "mean": 38.21914220415056,
-              "std": 0.0
+              "mean": 10.082017133633295,
+              "std": 0.054038771947099176
             },
             "p50_ms": {
-              "mean": 41.44641105085611,
-              "std": 0.0
+              "mean": 8.206582317749659,
+              "std": 0.03227726998181395
             },
             "p95_ms": {
-              "mean": 56.49880478158593,
-              "std": 0.0
+              "mean": 18.181139323860407,
+              "std": 0.16754185857986267
             },
             "p99_ms": {
-              "mean": 68.05748336017133,
-              "std": 0.0
+              "mean": 22.657324721415833,
+              "std": 0.32333623664449274
             },
             "throughput_queries_per_second": {
-              "mean": 26.164899114125095,
-              "std": 0.0
+              "mean": 99.18839643657934,
+              "std": 0.5305185269169181
             }
           }
         }
       },
-      "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 38.21914220415056, \"std\": 0.0}, \"p50_ms\": {\"mean\": 41.44641105085611, \"std\": 0.0}, \"p95_ms\": {\"mean\": 56.49880478158593, \"std\": 0.0}, \"p99_ms\": {\"mean\": 68.05748336017133, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 26.164899114125095, \"std\": 0.0}}}}",
+      "inference_profiles_json": "{\"cpu\": {\"device_names\": [\"CPU\"], \"metrics\": {\"mean_ms\": {\"mean\": 10.082017133633295, \"std\": 0.054038771947099176}, \"p50_ms\": {\"mean\": 8.206582317749659, \"std\": 0.03227726998181395}, \"p95_ms\": {\"mean\": 18.181139323860407, \"std\": 0.16754185857986267}, \"p99_ms\": {\"mean\": 22.657324721415833, \"std\": 0.32333623664449274}, \"throughput_queries_per_second\": {\"mean\": 99.18839643657934, \"std\": 0.5305185269169181}}}}",
       "method_id": "own_model",
+      "primary_timing_profile": "cpu_1core",
       "protocol": "native",
       "published_reference_hardware": "Actual cluster CPU and NVIDIA L40S are reported",
-      "raw_q_error.max.mean": 955475010.5816927,
-      "raw_q_error.max.std": 0.0,
-      "raw_q_error.p50.mean": 1.767308922014855,
-      "raw_q_error.p50.std": 0.0,
-      "raw_q_error.p90.mean": 252.22490586247974,
-      "raw_q_error.p90.std": 0.0,
-      "raw_q_error.p95.mean": 1747.558118078455,
-      "raw_q_error.p95.std": 0.0,
-      "raw_q_error.p99.mean": 277690.63506257645,
-      "raw_q_error.p99.std": 0.0,
-      "raw_q_error_true_positive.max.mean": 955475010.5816927,
-      "raw_q_error_true_positive.max.std": 0.0,
-      "raw_q_error_true_positive.p50.mean": 1.767308922014855,
-      "raw_q_error_true_positive.p50.std": 0.0,
-      "raw_q_error_true_positive.p90.mean": 252.22490586247974,
-      "raw_q_error_true_positive.p90.std": 0.0,
-      "raw_q_error_true_positive.p95.mean": 1747.558118078455,
-      "raw_q_error_true_positive.p95.std": 0.0,
-      "raw_q_error_true_positive.p99.mean": 277690.63506257645,
-      "raw_q_error_true_positive.p99.std": 0.0,
-      "seed_count": 1,
-      "smoothed_q_error.max.mean": 8169.0,
-      "smoothed_q_error.max.std": 0.0,
-      "smoothed_q_error.p50.mean": 1.709952146434973,
-      "smoothed_q_error.p50.std": 0.0,
-      "smoothed_q_error.p90.mean": 36.277375778927,
-      "smoothed_q_error.p90.std": 0.0,
-      "smoothed_q_error.p95.mean": 177.93005541766303,
-      "smoothed_q_error.p95.std": 0.0,
-      "smoothed_q_error.p99.mean": 1746.5703223745652,
-      "smoothed_q_error.p99.std": 0.0,
+      "raw_q_error.max.mean": 48.51716016435523,
+      "raw_q_error.max.std": 22.318667968945903,
+      "raw_q_error.p50.mean": 1.5792769232465458,
+      "raw_q_error.p50.std": 0.11157980085397272,
+      "raw_q_error.p90.mean": 5.701276946379342,
+      "raw_q_error.p90.std": 1.974547346870981,
+      "raw_q_error.p95.mean": 10.712902547890735,
+      "raw_q_error.p95.std": 4.745837087400699,
+      "raw_q_error.p99.mean": 39.52864961970582,
+      "raw_q_error.p99.std": 18.882316946448373,
+      "raw_q_error_true_positive.max.mean": 48.51716016435523,
+      "raw_q_error_true_positive.max.std": 22.318667968945903,
+      "raw_q_error_true_positive.p50.mean": 1.5792769232465458,
+      "raw_q_error_true_positive.p50.std": 0.11157980085397272,
+      "raw_q_error_true_positive.p90.mean": 5.701276946379342,
+      "raw_q_error_true_positive.p90.std": 1.974547346870981,
+      "raw_q_error_true_positive.p95.mean": 10.712902547890735,
+      "raw_q_error_true_positive.p95.std": 4.745837087400699,
+      "raw_q_error_true_positive.p99.mean": 39.52864961970582,
+      "raw_q_error_true_positive.p99.std": 18.882316946448373,
+      "seed_count": 3,
+      "smoothed_q_error.max.mean": 30.706035627952016,
+      "smoothed_q_error.max.std": 21.743572841670876,
+      "smoothed_q_error.p50.mean": 1.5792769232465458,
+      "smoothed_q_error.p50.std": 0.11157980085397272,
+      "smoothed_q_error.p90.mean": 5.585643636029904,
+      "smoothed_q_error.p90.std": 1.7804237349229008,
+      "smoothed_q_error.p95.mean": 9.925327592575014,
+      "smoothed_q_error.p95.std": 3.7782717411620705,
+      "smoothed_q_error.p99.mean": 22.040988741042387,
+      "smoothed_q_error.p99.std": 13.108241365856896,
       "smoothed_q_error_true_zero.max.mean": null,
       "smoothed_q_error_true_zero.max.std": null,
       "smoothed_q_error_true_zero.p50.mean": null,
@@ -5681,10 +5474,22 @@
           ],
           "estimate_consistency": [
             {
-              "max_relative_difference": 6.179664163307476e-06,
+              "max_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
+            },
+            {
+              "max_relative_difference": 0.0,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 1
+            },
+            {
+              "max_relative_difference": 0.0,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 2
             }
           ],
           "gpu_names": [],
@@ -5693,24 +5498,24 @@
           "hardware_declared": true,
           "metrics": {
             "mean_ms": {
-              "mean": 87.58098231619223,
-              "std": 0.0
+              "mean": 10.842390946289967,
+              "std": 0.20361217641175686
             },
             "p50_ms": {
-              "mean": 105.92950833961368,
-              "std": 0.0
+              "mean": 8.89132753945887,
+              "std": 0.14461214534270997
             },
             "p95_ms": {
-              "mean": 158.91282302327454,
-              "std": 0.0
+              "mean": 19.24222126447906,
+              "std": 0.2726888676409181
             },
             "p99_ms": {
-              "mean": 236.89961941912776,
-              "std": 0.0
+              "mean": 23.747751554474235,
+              "std": 0.4942071502358135
             },
             "throughput_queries_per_second": {
-              "mean": 11.418003926808172,
-              "std": 0.0
+              "mean": 92.25204233321061,
+              "std": 1.714357062296224
             }
           },
           "model_core": {
@@ -5719,27 +5524,273 @@
             "coverage_fraction_min": 0.0,
             "exposed": false,
             "latency_observation_counts": [
-              10000
+              700,
+              700,
+              700
             ],
             "metrics": null,
             "observation_counts": [
+              0,
+              0,
               0
             ],
             "suppressed_reason": "method exposes no model-core boundary"
           },
           "model_core_metrics": null,
           "nodes": [
-            "n186"
+            "n230"
           ],
           "report_table": "CPU latency, one physical core",
           "scopes": [
             "predicate_encoding_and_estimation"
           ],
-          "seed_count": 1,
+          "seed_count": 3,
           "timing_directories": [
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000/seed_0/selected_full_median_step40000-ece0446d7156c8f424b91538e50ad96edd979c306a0fee5ba5b788d16767f23b/timing/cpu_1core/20261110T100949Z-827bba746246a888"
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_0/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc/timing/cpu_1core/20261110T151334Z-4920a02d35e9bcd9",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_1/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc/timing/cpu_1core/20261110T151350Z-4920a02d35e9bcd9",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_2/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc/timing/cpu_1core/20261110T151406Z-4920a02d35e9bcd9"
           ]
         },
+        "gpu_single_query": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": "NVIDIA L40S"
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "max_relative_difference": 2.872414394620825e-06,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 0
+            },
+            {
+              "max_relative_difference": 3.047655002413883e-06,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 1
+            },
+            {
+              "max_relative_difference": 2.989501162891902e-06,
+              "mode": "deterministic",
+              "passed": true,
+              "seed": 2
+            }
+          ],
+          "gpu_names": [
+            "NVIDIA L40S"
+          ],
+          "guard_warning_count": 6,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 18.403834891283797,
+              "std": 0.3086225034827443
+            },
+            "p50_ms": {
+              "mean": 16.498450189828873,
+              "std": 0.32095682199957115
+            },
+            "p95_ms": {
+              "mean": 26.585457225640614,
+              "std": 0.3137353556981894
+            },
+            "p99_ms": {
+              "mean": 30.897393611570198,
+              "std": 0.22778041705111599
+            },
+            "throughput_queries_per_second": {
+              "mean": 54.34678371410144,
+              "std": 0.9197419689631536
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              700,
+              700,
+              700
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0,
+              0,
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "gpu001"
+          ],
+          "report_table": "GPU latency, one GPU with four pinned support cores",
+          "scopes": [
+            "predicate_encoding_and_estimation"
+          ],
+          "seed_count": 3,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_0/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc/timing/gpu_single_query/20261110T151334Z-ac038b5a05453659",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_1/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc/timing/gpu_single_query/20261110T151356Z-ac038b5a05453659",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_2/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc/timing/gpu_single_query/20261110T151419Z-ac038b5a05453659"
+          ]
+        }
+      },
+      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.cpu_1core.gpu_names": "",
+      "timing.cpu_1core.hardware_consistent": true,
+      "timing.cpu_1core.hardware_status": "consistent",
+      "timing.cpu_1core.mean_ms.mean": 10.842390946289967,
+      "timing.cpu_1core.mean_ms.std": 0.20361217641175686,
+      "timing.cpu_1core.p50_ms.mean": 8.89132753945887,
+      "timing.cpu_1core.p50_ms.std": 0.14461214534270997,
+      "timing.cpu_1core.p95_ms.mean": 19.24222126447906,
+      "timing.cpu_1core.p95_ms.std": 0.2726888676409181,
+      "timing.cpu_1core.p99_ms.mean": 23.747751554474235,
+      "timing.cpu_1core.p99_ms.std": 0.4942071502358135,
+      "timing.cpu_1core.throughput_queries_per_second.mean": 92.25204233321061,
+      "timing.cpu_1core.throughput_queries_per_second.std": 1.714357062296224,
+      "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
+      "timing.gpu_single_query.hardware_consistent": true,
+      "timing.gpu_single_query.hardware_status": "consistent",
+      "timing.gpu_single_query.mean_ms.mean": 18.403834891283797,
+      "timing.gpu_single_query.mean_ms.std": 0.3086225034827443,
+      "timing.gpu_single_query.p50_ms.mean": 16.498450189828873,
+      "timing.gpu_single_query.p50_ms.std": 0.32095682199957115,
+      "timing.gpu_single_query.p95_ms.mean": 26.585457225640614,
+      "timing.gpu_single_query.p95_ms.std": 0.3137353556981894,
+      "timing.gpu_single_query.p99_ms.mean": 30.897393611570198,
+      "timing.gpu_single_query.p99_ms.std": 0.22778041705111599,
+      "timing.gpu_single_query.throughput_queries_per_second.mean": 54.34678371410144,
+      "timing.gpu_single_query.throughput_queries_per_second.std": 0.9197419689631536,
+      "true_zero_matching_count.mean": 0.0,
+      "true_zero_matching_count.std": 0.0,
+      "variant_id": "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code",
+      "workload": "job_light",
+      "zero_estimate_count.mean": 0.0,
+      "zero_estimate_count.std": 0.0
+    },
+    {
+      "actual_hardware": "AMD EPYC 7313 16-Core Processor, NVIDIA L40S",
+      "coverage_complete_all_seeds": true,
+      "coverage_fraction.mean": 1.0,
+      "coverage_fraction.std": 0.0,
+      "display_name": "Own model best smoothed-median checkpoint step 40,000 (corrected model code)",
+      "estimate_lt_0_01_count.mean": 43.0,
+      "estimate_lt_0_01_count.std": 0.0,
+      "estimate_lt_0_1_count.mean": 76.0,
+      "estimate_lt_0_1_count.std": 0.0,
+      "estimate_lt_1_count.mean": 111.0,
+      "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
+      "evaluate_stage_inference.mean_ms.mean": 28.260278696753083,
+      "evaluate_stage_inference.mean_ms.std": 0.0,
+      "evaluate_stage_inference.p50_ms.mean": 27.034162543714046,
+      "evaluate_stage_inference.p50_ms.std": 0.0,
+      "evaluate_stage_inference.p95_ms.mean": 36.14660818129778,
+      "evaluate_stage_inference.p95_ms.std": 0.0,
+      "evaluate_stage_inference.p99_ms.mean": 38.557543475180864,
+      "evaluate_stage_inference.p99_ms.std": 0.0,
+      "evaluate_stage_inference.throughput_queries_per_second.mean": 35.38535520935585,
+      "evaluate_stage_inference.throughput_queries_per_second.std": 0.0,
+      "experiment_id": "joblight_phase1",
+      "inference.mean_ms.mean": 28.148682320676745,
+      "inference.mean_ms.std": 0.0,
+      "inference.p50_ms.mean": 27.015275321900845,
+      "inference.p50_ms.std": 0.0,
+      "inference.p95_ms.mean": 35.9996248036623,
+      "inference.p95_ms.std": 0.0,
+      "inference.p99_ms.mean": 38.35844257846475,
+      "inference.p99_ms.std": 0.0,
+      "inference.throughput_queries_per_second.mean": 35.52564161290937,
+      "inference.throughput_queries_per_second.std": 0.0,
+      "inference_device": "cuda",
+      "inference_profiles": {
+        "cuda": {
+          "device_names": [
+            "NVIDIA L40S"
+          ],
+          "metrics": {
+            "mean_ms": {
+              "mean": 28.260278696753083,
+              "std": 0.0
+            },
+            "p50_ms": {
+              "mean": 27.034162543714046,
+              "std": 0.0
+            },
+            "p95_ms": {
+              "mean": 36.14660818129778,
+              "std": 0.0
+            },
+            "p99_ms": {
+              "mean": 38.557543475180864,
+              "std": 0.0
+            },
+            "throughput_queries_per_second": {
+              "mean": 35.38535520935585,
+              "std": 0.0
+            }
+          }
+        }
+      },
+      "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 28.260278696753083, \"std\": 0.0}, \"p50_ms\": {\"mean\": 27.034162543714046, \"std\": 0.0}, \"p95_ms\": {\"mean\": 36.14660818129778, \"std\": 0.0}, \"p99_ms\": {\"mean\": 38.557543475180864, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 35.38535520935585, \"std\": 0.0}}}}",
+      "method_id": "own_model",
+      "primary_timing_profile": "gpu_single_query",
+      "protocol": "native",
+      "published_reference_hardware": "Actual cluster CPU and NVIDIA L40S are reported",
+      "raw_q_error.max.mean": 955475010.5816927,
+      "raw_q_error.max.std": 0.0,
+      "raw_q_error.p50.mean": 1.744025498801165,
+      "raw_q_error.p50.std": 0.0,
+      "raw_q_error.p90.mean": 212.2131694382565,
+      "raw_q_error.p90.std": 0.0,
+      "raw_q_error.p95.mean": 1747.558118078455,
+      "raw_q_error.p95.std": 0.0,
+      "raw_q_error.p99.mean": 467749.8282703571,
+      "raw_q_error.p99.std": 0.0,
+      "raw_q_error_true_positive.max.mean": 955475010.5816927,
+      "raw_q_error_true_positive.max.std": 0.0,
+      "raw_q_error_true_positive.p50.mean": 1.744025498801165,
+      "raw_q_error_true_positive.p50.std": 0.0,
+      "raw_q_error_true_positive.p90.mean": 212.2131694382565,
+      "raw_q_error_true_positive.p90.std": 0.0,
+      "raw_q_error_true_positive.p95.mean": 1747.558118078455,
+      "raw_q_error_true_positive.p95.std": 0.0,
+      "raw_q_error_true_positive.p99.mean": 467749.8282703571,
+      "raw_q_error_true_positive.p99.std": 0.0,
+      "seed_count": 1,
+      "smoothed_q_error.max.mean": 8169.0,
+      "smoothed_q_error.max.std": 0.0,
+      "smoothed_q_error.p50.mean": 1.6892926119613079,
+      "smoothed_q_error.p50.std": 0.0,
+      "smoothed_q_error.p90.mean": 32.61489706274496,
+      "smoothed_q_error.p90.std": 0.0,
+      "smoothed_q_error.p95.mean": 109.87981789309637,
+      "smoothed_q_error.p95.std": 0.0,
+      "smoothed_q_error.p99.mean": 1497.8411958015229,
+      "smoothed_q_error.p99.std": 0.0,
+      "smoothed_q_error_true_zero.max.mean": null,
+      "smoothed_q_error_true_zero.max.std": null,
+      "smoothed_q_error_true_zero.p50.mean": null,
+      "smoothed_q_error_true_zero.p50.std": null,
+      "smoothed_q_error_true_zero.p90.mean": null,
+      "smoothed_q_error_true_zero.p90.std": null,
+      "smoothed_q_error_true_zero.p95.mean": null,
+      "smoothed_q_error_true_zero.p95.std": null,
+      "smoothed_q_error_true_zero.p99.mean": null,
+      "smoothed_q_error_true_zero.p99.std": null,
+      "standardized_timing": {
         "gpu_single_query": {
           "available": true,
           "config_drift": [],
@@ -5768,23 +5819,23 @@
           "hardware_declared": true,
           "metrics": {
             "mean_ms": {
-              "mean": 37.840782795101404,
+              "mean": 28.148682320676745,
               "std": 0.0
             },
             "p50_ms": {
-              "mean": 41.00694414228201,
+              "mean": 27.015275321900845,
               "std": 0.0
             },
             "p95_ms": {
-              "mean": 56.09500026330352,
+              "mean": 35.9996248036623,
               "std": 0.0
             },
             "p99_ms": {
-              "mean": 67.65927081927659,
+              "mean": 38.35844257846475,
               "std": 0.0
             },
             "throughput_queries_per_second": {
-              "mean": 26.426514626157598,
+              "mean": 35.52564161290937,
               "std": 0.0
             }
           },
@@ -5812,41 +5863,27 @@
           ],
           "seed_count": 1,
           "timing_directories": [
-            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000/seed_0/selected_full_median_step40000-ece0446d7156c8f424b91538e50ad96edd979c306a0fee5ba5b788d16767f23b/timing/gpu_single_query/20261110T101341Z-d78125114a3694fe"
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/seed_0/corrected_model_code_step40000-6630902353803ba2120454b1a337fd928b57fff812b92179d389d1fb38e45750/timing/gpu_single_query/20261110T140721Z-d78125114a3694fe"
           ]
         }
       },
-      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
-      "timing.cpu_1core.gpu_names": "",
-      "timing.cpu_1core.hardware_consistent": true,
-      "timing.cpu_1core.hardware_status": "consistent",
-      "timing.cpu_1core.mean_ms.mean": 87.58098231619223,
-      "timing.cpu_1core.mean_ms.std": 0.0,
-      "timing.cpu_1core.p50_ms.mean": 105.92950833961368,
-      "timing.cpu_1core.p50_ms.std": 0.0,
-      "timing.cpu_1core.p95_ms.mean": 158.91282302327454,
-      "timing.cpu_1core.p95_ms.std": 0.0,
-      "timing.cpu_1core.p99_ms.mean": 236.89961941912776,
-      "timing.cpu_1core.p99_ms.std": 0.0,
-      "timing.cpu_1core.throughput_queries_per_second.mean": 11.418003926808172,
-      "timing.cpu_1core.throughput_queries_per_second.std": 0.0,
       "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
       "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
       "timing.gpu_single_query.hardware_consistent": true,
       "timing.gpu_single_query.hardware_status": "consistent",
-      "timing.gpu_single_query.mean_ms.mean": 37.840782795101404,
+      "timing.gpu_single_query.mean_ms.mean": 28.148682320676745,
       "timing.gpu_single_query.mean_ms.std": 0.0,
-      "timing.gpu_single_query.p50_ms.mean": 41.00694414228201,
+      "timing.gpu_single_query.p50_ms.mean": 27.015275321900845,
       "timing.gpu_single_query.p50_ms.std": 0.0,
-      "timing.gpu_single_query.p95_ms.mean": 56.09500026330352,
+      "timing.gpu_single_query.p95_ms.mean": 35.9996248036623,
       "timing.gpu_single_query.p95_ms.std": 0.0,
-      "timing.gpu_single_query.p99_ms.mean": 67.65927081927659,
+      "timing.gpu_single_query.p99_ms.mean": 38.35844257846475,
       "timing.gpu_single_query.p99_ms.std": 0.0,
-      "timing.gpu_single_query.throughput_queries_per_second.mean": 26.426514626157598,
+      "timing.gpu_single_query.throughput_queries_per_second.mean": 35.52564161290937,
       "timing.gpu_single_query.throughput_queries_per_second.std": 0.0,
       "true_zero_matching_count.mean": 0.0,
       "true_zero_matching_count.std": 0.0,
-      "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_40000",
+      "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code",
       "workload": "job_light_ranges",
       "zero_estimate_count.mean": 0.0,
       "zero_estimate_count.std": 0.0
@@ -5856,23 +5893,34 @@
       "coverage_complete_all_seeds": true,
       "coverage_fraction.mean": 1.0,
       "coverage_fraction.std": 0.0,
-      "display_name": "Own model best smoothed-p99 checkpoint step 19,500",
-      "estimate_lt_0_01_count.mean": 39.0,
+      "display_name": "Own model best smoothed-p99 checkpoint step 19,500 (corrected model code)",
+      "estimate_lt_0_01_count.mean": 40.0,
       "estimate_lt_0_01_count.std": 0.0,
-      "estimate_lt_0_1_count.mean": 73.0,
+      "estimate_lt_0_1_count.mean": 75.0,
       "estimate_lt_0_1_count.std": 0.0,
-      "estimate_lt_1_count.mean": 112.0,
+      "estimate_lt_1_count.mean": 114.0,
       "estimate_lt_1_count.std": 0.0,
+      "evaluate_stage_device": "cuda",
+      "evaluate_stage_inference.mean_ms.mean": 28.66358287204057,
+      "evaluate_stage_inference.mean_ms.std": 0.0,
+      "evaluate_stage_inference.p50_ms.mean": 27.504232712090015,
+      "evaluate_stage_inference.p50_ms.std": 0.0,
+      "evaluate_stage_inference.p95_ms.mean": 36.59288873896003,
+      "evaluate_stage_inference.p95_ms.std": 0.0,
+      "evaluate_stage_inference.p99_ms.mean": 39.03612706810236,
+      "evaluate_stage_inference.p99_ms.std": 0.0,
+      "evaluate_stage_inference.throughput_queries_per_second.mean": 34.88747392341639,
+      "evaluate_stage_inference.throughput_queries_per_second.std": 0.0,
       "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 37.99583247397095,
+      "inference.mean_ms.mean": 28.66358287204057,
       "inference.mean_ms.std": 0.0,
-      "inference.p50_ms.mean": 41.23330768197775,
+      "inference.p50_ms.mean": 27.504232712090015,
       "inference.p50_ms.std": 0.0,
-      "inference.p95_ms.mean": 56.20943922549486,
+      "inference.p95_ms.mean": 36.59288873896003,
       "inference.p95_ms.std": 0.0,
-      "inference.p99_ms.mean": 68.05677104741335,
+      "inference.p99_ms.mean": 39.03612706810236,
       "inference.p99_ms.std": 0.0,
-      "inference.throughput_queries_per_second.mean": 26.318675888600417,
+      "inference.throughput_queries_per_second.mean": 34.88747392341639,
       "inference.throughput_queries_per_second.std": 0.0,
       "inference_device": "cuda",
       "inference_profiles": {
@@ -5882,37 +5930,38 @@
           ],
           "metrics": {
             "mean_ms": {
-              "mean": 37.99583247397095,
+              "mean": 28.66358287204057,
               "std": 0.0
             },
             "p50_ms": {
-              "mean": 41.23330768197775,
+              "mean": 27.504232712090015,
               "std": 0.0
             },
             "p95_ms": {
-              "mean": 56.20943922549486,
+              "mean": 36.59288873896003,
               "std": 0.0
             },
             "p99_ms": {
-              "mean": 68.05677104741335,
+              "mean": 39.03612706810236,
               "std": 0.0
             },
             "throughput_queries_per_second": {
-              "mean": 26.318675888600417,
+              "mean": 34.88747392341639,
               "std": 0.0
             }
           }
         }
       },
-      "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 37.99583247397095, \"std\": 0.0}, \"p50_ms\": {\"mean\": 41.23330768197775, \"std\": 0.0}, \"p95_ms\": {\"mean\": 56.20943922549486, \"std\": 0.0}, \"p99_ms\": {\"mean\": 68.05677104741335, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 26.318675888600417, \"std\": 0.0}}}}",
+      "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 28.66358287204057, \"std\": 0.0}, \"p50_ms\": {\"mean\": 27.504232712090015, \"std\": 0.0}, \"p95_ms\": {\"mean\": 36.59288873896003, \"std\": 0.0}, \"p99_ms\": {\"mean\": 39.03612706810236, \"std\": 0.0}, \"throughput_queries_per_second\": {\"mean\": 34.88747392341639, \"std\": 0.0}}}}",
       "method_id": "own_model",
+      "primary_timing_profile": "gpu_single_query",
       "protocol": "native",
       "published_reference_hardware": "Actual cluster CPU and NVIDIA L40S are reported",
       "raw_q_error.max.mean": 6722508.379321177,
       "raw_q_error.max.std": 0.0,
-      "raw_q_error.p50.mean": 1.8943299360361547,
+      "raw_q_error.p50.mean": 1.8818638426024188,
       "raw_q_error.p50.std": 0.0,
-      "raw_q_error.p90.mean": 178.72591980009057,
+      "raw_q_error.p90.mean": 143.45113167553237,
       "raw_q_error.p90.std": 0.0,
       "raw_q_error.p95.mean": 2169.448490552341,
       "raw_q_error.p95.std": 0.0,
@@ -5920,9 +5969,9 @@
       "raw_q_error.p99.std": 0.0,
       "raw_q_error_true_positive.max.mean": 6722508.379321177,
       "raw_q_error_true_positive.max.std": 0.0,
-      "raw_q_error_true_positive.p50.mean": 1.8943299360361547,
+      "raw_q_error_true_positive.p50.mean": 1.8818638426024188,
       "raw_q_error_true_positive.p50.std": 0.0,
-      "raw_q_error_true_positive.p90.mean": 178.72591980009057,
+      "raw_q_error_true_positive.p90.mean": 143.45113167553237,
       "raw_q_error_true_positive.p90.std": 0.0,
       "raw_q_error_true_positive.p95.mean": 2169.448490552341,
       "raw_q_error_true_positive.p95.std": 0.0,
@@ -5931,13 +5980,13 @@
       "seed_count": 1,
       "smoothed_q_error.max.mean": 22644.0,
       "smoothed_q_error.max.std": 0.0,
-      "smoothed_q_error.p50.mean": 1.821403318772349,
+      "smoothed_q_error.p50.mean": 1.7914138676641893,
       "smoothed_q_error.p50.std": 0.0,
-      "smoothed_q_error.p90.mean": 37.87615184531865,
+      "smoothed_q_error.p90.mean": 33.23261451270094,
       "smoothed_q_error.p90.std": 0.0,
-      "smoothed_q_error.p95.mean": 141.36632915842858,
+      "smoothed_q_error.p95.mean": 95.77880215641666,
       "smoothed_q_error.p95.std": 0.0,
-      "smoothed_q_error.p99.mean": 887.0468791750791,
+      "smoothed_q_error.p99.mean": 877.0998036302034,
       "smoothed_q_error.p99.std": 0.0,
       "smoothed_q_error_true_zero.max.mean": null,
       "smoothed_q_error_true_zero.max.std": null,
@@ -5952,7 +6001,7 @@
       "standardized_timing": {},
       "true_zero_matching_count.mean": 0.0,
       "true_zero_matching_count.std": 0.0,
-      "variant_id": "duet_neurocard_distjoin_rare_aux_best_p99_step_19500",
+      "variant_id": "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
       "workload": "job_light_ranges",
       "zero_estimate_count.mean": 0.0,
       "zero_estimate_count.std": 0.0

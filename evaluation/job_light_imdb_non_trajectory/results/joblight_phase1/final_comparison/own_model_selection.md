@@ -21,17 +21,6 @@ The JOB-light B checkpoint is byte-identical to `own_model_rare_aux_40k/seed_0/c
 
 JOB-light A (step 18,000) is a standalone seed-0 training run, so no same-step three-seed aggregate exists. JOB-light-ranges A (step 40,000, seed 0) is likewise standalone. JOB-light-ranges B (step 19,500, seed 1) has matching seed checkpoints, but the available three-seed aggregate uses per-seed best checkpoints rather than a common step 19,500 and is therefore not substituted for the selected-checkpoint result.
 
-## Build-Metric Provenance
-
-The LaTeX model-size tables use an inference-only `torch.save(model_state_dict)` temporary file, measured on the cluster and recorded in the selected evaluation `build_metrics.json` files. The tables do not use full checkpoint sizes. The trainable parameter counts remain `4,205,152` for JOB-light and `5,346,880` for JOB-light-ranges; the larger serialized state dictionaries also include fixed autoregressive mask buffers. Their raw tensor payloads are `7,594,592 * 4 = 30,378,368` bytes and `9,524,800 * 4 = 38,099,200` bytes, respectively, consistent with the measured files.
-
-| Workload | Pick | Inference-only state_dict MB | Full checkpoint MB (kept out of table) | Training time reported | Source |
-|---|---|---:|---:|---:|---|
-| job_light | A: best median, step 18,000 | 30.450498 | 65.865638 | 32,089.072 s | `checkpoint_step_18000.pt` mtime minus (`training_summary.json` mtime minus `training_seconds`) |
-| job_light | B: best p99, step 11,000 | 30.450498 | 65.865638 / 65.865702 / 65.865702 | 19,526.291 ± 174.438 s | Same mtime formula for the three `own_model_rare_aux_40k` seed checkpoints and summaries |
-| job_light_ranges | A: best median, step 40,000 | 38.193074 | 82.266150 | 60,528.093 s | Final checkpoint: `training_summary.json.training_seconds` |
-| job_light_ranges | B: best p99, step 19,500 | 38.193074 | 82.264806 | 40,973.870 s | `checkpoint_step_19500.pt` mtime minus (`training_summary.json` mtime minus `training_seconds`) |
-
 ## Complete Candidate Inventory
 
 Eligible candidates: **67** JOB-light and **16** JOB-light-ranges.

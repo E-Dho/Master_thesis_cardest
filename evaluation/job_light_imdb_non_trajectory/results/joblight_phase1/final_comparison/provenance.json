@@ -1,0 +1,777 @@
+{
+  "aggregates": [
+    {
+      "accuracy_config_hash": "c7966dc3f40e703222d0d6d54c1f9d0ac0ea732857e1da10e218d361cd2b3dfc",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/postgresql/pg16_10_default_stats100/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/postgres_16_10.yaml",
+      "method_id": "postgresql",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "c7966dc3f40e703222d0d6d54c1f9d0ac0ea732857e1da10e218d361cd2b3dfc",
+              "completed_at_utc": "2026-09-25T09:02:03.813238+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/postgresql/pg16_10_default_stats100/seed_0/20260918T095246Z-20ee640077a8",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/postgresql/pg16_10_default_stats100/seed_0/20260918T095246Z-20ee640077a8",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/postgresql/pg16_10_default_stats100/seed_0/20260918T095246Z-20ee640077a8"
+        }
+      ],
+      "variant_id": "pg16_10_default_stats100"
+    },
+    {
+      "accuracy_config_hash": "cbe259586c4daaca15357c0714248cf0aa05813448db2a57a2c559a00405b65b",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/mscn_job_light.yaml",
+      "method_id": "mscn",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "cbe259586c4daaca15357c0714248cf0aa05813448db2a57a2c559a00405b65b",
+              "completed_at_utc": "2026-09-29T07:27:49.018368+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_0/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_0/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_0/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "cbe259586c4daaca15357c0714248cf0aa05813448db2a57a2c559a00405b65b",
+              "completed_at_utc": "2026-09-29T07:31:47.245041+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_1/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_1/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_1/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "cbe259586c4daaca15357c0714248cf0aa05813448db2a57a2c559a00405b65b",
+              "completed_at_utc": "2026-09-29T07:34:51.875048+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_2/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_2/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/published_job_light/seed_2/production-20260929-a-41c688c0c7dba0c221adb2fbfa086f96717a5ee846d51efb2a2b370374600cc3"
+        }
+      ],
+      "variant_id": "published_job_light"
+    },
+    {
+      "accuracy_config_hash": "7f5aae441f1e01763b67d971c73cfcac2c5bf1e9e43d5a9a85e16274fa3519d1",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/mscn_job_light_ranges.yaml",
+      "method_id": "mscn",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "7f5aae441f1e01763b67d971c73cfcac2c5bf1e9e43d5a9a85e16274fa3519d1",
+              "completed_at_utc": "2026-09-29T07:35:17.130725+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_0/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_0/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_0/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "7f5aae441f1e01763b67d971c73cfcac2c5bf1e9e43d5a9a85e16274fa3519d1",
+              "completed_at_utc": "2026-09-29T07:36:12.892708+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_1/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_1/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_1/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "7f5aae441f1e01763b67d971c73cfcac2c5bf1e9e43d5a9a85e16274fa3519d1",
+              "completed_at_utc": "2026-09-29T07:38:14.481422+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_2/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_2/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/mscn/mscn_job_light_ranges_adapted/seed_2/production-20260929-a-7e18e99e76e67166db91e7372244c78463ebcfbb7bb6dfa83f02c95eb5fb01b6"
+        }
+      ],
+      "variant_id": "mscn_job_light_ranges_adapted"
+    },
+    {
+      "accuracy_config_hash": "af53bec8e7a05b0cd5568b319860a627b625a2114df3e06a86857e1f06e36c79",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/deepdb_job_light.yaml",
+      "method_id": "deepdb",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "af53bec8e7a05b0cd5568b319860a627b625a2114df3e06a86857e1f06e36c79",
+              "completed_at_utc": "2026-09-22T08:54:47.325254+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_0/real-ensemble-validation-21346954-510f720d729d3a2b4febc2c599e876990c50d1f6ee89055fdd707270640b98f2",
+              "selected": false
+            },
+            {
+              "accuracy_config_hash": "af53bec8e7a05b0cd5568b319860a627b625a2114df3e06a86857e1f06e36c79",
+              "completed_at_utc": "2026-09-29T07:51:04.358759+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_0/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_0/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_0/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "af53bec8e7a05b0cd5568b319860a627b625a2114df3e06a86857e1f06e36c79",
+              "completed_at_utc": "2026-09-29T08:23:33.111818+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_1/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_1/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_1/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "af53bec8e7a05b0cd5568b319860a627b625a2114df3e06a86857e1f06e36c79",
+              "completed_at_utc": "2026-09-29T08:54:54.878443+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_2/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_2/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_rdc_published/seed_2/production-20260929-a-08e80ee9ccdcad4d34e61b862c575f0c51a5f5ced1c3ba9aa4fdb588f7b20ea4"
+        }
+      ],
+      "variant_id": "imdb_light_rdc_published"
+    },
+    {
+      "accuracy_config_hash": "82dfc3373f8153de16c02e39803b4eaa53cb3437969eb4f2d574037ab0093d0e",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/deepdb_job_light_ranges_adapted.yaml",
+      "method_id": "deepdb",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "82dfc3373f8153de16c02e39803b4eaa53cb3437969eb4f2d574037ab0093d0e",
+              "completed_at_utc": "2026-09-25T09:06:10.301507+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_0/20260923T195113Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_0/20260923T195113Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_0/20260923T195113Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "82dfc3373f8153de16c02e39803b4eaa53cb3437969eb4f2d574037ab0093d0e",
+              "completed_at_utc": "2026-09-29T07:26:51.923164+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_1/20260923T204730Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_1/20260923T204730Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_1/20260923T204730Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "82dfc3373f8153de16c02e39803b4eaa53cb3437969eb4f2d574037ab0093d0e",
+              "completed_at_utc": "2026-09-29T07:26:41.476202+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_2/20260923T214253Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_2/20260923T214253Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/deepdb/imdb_light_ranges_adapted/seed_2/20260923T214253Z-f0af710fde1de7206abceec6a38e5095548550913d09a8105e5e1b33fb86bb1c"
+        }
+      ],
+      "variant_id": "imdb_light_ranges_adapted"
+    },
+    {
+      "accuracy_config_hash": "3dd93eeeb5efb9f6bf8c03e7eca771945fa9f08d7545d8f14f35cd3a3fa02440",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/neurocard_job_light.yaml",
+      "method_id": "neurocard",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "6a32f3d4b46572eccf014f9e17131333e7b3bf1b7f3e0db334393cd243f34ff5",
+              "completed_at_utc": "2026-09-23T13:12:59.040176+00:00",
+              "matches_config": false,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_0/20260922T082954Z-61696f16df90fa1ca48ea4894d8f79d3a80f96895948b671bb71233f3cab3f46",
+              "selected": false
+            },
+            {
+              "accuracy_config_hash": "3dd93eeeb5efb9f6bf8c03e7eca771945fa9f08d7545d8f14f35cd3a3fa02440",
+              "completed_at_utc": "2026-09-24T07:20:35.664894+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_0/gpu-full-20260924-f05f82501b564b0a51cd2c78e7fdd2ced5cec4aa3a65c05f9781ef34e307a6b7",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_0/gpu-full-20260924-f05f82501b564b0a51cd2c78e7fdd2ced5cec4aa3a65c05f9781ef34e307a6b7",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_0/gpu-full-20260924-f05f82501b564b0a51cd2c78e7fdd2ced5cec4aa3a65c05f9781ef34e307a6b7"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "3dd93eeeb5efb9f6bf8c03e7eca771945fa9f08d7545d8f14f35cd3a3fa02440",
+              "completed_at_utc": "2026-09-29T07:23:57.791908+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_1/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_1/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_1/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "3dd93eeeb5efb9f6bf8c03e7eca771945fa9f08d7545d8f14f35cd3a3fa02440",
+              "completed_at_utc": "2026-09-29T07:23:57.670961+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_2/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_2/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_8000psamples/seed_2/production-20260929-a-7ac7e5879ca0433aca6f0b5511f8300a42644a40a57d268fef1d73715322c426"
+        }
+      ],
+      "variant_id": "native_resmade_job_light_8000psamples"
+    },
+    {
+      "accuracy_config_hash": "2a85c14079e8f1bdd3c2b94182a683e3835b2f612f4b934e6b61c9a7bbc5ee25",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/neurocard_job_light_ranges.yaml",
+      "method_id": "neurocard",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "2a85c14079e8f1bdd3c2b94182a683e3835b2f612f4b934e6b61c9a7bbc5ee25",
+              "completed_at_utc": "2026-09-29T07:30:36.099151+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_0/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_0/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_0/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "2a85c14079e8f1bdd3c2b94182a683e3835b2f612f4b934e6b61c9a7bbc5ee25",
+              "completed_at_utc": "2026-09-29T07:30:35.677980+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_1/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_1/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_1/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "2a85c14079e8f1bdd3c2b94182a683e3835b2f612f4b934e6b61c9a7bbc5ee25",
+              "completed_at_utc": "2026-09-29T07:33:53.397568+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_2/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_2/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/neurocard/native_resmade_job_light_ranges_8000psamples/seed_2/production-20260929-a-030a5aa1c3421aba34741fc1e2ae6bb8ecac8d4593c7ddeee2f5ddc5803fc0d8"
+        }
+      ],
+      "variant_id": "native_resmade_job_light_ranges_8000psamples"
+    },
+    {
+      "accuracy_config_hash": "4b329beda496acb28d709a8b8a4e473acd77a18d33187f2429ff5e0d49c364f9",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/distjoin_job_light.yaml",
+      "method_id": "distjoin",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "4b329beda496acb28d709a8b8a4e473acd77a18d33187f2429ff5e0d49c364f9",
+              "completed_at_utc": "2026-09-29T08:31:26.888193+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_0/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_0/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_0/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "4b329beda496acb28d709a8b8a4e473acd77a18d33187f2429ff5e0d49c364f9",
+              "completed_at_utc": "2026-09-29T08:31:24.027170+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_1/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_1/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_1/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "4b329beda496acb28d709a8b8a4e473acd77a18d33187f2429ff5e0d49c364f9",
+              "completed_at_utc": "2026-09-29T08:31:21.780873+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_2/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_2/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_2/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa"
+        }
+      ],
+      "variant_id": "published_imdb_dynamic_sampler"
+    },
+    {
+      "accuracy_config_hash": "dcad968aa4f262c45d24497683b9071e758f96eb3ae64939e589ef243f9d65a2",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/foj_sampling_1k.yaml",
+      "method_id": "foj_sampling",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "dcad968aa4f262c45d24497683b9071e758f96eb3ae64939e589ef243f9d65a2",
+              "completed_at_utc": "2026-09-29T10:10:56.442468+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_0/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_0/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_0/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "dcad968aa4f262c45d24497683b9071e758f96eb3ae64939e589ef243f9d65a2",
+              "completed_at_utc": "2026-09-29T10:10:02.141621+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_1/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_1/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_1/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "dcad968aa4f262c45d24497683b9071e758f96eb3ae64939e589ef243f9d65a2",
+              "completed_at_utc": "2026-09-29T10:11:03.015470+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_2/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_2/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000/seed_2/production-20260929-b-a72520dafd83d697844bbdcc24f3034b43e625fb9e28313d0bd382cc9c12733e"
+        }
+      ],
+      "variant_id": "n1000"
+    },
+    {
+      "accuracy_config_hash": "3b8663e5570cf6d17aa7c0682c781d17dbc71efddea08bda68a8d61d2f242d35",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/foj_sampling_10k.yaml",
+      "method_id": "foj_sampling",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "3b8663e5570cf6d17aa7c0682c781d17dbc71efddea08bda68a8d61d2f242d35",
+              "completed_at_utc": "2026-09-29T10:03:12.763637+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_0/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_0/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_0/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "3b8663e5570cf6d17aa7c0682c781d17dbc71efddea08bda68a8d61d2f242d35",
+              "completed_at_utc": "2026-09-29T10:01:47.623242+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_1/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_1/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_1/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "3b8663e5570cf6d17aa7c0682c781d17dbc71efddea08bda68a8d61d2f242d35",
+              "completed_at_utc": "2026-09-29T10:03:13.335712+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_2/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_2/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n10000/seed_2/production-20260929-b-b4d95b8eada22af613f7fb84925df3bc5b4fe45bc136f96b3c16f5fddcf7231f"
+        }
+      ],
+      "variant_id": "n10000"
+    },
+    {
+      "accuracy_config_hash": "a751373be7489868caa6f720e8aef4f3503378bb64fe6a6222fdb7feef2114b7",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/foj_sampling_100k.yaml",
+      "method_id": "foj_sampling",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "a751373be7489868caa6f720e8aef4f3503378bb64fe6a6222fdb7feef2114b7",
+              "completed_at_utc": "2026-09-29T09:55:08.406069+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_0/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_0/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_0/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "a751373be7489868caa6f720e8aef4f3503378bb64fe6a6222fdb7feef2114b7",
+              "completed_at_utc": "2026-09-29T09:53:23.474732+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_1/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_1/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_1/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "a751373be7489868caa6f720e8aef4f3503378bb64fe6a6222fdb7feef2114b7",
+              "completed_at_utc": "2026-09-29T09:54:14.637346+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_2/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_2/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n100000/seed_2/production-20260929-b-7651141fb7950b7e8b218e3c2c0dd6881fc7583e43be7a0ca79e799d6e4bca0f"
+        }
+      ],
+      "variant_id": "n100000"
+    },
+    {
+      "accuracy_config_hash": "c595a2f5ee6146409f3dca373a213e9ce5b7c77bf3c12fe1eba1cb0fb6e26ecf",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/foj_sampling_1m.yaml",
+      "method_id": "foj_sampling",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "c595a2f5ee6146409f3dca373a213e9ce5b7c77bf3c12fe1eba1cb0fb6e26ecf",
+              "completed_at_utc": "2026-09-29T09:45:38.401775+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_0/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_0/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_0/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "c595a2f5ee6146409f3dca373a213e9ce5b7c77bf3c12fe1eba1cb0fb6e26ecf",
+              "completed_at_utc": "2026-09-29T09:40:47.577984+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_1/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_1/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_1/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "c595a2f5ee6146409f3dca373a213e9ce5b7c77bf3c12fe1eba1cb0fb6e26ecf",
+              "completed_at_utc": "2026-09-29T09:43:02.489269+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_2/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_2/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n1000000/seed_2/production-20260929-b-6c01c45e797642383ae0cc1407fc8cc019be5840cf4f1e1ff1f44bfb563ec101"
+        }
+      ],
+      "variant_id": "n1000000"
+    },
+    {
+      "accuracy_config_hash": "22417ad808722db12fad61b99883d6cd5d990bfade08540abfb135a659810bf8",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/foj_sampling_7m.yaml",
+      "method_id": "foj_sampling",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "22417ad808722db12fad61b99883d6cd5d990bfade08540abfb135a659810bf8",
+              "completed_at_utc": "2026-09-29T09:25:56.040622+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_0/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_0/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_0/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "22417ad808722db12fad61b99883d6cd5d990bfade08540abfb135a659810bf8",
+              "completed_at_utc": "2026-09-29T09:23:05.289514+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_1/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_1/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_1/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "22417ad808722db12fad61b99883d6cd5d990bfade08540abfb135a659810bf8",
+              "completed_at_utc": "2026-09-29T09:25:37.310108+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_2/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_2/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/foj_sampling/n7168000/seed_2/production-20260929-b-890eea53305fd63baa73af5fca89d78ee2cf06f0ef2b5112e4b825507fc0d46b"
+        }
+      ],
+      "variant_id": "n7168000"
+    },
+    {
+      "accuracy_config_hash": "d56ba41926f98ef1d8d6bbd70ad1b70979875f366aea448242ceac1c47055a66",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/own_model_job_light_best_median_step_18000_corrected_model_code.yaml",
+      "method_id": "own_model",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "d56ba41926f98ef1d8d6bbd70ad1b70979875f366aea448242ceac1c47055a66",
+              "completed_at_utc": "2026-11-10T13:54:59.064893+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/seed_0/corrected_model_code_step18000-f92db5a425fa2b87c1f33e3ab8db7a590957c904ad208cee200a95594084cb30",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/seed_0/corrected_model_code_step18000-f92db5a425fa2b87c1f33e3ab8db7a590957c904ad208cee200a95594084cb30",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/seed_0/corrected_model_code_step18000-f92db5a425fa2b87c1f33e3ab8db7a590957c904ad208cee200a95594084cb30"
+        }
+      ],
+      "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code"
+    },
+    {
+      "accuracy_config_hash": "4b50800abee95ece9bd4daaad424dc3c0154853caecde8996ffeabbd97383e50",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/own_model_job_light_step_11000_corrected_model_code.yaml",
+      "method_id": "own_model",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "4b50800abee95ece9bd4daaad424dc3c0154853caecde8996ffeabbd97383e50",
+              "completed_at_utc": "2026-11-10T15:12:36.735502+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_0/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_0/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_0/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "4b50800abee95ece9bd4daaad424dc3c0154853caecde8996ffeabbd97383e50",
+              "completed_at_utc": "2026-11-10T15:13:02.457685+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_1/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_1/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc",
+          "seed": 1,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_1/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc"
+        },
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "4b50800abee95ece9bd4daaad424dc3c0154853caecde8996ffeabbd97383e50",
+              "completed_at_utc": "2026-11-10T15:13:29.465561+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_2/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_2/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc",
+          "seed": 2,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code/seed_2/production_step_11000-e901282bb53c2f2bd417ffe9b9ff773db12a29f52acc03ddc79a5ab9098cc6dc"
+        }
+      ],
+      "variant_id": "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code"
+    },
+    {
+      "accuracy_config_hash": "d4f15766af8ef9a24e2e602a2750396f5927062d7b45ff14869716793e37a347",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/own_model_job_light_ranges_best_median_step_40000_corrected_model_code.yaml",
+      "method_id": "own_model",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "d4f15766af8ef9a24e2e602a2750396f5927062d7b45ff14869716793e37a347",
+              "completed_at_utc": "2026-11-10T14:01:39.367749+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/seed_0/corrected_model_code_step40000-6630902353803ba2120454b1a337fd928b57fff812b92179d389d1fb38e45750",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/seed_0/corrected_model_code_step40000-6630902353803ba2120454b1a337fd928b57fff812b92179d389d1fb38e45750",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code/seed_0/corrected_model_code_step40000-6630902353803ba2120454b1a337fd928b57fff812b92179d389d1fb38e45750"
+        }
+      ],
+      "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code"
+    },
+    {
+      "accuracy_config_hash": "807c06eeb0db24faed889bd7796c7ef683dffb031761d5e67cef837e00dd104e",
+      "aggregate": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code/aggregate/comparison.json",
+      "config": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/configs/own_model_job_light_ranges_best_p99_step_19500_corrected_model_code.yaml",
+      "method_id": "own_model",
+      "seeds": [
+        {
+          "complete_runs": [
+            {
+              "accuracy_config_hash": "807c06eeb0db24faed889bd7796c7ef683dffb031761d5e67cef837e00dd104e",
+              "completed_at_utc": "2026-11-10T14:07:15.726414+00:00",
+              "matches_config": true,
+              "path": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code/seed_0/corrected_model_code_step19500-e9c801d9b4a2688c5880381ed4353cddc2b68c7a167b67a5297ac1c080aa825f",
+              "selected": true
+            }
+          ],
+          "newest_matching_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code/seed_0/corrected_model_code_step19500-e9c801d9b4a2688c5880381ed4353cddc2b68c7a167b67a5297ac1c080aa825f",
+          "seed": 0,
+          "selected_run": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/own_model/duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code/seed_0/corrected_model_code_step19500-e9c801d9b4a2688c5880381ed4353cddc2b68c7a167b67a5297ac1c080aa825f"
+        }
+      ],
+      "variant_id": "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code"
+    }
+  ],
+  "comparison": "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/final_comparison/comparison.json",
+  "findings": [],
+  "input_count": 17,
+  "passed": true
+}
