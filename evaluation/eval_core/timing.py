@@ -143,6 +143,7 @@ def estimate_consistency(
     status_mismatches: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
     missing: list[tuple[str, int]] = []
+    non_finite: list[dict[str, Any]] = []
     max_abs = 0.0
     max_rel = 0.0
     compared = 0
@@ -161,6 +162,10 @@ def estimate_consistency(
         compared += 1
         a = float(base.estimated_cardinality)
         b = float(record.estimated_cardinality)
+        if not (math.isfinite(a) and math.isfinite(b)):
+            # NaN/inf is never "the same estimate" and never covered by max_violations
+            non_finite.append({"workload": key[0], "query_id": key[1], "accuracy": a, "timing": b})
+            continue
         difference = abs(a - b)
         scale = max(abs(a), abs(b))
         rel = difference / scale if scale > 0 else 0.0
@@ -172,7 +177,7 @@ def estimate_consistency(
     deterministic = settings["mode"] == "deterministic"
     maximum = int(settings.get("max_violations", 0))
     within = len(violations) <= maximum
-    passed = not status_mismatches and not missing and (not deterministic or within)
+    passed = not status_mismatches and not missing and not non_finite and (not deterministic or within)
     return {
         "mode": settings["mode"],
         "profile_override": settings.get("profile_override"),
@@ -186,6 +191,8 @@ def estimate_consistency(
         "violations": violations[:25],
         # outside the tolerances but within max_violations: the run passes, each one is reported
         "tolerated_violations": violations if (deterministic and violations and within) else [],
+        "non_finite_count": len(non_finite),
+        "non_finite_estimates": non_finite[:25],
         "status_mismatches": status_mismatches[:25],
         "missing_in_accuracy_run": [list(item) for item in missing[:25]],
         "passed": passed,
@@ -341,7 +348,8 @@ def run_timing_stage(
             failures.append(
                 f"timing estimates disagree with the accuracy run "
                 f"({consistency['violation_count']} violations, "
-                f"{len(consistency['status_mismatches'])} status mismatches)"
+                f"{len(consistency['status_mismatches'])} status mismatches, "
+                f"{consistency['non_finite_count']} non-finite estimates)"
             )
         predictions = tuple(attach_q_errors(record) for record in outcome.predictions)
         write_predictions(directory / "predictions.csv", predictions)

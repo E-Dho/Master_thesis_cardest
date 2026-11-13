@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import sys
 import tempfile
@@ -280,6 +281,18 @@ class TimingStageUnitTests(unittest.TestCase):
         self.assertFalse(estimate_consistency(accuracy, mismatch, gpu)["passed"])
         extra = [*accuracy, PredictionRecord("w", 99, "ok", 10, 1000.0)]
         self.assertFalse(estimate_consistency(accuracy, extra, gpu)["passed"])
+        # a non-finite estimate fails on its own, in either run and in every mode
+        stochastic = {**gpu, "mode": "stochastic"}
+        for value in (math.nan, math.inf, -math.inf):
+            for left, right in ((accuracy, [*accuracy[:4], PredictionRecord("w", 4, "ok", 10, value)]),
+                                ([*accuracy[:4], PredictionRecord("w", 4, "ok", 10, value)], accuracy),
+                                ([*accuracy[:4], PredictionRecord("w", 4, "ok", 10, value)],) * 2):
+                for settings in (gpu, stochastic):
+                    report = estimate_consistency(left, right, settings)
+                    self.assertFalse(report["passed"], (value, settings["mode"]))
+                    self.assertEqual((report["non_finite_count"], report["tolerated_violations"],
+                                      report["violation_count"]), (1, [], 0))
+                    self.assertTrue(math.isfinite(report["max_relative_difference"]))
         for value in (-1, 1.5, "2", True):
             bad = SimpleNamespace(timing={"estimate_consistency": {
                 "profiles": {"gpu_single_query": {"max_violations": value}}}})
@@ -357,7 +370,7 @@ class TimingStageIntegrationTests(unittest.TestCase):
         os.sched_setaffinity(0, self.original_affinity)
         self.temporary.cleanup()
 
-    def _config(self, factor: float = 1.0, variant: str = "v") -> Path:
+    def _config(self, factor: float = 1.0, variant: str = "v", max_violations: int = 0) -> Path:
         queries = self.root / "queries.csv"
         queries.write_text("title t##t.id,=,1#10\ntitle t##t.id,=,2#20\n")
         script = self.root / "fixture_timer.py"
@@ -374,7 +387,7 @@ class TimingStageIntegrationTests(unittest.TestCase):
             "timing:\n  device: cpu\n  warmup_passes: 0\n  repetitions: 2\n"
             "  primary_profile: cpu_1core\n  profiles: [cpu_1core]\n"
             "  estimate_consistency:\n    mode: deterministic\n    relative_tolerance: 1.0e-9\n"
-            "    absolute_tolerance: 0.0\n"
+            f"    absolute_tolerance: 0.0\n    max_violations: {max_violations}\n"
             "resources:\n  profile: test\nartifacts:\n  checkpoint: none\n"
             f"adapter:\n  type: external\n  working_directory: {REPO}\n"
             f"  evaluate_command: echo unused\n  timing_commands:\n    cpu_1core: {command}\n"
@@ -467,6 +480,21 @@ class TimingStageIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(json.loads((directory / "timing_summary.json").read_text())["config_drift"],
                          ["adapter.evaluate_command"])
+
+    def test_non_finite_timing_estimates_fail_despite_the_exception_budget(self):
+        run = self._accuracy_run(self._config(), 0)
+        # both estimates differ (2 <= max_violations), but they are NaN / inf: never reportable
+        for factor in ("nan", "inf"):
+            config = load_experiment_config(self._config(factor=float(factor), max_violations=2))
+            with self.assertRaisesRegex(TimingProtocolError, "disagree"):
+                run_timing_stage(config, 0, run, "cpu_1core")
+        self.assertEqual(load_timing_summaries(run), {})
+        directory = run_timing_stage(load_experiment_config(self._config(factor=1.5, max_violations=2)),
+                                     0, run, "cpu_1core")  # finite differences within the budget
+        consistency = json.loads((directory / "timing_summary.json").read_text())["estimate_consistency"]
+        self.assertEqual((consistency["passed"], consistency["violation_count"], consistency["non_finite_count"]),
+                         (True, 2, 0))
+        self.assertEqual([v["query_id"] for v in consistency["tolerated_violations"]], [0, 1])
 
     def test_timing_only_config_changes_still_aggregate(self):
         config_path = self._config()
