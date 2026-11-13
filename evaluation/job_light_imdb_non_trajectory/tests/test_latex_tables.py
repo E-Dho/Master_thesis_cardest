@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import runpy
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -119,6 +121,52 @@ class LatexTablesTest(unittest.TestCase):
         table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
         self.assertIn(r"$^{\P}$", table)
         self.assertIn("missing its standardized GPU timing profile", table)
+
+    def test_missing_size_does_not_clear_selected_training_time(self) -> None:
+        attach = MODULE["attach_build_metrics"]
+        runtime = attach.__globals__
+        variant = "test_selected_own_model"
+        original_timing = runtime["_run_dirs_from_timing"]
+        original_scan = runtime["_run_dirs_from_scan"]
+        runtime["OWN_MODEL_VARIANTS"][variant] = {"label": "Test"}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                run = Path(directory)
+                (run / "build_metrics.json").write_text(json.dumps({
+                    "build": {"detail": {"bridge_metrics": {"status": "reused_checkpoint"}}},
+                    "artifacts": {"selected_checkpoint_training_seconds": 123.0},
+                }))
+                runtime["_run_dirs_from_timing"] = lambda _row, _root: [run]
+                runtime["_run_dirs_from_scan"] = lambda _row, _root: [run]
+                row = {
+                    "workload": "job_light", "method_id": "own_model", "variant_id": variant,
+                }
+                attach([row], run)
+                self.assertEqual(row["_build.training_s.mean"], 123.0)
+                self.assertIsNone(row["_build.size_mb.mean"])
+        finally:
+            runtime["_run_dirs_from_timing"] = original_timing
+            runtime["_run_dirs_from_scan"] = original_scan
+            del runtime["OWN_MODEL_VARIANTS"][variant]
+
+    def test_selected_own_model_requires_size_and_training_records(self) -> None:
+        validate = MODULE["validate_selected_own_model_build_metrics"]
+        runtime = validate.__globals__
+        variant = "test_selected_own_model"
+        runtime["OWN_MODEL_VARIANTS"][variant] = {"label": "Test"}
+        row = {"workload": "job_light", "method_id": "own_model", "variant_id": variant}
+        try:
+            with self.assertRaisesRegex(
+                ValueError, "inference_state_dict_mb.*selected_checkpoint_training_seconds"
+            ):
+                validate([row])
+            row["_build.has_inference_state_dict_mb"] = True
+            with self.assertRaisesRegex(ValueError, "selected_checkpoint_training_seconds"):
+                validate([row])
+            row["_build.has_selected_checkpoint_training_seconds"] = True
+            validate([row])
+        finally:
+            del runtime["OWN_MODEL_VARIANTS"][variant]
 
 
 if __name__ == "__main__":

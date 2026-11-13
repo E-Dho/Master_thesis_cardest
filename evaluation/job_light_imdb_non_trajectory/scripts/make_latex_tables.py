@@ -996,12 +996,17 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
         checkpoint_load_only = bool(statuses & _CHECKPOINT_LOAD_STATUSES)
         row["_build.checkpoint_load_only"] = checkpoint_load_only
         row["_build.checkpoint_statuses"] = sorted(status for status in statuses if status)
-        selected_training = _mean_std(collect(
+        recorded_selected_training = _mean_std(collect(
             lambda m: artifacts(m).get("selected_checkpoint_training_seconds")
         ))
+        selected_training = recorded_selected_training
         if selected_training[0] is None:
             selected_training = _selected_own_model_training_seconds(row)
-        if selected_training is not None:
+        has_selected_training = selected_training is not None and selected_training[0] is not None
+        row["_build.has_selected_checkpoint_training_seconds"] = (
+            recorded_selected_training[0] is not None
+        )
+        if has_selected_training:
             row["_build.training_s.mean"], row["_build.training_s.std"] = selected_training
             row["_build.total_s.mean"], row["_build.total_s.std"] = selected_training
             row["_build.training_record_is_selected_checkpoint"] = True
@@ -1011,11 +1016,35 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
         if selected_size[0] is not None:
             row["_build.size_mb.mean"], row["_build.size_mb.std"] = selected_size
             row["_build.size_is_inference_state_dict"] = True
-        elif checkpoint_load_only:
-            # A bridge load is not training/statistics construction.
+        row["_build.has_inference_state_dict_mb"] = selected_size[0] is not None
+        if checkpoint_load_only and not has_selected_training:
+            # A bridge load is not training/statistics construction when no
+            # selected-checkpoint record supplies the real training duration.
             row["_build.training_s.mean"] = None
             row["_build.training_s.std"] = None
     return found
+
+
+def validate_selected_own_model_build_metrics(rows: list[dict]) -> None:
+    """Reject selected own-model rows that would silently fall back in tables."""
+    missing = []
+    for row in rows:
+        variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
+        if row.get("method_id") != "own_model" or not variant or variant.get("qerror_only"):
+            continue
+        fields = []
+        if not row.get("_build.has_inference_state_dict_mb"):
+            fields.append("inference_state_dict_mb")
+        if not row.get("_build.has_selected_checkpoint_training_seconds"):
+            fields.append("selected_checkpoint_training_seconds")
+        if fields:
+            missing.append(f"{row['workload']}/{row['variant_id']}: {', '.join(fields)}")
+    if missing:
+        raise ValueError(
+            "selected own-model build records are incomplete; rerun "
+            "make_latex_tables.py --refresh-own-model-build-records: "
+            + "; ".join(missing)
+        )
 
 
 def _missing_build_note(rows: list[dict]) -> str:
@@ -1182,6 +1211,7 @@ def main() -> None:
             rows = prepare_rows(results, workload)  # fresh copy: labels get markers
             if name in ("training", "model_size"):
                 found = attach_build_metrics(rows, args.results_root)
+                validate_selected_own_model_build_metrics(rows)
                 build_found = found if build_found is None else build_found
             path = args.output / f"{workload}_{name}.tex"
             path.write_text(builder(rows), encoding="utf-8")

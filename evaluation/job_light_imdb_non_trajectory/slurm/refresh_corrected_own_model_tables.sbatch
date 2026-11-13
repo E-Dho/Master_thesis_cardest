@@ -76,4 +76,5 @@ PY
 "$PYTHON" "$EVAL/scripts/check_comparison_provenance.py" \
   --comparison "$RESULTS/final_comparison/comparison.json" \
   --output "$RESULTS/final_comparison/provenance.json"
-"$PYTHON" $EVAL/scripts/make_latex_tables.py --results-root "$RESULTS"
+"$PYTHON" $EVAL/scripts/make_latex_tables.py --results-root "$RESULTS" \
+  --refresh-own-model-build-records
