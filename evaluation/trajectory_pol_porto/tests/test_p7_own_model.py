@@ -497,3 +497,57 @@ class SubmitP7Test(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrecisionCheckTest(unittest.TestCase):
+    """scripts/own_model_precision_check.py on a factorized model (the production setting)."""
+
+    def test_float64_accumulation_on_factorized_columns(self) -> None:
+        import torch
+
+        from model.src.config import load_simple_yaml
+        from model.src.model.checkpoint import save_resmade_checkpoint
+        from model.src.model.factorization import FactorizationConfig, apply_factorization_to_metadata
+        from model.src.training.resmade_trainer import build_resmade_from_config, predicate_vocabularies_from_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            torch.manual_seed(0)
+            config_path = root / "training_config.yaml"
+            _write_training_config(config_path)
+            text = config_path.read_text().replace("factorization:\n  enabled: false", "\n".join([
+                "factorization:", "  enabled: true", "  strategy: bitwise_lossless", "  word_size_bits: 3",
+                "  minimum_domain_size: 16", "  factor_order: most_significant_first", "  blacklist_columns: []",
+                "  blacklist_kinds: [indicator, fanout]", "anpm:", "  enabled: true",
+                "  previous_factor_embedding_size: 8", "  hidden_size: 8", "  teacher_force_during_training: true",
+                "  mask_invalid_combinations: true", "  decode_chunk_size: 4096", "  final_activation: relu",
+                "  materialize_original_distribution_for_debug: false"]))
+            config_path.write_text(text)
+            config = load_simple_yaml(str(config_path))
+            metadata = apply_factorization_to_metadata(_metadata(_fixture.synthetic_data()),
+                                                       FactorizationConfig.from_dict(config["factorization"]))
+            model = build_resmade_from_config(metadata, config)
+            checkpoint = root / "checkpoint_best.pt"
+            save_resmade_checkpoint(checkpoint, model, torch.optim.Adam(model.parameters()), epoch=0, step=1,
+                                    metadata=metadata, predicate_vocabularies=predicate_vocabularies_from_config(
+                                        metadata, config), config=config)
+            benchmark = _fixture.write_benchmark(root / "benchmark.jsonl")
+            spec = importlib.util.spec_from_file_location("own_model_precision_check",
+                                                          BRIDGE.parent / "own_model_precision_check.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            out = root / "out"
+            self.assertEqual(module.main(["--training-config", str(config_path), "--checkpoint", str(checkpoint),
+                                          "--queries-jsonl", str(benchmark), "--select-json", '{"relation": "multi"}',
+                                          "--devices", "cpu", "--detail", "3", "--output", str(out)]), 0)
+            summary = json.loads((out / "summary.json").read_text())
+            comparison = summary["comparisons"]["cpu_float32 vs cpu_float64"]
+            self.assertGreater(comparison["queries"], 10)
+            self.assertLess(comparison["relative_difference"]["max"], 1e-4)  # no narrow ranges in the fixture
+            settings = json.loads((out / "detail.json").read_text())["3"]["settings"]
+            dtypes = {name: {call["dtype"] for call in item["cdf_calls"]} for name, item in settings.items()}
+            self.assertEqual(dtypes, {"cpu_float32": {"torch.float32"}, "cpu_float64": {"torch.float64"}})
+            # the patch is undone afterwards
+            from model.src.model import output_adapter
+            probe = type("Probe", (), {"backbone_outputs": type("Outputs", (), {"logits": torch.zeros(1)})()})()
+            self.assertIs(output_adapter.FactorizedColumnProbabilityEvaluator.dtype.fget(probe), torch.float32)
