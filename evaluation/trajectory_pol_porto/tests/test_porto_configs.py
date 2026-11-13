@@ -502,6 +502,16 @@ class SubmitScriptsDatasetTest(unittest.TestCase):
             if script == "submit_p6.sh":
                 self.assertIn("GRIDS=unit_size_m=25/50/100/200/400+time_buckets=", text)
 
+    def test_timing_compares_each_config_once(self) -> None:
+        # 22995630: own_model timed on cpu_1core and gpu_single_query was aggregated twice
+        result, submitted = self._submit("submit_timing.sh", {
+            "PROFILES": "cpu_1core gpu_single_query", "CPU_CONFIGS": "own_model case_plus",
+            "GPU_CONFIGS": "own_model", "COMPARE_WITH": "exact_mbr case_plus"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [aggregate] = [line for line in submitted if "aggregate_compare.sbatch" in line]
+        configs = aggregate.split("CONFIGS=")[1].split(",")[0].split(":")
+        self.assertEqual([Path(c).stem for c in configs], ["own_model", "case_plus", "exact_mbr"])
+
     def test_unknown_dataset_is_refused(self) -> None:
         result, submitted = self._submit("submit_p3.sh", {"TRAJ_DATASET": "porto"})
         self.assertEqual(result.returncode, 2)

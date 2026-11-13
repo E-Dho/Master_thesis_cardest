@@ -71,7 +71,9 @@ for profile in $PROFILES; do
   all_configs+=("$configs")
 done
 if [ -n "$COMPARE_WITH" ]; then all_configs+=("$(paths_of "$COMPARE_WITH")"); fi
+# a config timed under several profiles (own model: cpu_1core and gpu_single_query) is aggregated once
+compare_configs=$(IFS=:; echo "${all_configs[*]}" | tr ':' '\n' | awk 'NF && !seen[$0]++' | paste -sd: -)
 aggregate=$(submit --dependency="afterok:$(IFS=:; echo "${jobs[*]}")" \
-  --export="$base_export,CONFIGS=$(IFS=:; echo "${all_configs[*]}"),COMPARISON_DIR=$COMPARISON_DIR" \
+  --export="$base_export,CONFIGS=$compare_configs,COMPARISON_DIR=$COMPARISON_DIR" \
   "$SCRIPT_DIR/aggregate_compare.sbatch")
 echo "aggregate_compare: job $aggregate -> $COMPARISON_DIR"
