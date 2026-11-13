@@ -110,17 +110,31 @@ class LatexTablesTest(unittest.TestCase):
         self.assertIn("job_light/inference/deepdb/d/cpu_mean_ms", store.best)
         self.assertNotIn("job_light/inference/mscn/m/cpu_mean_ms", store.best)
 
-    def test_partial_standardized_timing_is_marked_and_explained(self) -> None:
+    def test_cpu_only_declared_profile_is_not_marked_missing(self) -> None:
         row = {
-            "workload": "job_light", "method_id": "own_model", "variant_id": "v",
+            "workload": "job_light", "method_id": "postgresql", "variant_id": "v",
             "coverage_complete_all_seeds": True, "seed_count": 1,
+            "_configured_timing_profiles": ("cpu_1core",),
             "timing.cpu_1core.mean_ms.mean": 1.0,
             "timing.gpu_single_query.mean_ms.mean": None,
         }
         rows = MODULE["prepare_rows"]([row], "job_light")
         table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
+        self.assertNotIn(r"$^{\P}$", table)
+        self.assertIn("device type the method has no inference implementation", table)
+
+    def test_declared_but_unmeasured_standardized_profile_is_marked(self) -> None:
+        row = {
+            "workload": "job_light", "method_id": "own_model", "variant_id": "v",
+            "coverage_complete_all_seeds": True, "seed_count": 1,
+            "_configured_timing_profiles": ("cpu_1core", "gpu_single_query"),
+            "timing.cpu_1core.mean_ms.mean": None,
+            "timing.gpu_single_query.mean_ms.mean": 1.0,
+        }
+        rows = MODULE["prepare_rows"]([row], "job_light")
+        table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
         self.assertIn(r"$^{\P}$", table)
-        self.assertIn("missing its standardized GPU timing profile", table)
+        self.assertIn("missing its standardized CPU timing profile", table)
 
     def test_missing_size_does_not_clear_selected_training_time(self) -> None:
         attach = MODULE["attach_build_metrics"]

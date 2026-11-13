@@ -53,6 +53,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from evaluation.job_light_imdb_non_trajectory.joblight_eval.config import load_experiment_config
+
 WORKLOADS = {
     "job_light": "JOB-light",
     "job_light_ranges": "JOB-light-ranges",
@@ -647,13 +649,54 @@ def _append_footnote_marker(label: str, marker: str) -> str:
     return label + f"$^{{{marker}}}$"
 
 
+def _profile_label(profile: str) -> str:
+    if profile.startswith("cpu_"):
+        return "CPU"
+    if profile.startswith("gpu_"):
+        return "GPU"
+    return profile
+
+
 def _missing_timing_profiles(row: dict) -> list[str]:
-    missing = []
-    if _cpu_profile(row) is None:
-        missing.append("CPU")
-    if _is_missing(row.get("timing.gpu_single_query.mean_ms.mean")):
-        missing.append("GPU")
-    return missing
+    """Return only declared timing profiles lacking a standardized result."""
+    return [
+        str(profile)
+        for profile in row.get("_configured_timing_profiles", ())
+        if _is_missing(row.get(f"timing.{profile}.mean_ms.mean"))
+    ]
+
+
+def attach_configured_timing_profiles(results: list[dict], comparison_path: Path) -> None:
+    """Annotate comparison rows with profiles declared by their source config.
+
+    The aggregate only records profiles that happened to be measured.  The
+    provenance manifest identifies the producing config, which establishes
+    whether an absent profile is a failed/missing measurement or simply an
+    unsupported device type.
+    """
+    provenance_path = comparison_path.with_name("provenance.json")
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot load comparison provenance {provenance_path}") from error
+    configs = {
+        (item["method_id"], item["variant_id"]): Path(item["config"])
+        for item in provenance.get("aggregates", [])
+    }
+    local_config_directory = Path(__file__).resolve().parent.parent / "configs"
+    for row in results:
+        key = (row["method_id"], row["variant_id"])
+        source_path = configs.get(key)
+        if source_path is None:
+            raise ValueError(f"provenance has no config for comparison row {key}")
+        config_path = source_path if source_path.exists() else local_config_directory / source_path.name
+        if not config_path.exists():
+            raise ValueError(f"cannot read timing config for comparison row {key}: {source_path}")
+        config = load_experiment_config(config_path)
+        if (config.method_id, config.variant_id) != key:
+            raise ValueError(f"provenance config identity mismatch for comparison row {key}: {config_path}")
+        profiles = config.timing.get("profiles") or []
+        row["_configured_timing_profiles"] = tuple(str(profile) for profile in profiles)
 
 
 def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
@@ -709,6 +752,7 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
         "Per-query end-to-end estimation latency under the standardized timing profiles"
         + (f" ({hardware_text})" if hardware else "") + ".",
         seeds_note(rows),
+        "-- marks a device type the method has no inference implementation for.",
     ]
     out_of_competition = [r for r in rows if r["method_id"] in INFERENCE_OUT_OF_COMPETITION]
     if out_of_competition:
@@ -746,7 +790,7 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
                 rf"$^{{\ddagger}}${row_label(row)} was not measured under a standardized profile{extra}."
             )
         else:
-            profiles = " and ".join(missing_profiles)
+            profiles = " and ".join(_profile_label(profile) for profile in missing_profiles)
             notes.append(
                 rf"$^{{\P}}${row_label(row)} is missing its standardized {profiles} timing profile{extra}."
             )
@@ -1184,6 +1228,7 @@ def main() -> None:
 
     data = json.loads(args.comparison.read_text(encoding="utf-8"))
     results = data["results"]
+    attach_configured_timing_profiles(results, args.comparison)
     show_std = not args.no_std
     args.output.mkdir(parents=True, exist_ok=True)
     if args.refresh_own_model_build_records:
