@@ -393,10 +393,10 @@ class ShippedCaseConfigTest(unittest.TestCase):
         self.assertIs(base["adapter"]["temporal"], False)
         self.assertIs(temporal["adapter"]["temporal"], True)
         best = load_simple_yaml(configs / "case_plus_temporal_best.yaml")
-        # tuned on validation (select_tuned, 2026-11-06); budget = the own model's inference-only size
+        # re-selected on validation after the sparse storage (2026-11-13); budget = the own model's size
         self.assertEqual(base["adapter"]["unit_size_m"], 25)
-        self.assertEqual((temporal["adapter"]["unit_size_m"], temporal["adapter"]["time_buckets"]), (200, 3200))
-        self.assertEqual((best["adapter"]["unit_size_m"], best["adapter"]["time_buckets"]), (100, 3200))
+        self.assertEqual((temporal["adapter"]["unit_size_m"], temporal["adapter"]["time_buckets"]), (50, 3200))
+        self.assertEqual((best["adapter"]["unit_size_m"], best["adapter"]["time_buckets"]), (25, 3200))
         for raw in (base, temporal, best):
             self.assertEqual(raw["adapter"]["budget_bytes"], 872606460)
         # the best pick is the budget config with another grid and its own variant id

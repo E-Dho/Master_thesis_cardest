@@ -181,6 +181,17 @@ class _PortoRoot(unittest.TestCase):
         return run, predictions, records, summary
 
 
+class PortoP6PicksTest(unittest.TestCase):
+    def test_tuned_under_the_porto_budget(self) -> None:
+        picks = {"trahist": (50, None), "trahist_temporal": (50, 3200), "case_plus": (25, None),
+                 "case_plus_temporal": (100, 3200), "case_plus_temporal_best": (25, 3200)}
+        for name, (unit, buckets) in picks.items():
+            adapter = load_simple_yaml(CONFIGS / "porto_v3" / f"{name}.yaml")["adapter"]
+            self.assertEqual((adapter["unit_size_m"], adapter.get("time_buckets")), (unit, buckets), name)
+            # the Porto own model's inference-only size (step 18750)
+            self.assertEqual(adapter["budget_bytes"], 1433380120, name)
+
+
 class PortoConfigLoadTest(_PortoRoot):
     def test_every_config_loads_on_the_porto_workloads(self) -> None:
         names = [p.stem for p in sorted((CONFIGS / "porto_v3").glob("[!_]*.yaml"))]
