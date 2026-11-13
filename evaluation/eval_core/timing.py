@@ -49,7 +49,8 @@ from .timing_guard import (
 )
 
 
-DEFAULT_CONSISTENCY = {"mode": "deterministic", "relative_tolerance": 1e-9, "absolute_tolerance": 0.0}
+DEFAULT_CONSISTENCY = {"mode": "deterministic", "relative_tolerance": 1e-9, "absolute_tolerance": 0.0,
+                       "max_violations": 0}
 ACCURACY_STATUSES = {"evaluated", "complete"}
 
 
@@ -72,7 +73,7 @@ def primary_profile(config: ExperimentConfig) -> str | None:
     return None if value in (None, "") else str(value)
 
 
-PROFILE_CONSISTENCY_KEYS = ("relative_tolerance", "absolute_tolerance")
+PROFILE_CONSISTENCY_KEYS = ("relative_tolerance", "absolute_tolerance", "max_violations")
 
 
 def consistency_settings(config: ExperimentConfig, profile: str | None = None) -> dict[str, Any]:
@@ -82,6 +83,12 @@ def consistency_settings(config: ExperimentConfig, profile: str | None = None) -
     tolerances (not the mode) for one timing profile, e.g. a GPU profile whose
     float32 kernels differ slightly from the CPU accuracy run. The override in
     effect is reported as ``profile_override``.
+
+    ``max_violations`` (default 0): how many estimates may lie outside the
+    tolerances in a deterministic run before it fails, for estimates known to
+    be numerically ill-conditioned. Every such estimate is still listed
+    (``tolerated_violations``); status mismatches and missing queries are never
+    tolerated.
     """
     raw = dict(config.timing.get("estimate_consistency", {}) or {})
     overrides = raw.pop("profiles", None) or {}
@@ -101,6 +108,9 @@ def consistency_settings(config: ExperimentConfig, profile: str | None = None) -
         settings["profile_override"] = profile
     settings["relative_tolerance"] = float(settings["relative_tolerance"])
     settings["absolute_tolerance"] = float(settings["absolute_tolerance"])
+    maximum = settings["max_violations"]
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
+        raise ValueError("timing.estimate_consistency.max_violations must be a nonnegative integer")
     return settings
 
 
@@ -157,9 +167,12 @@ def estimate_consistency(
         max_abs = max(max_abs, difference)
         max_rel = max(max_rel, rel)
         if not math.isclose(a, b, rel_tol=relative, abs_tol=absolute):
-            violations.append({"workload": key[0], "query_id": key[1], "accuracy": a, "timing": b})
+            violations.append({"workload": key[0], "query_id": key[1], "accuracy": a, "timing": b,
+                               "absolute_difference": difference, "relative_difference": rel})
     deterministic = settings["mode"] == "deterministic"
-    passed = not status_mismatches and not missing and (not deterministic or not violations)
+    maximum = int(settings.get("max_violations", 0))
+    within = len(violations) <= maximum
+    passed = not status_mismatches and not missing and (not deterministic or within)
     return {
         "mode": settings["mode"],
         "profile_override": settings.get("profile_override"),
@@ -169,7 +182,10 @@ def estimate_consistency(
         "max_absolute_difference": max_abs,
         "max_relative_difference": max_rel,
         "violation_count": len(violations),
+        "max_violations": maximum,
         "violations": violations[:25],
+        # outside the tolerances but within max_violations: the run passes, each one is reported
+        "tolerated_violations": violations if (deterministic and violations and within) else [],
         "status_mismatches": status_mismatches[:25],
         "missing_in_accuracy_run": [list(item) for item in missing[:25]],
         "passed": passed,

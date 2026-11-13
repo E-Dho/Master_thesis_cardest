@@ -246,6 +246,46 @@ class TimingStageUnitTests(unittest.TestCase):
         with self.assertRaises(ValueError):  # a profile may relax tolerances, never switch the mode
             consistency_settings(bad, "gpu_single_query")
 
+    def test_bounded_number_of_listed_exceptions(self):
+        from types import SimpleNamespace
+
+        from evaluation.eval_core.timing import consistency_settings
+
+        config = SimpleNamespace(timing={"estimate_consistency": {
+            "mode": "deterministic", "relative_tolerance": 1e-9, "absolute_tolerance": 0.0,
+            "profiles": {"gpu_single_query": {"relative_tolerance": 1e-3, "absolute_tolerance": 1.0,
+                                              "max_violations": 2}}}})
+        cpu = consistency_settings(config, "cpu_1core")
+        gpu = consistency_settings(config, "gpu_single_query")
+        self.assertEqual((cpu["max_violations"], gpu["max_violations"]), (0, 2))
+        accuracy = [PredictionRecord("w", q, "ok", 10, 1000.0) for q in range(5)]
+        accuracy[1] = PredictionRecord("w", 1, "ok", 10, 246.79)
+        drifted = list(accuracy)
+        drifted[1] = PredictionRecord("w", 1, "ok", 10, 241.02)  # query 1819 of job 22995629
+        report = estimate_consistency(accuracy, drifted, gpu)
+        self.assertTrue(report["passed"])
+        self.assertEqual((report["violation_count"], report["max_violations"]), (1, 2))
+        [listed] = report["tolerated_violations"]
+        self.assertEqual((listed["query_id"], listed["accuracy"], listed["timing"]), (1, 246.79, 241.02))
+        self.assertAlmostEqual(listed["relative_difference"], (246.79 - 241.02) / 246.79)
+        self.assertFalse(estimate_consistency(accuracy, drifted, cpu)["passed"])  # CPU tolerates none
+        # one more than allowed: fails, nothing is reported as tolerated
+        three = [PredictionRecord("w", q, "ok", 10, 900.0 if q < 3 else 1000.0) for q in range(5)]
+        report = estimate_consistency(accuracy, three, gpu)
+        self.assertFalse(report["passed"])
+        self.assertEqual((report["violation_count"], report["tolerated_violations"]), (3, []))
+        # status mismatches and missing estimates are never covered by the allowance
+        mismatch = list(accuracy)
+        mismatch[0] = PredictionRecord("w", 0, "failed", 10, None)
+        self.assertFalse(estimate_consistency(accuracy, mismatch, gpu)["passed"])
+        extra = [*accuracy, PredictionRecord("w", 99, "ok", 10, 1000.0)]
+        self.assertFalse(estimate_consistency(accuracy, extra, gpu)["passed"])
+        for value in (-1, 1.5, "2", True):
+            bad = SimpleNamespace(timing={"estimate_consistency": {
+                "profiles": {"gpu_single_query": {"max_violations": value}}}})
+            with self.assertRaises(ValueError):
+                consistency_settings(bad, "gpu_single_query")
+
     def test_launch_plan_and_core_assignment(self):
         with tempfile.TemporaryDirectory() as temporary:
             plan = Path(temporary) / "plan.tsv"

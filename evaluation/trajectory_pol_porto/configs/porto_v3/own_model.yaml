@@ -39,6 +39,12 @@ timing:
       gpu_single_query:
         relative_tolerance: 1.0e-3
         absolute_tolerance: 1.0
+        # At most 2 estimates may lie outside that, each listed in the timing summary
+        # (decided 2026-11-13 after diagnostic job 23033331): POL single query 1819
+        # differs by 2.4 % because a >= predicate near the domain edge is evaluated as
+        # 1 - CDF in float32 (cancellation); float64 accumulation leaves 1.0 %, and the
+        # accuracy effect of the precision is <= 0.74 % (single) / 1.4e-4 (multi).
+        max_violations: 2
 resources:
   profile: pretrained_checkpoint_inference
   cpu_threads: 8
