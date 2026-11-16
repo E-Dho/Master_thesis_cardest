@@ -5,19 +5,19 @@
 #   (segments:seg_min_x/max_x/min_y/max_y removed from segment_varying_columns):
 #   spatial windows are trained and answered on the segment endpoints
 #   (s_x, s_y, e_x, e_y). Needs its own prepared directory without the MBR
-#   columns (pol_50m_nombr_ablation, prepared with this config by
+#   columns ($B/pol_ablation_data/pol_50m_nombr_ablation, outside every checkout; prepared with this config by
 #   model/slurm/pol_traj_dedup_prepare_mbr.sbatch CONFIG=<this file>), hence
 #   dataset.name pol_ablation_no_mbr and its own sample id files.
 # Train from this branch (model/pol-ablations = the pinned training code).
 dataset:
   type: pol_trajectory_full_join
   name: pol_ablation_no_mbr
-  prepared_directory: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/data/pol_prepared/pol_50m_nombr_ablation
+  prepared_directory: /work_beegfs/sunip956/master_thesis_trajectories/pol_ablation_data/pol_50m_nombr_ablation
   sampling_mode: fixture
   sample_batch_size: 2048
-  trajectory_ids_path: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/data/pol_prepared/pol_50m_nombr_ablation/sample_trajectory_ids.npy
-  segment_ids_path: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/data/pol_prepared/pol_50m_nombr_ablation/sample_segment_ids.npy
-  trajectory_index_path: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest/data/pol_prepared/pol_50m_nombr_ablation/trajectory_segment_index
+  trajectory_ids_path: /work_beegfs/sunip956/master_thesis_trajectories/pol_ablation_data/pol_50m_nombr_ablation/sample_trajectory_ids.npy
+  segment_ids_path: /work_beegfs/sunip956/master_thesis_trajectories/pol_ablation_data/pol_50m_nombr_ablation/sample_segment_ids.npy
+  trajectory_index_path: /work_beegfs/sunip956/master_thesis_trajectories/pol_ablation_data/pol_50m_nombr_ablation/trajectory_segment_index
   preload_trajectory_index: true
   num_workers: 0
 
