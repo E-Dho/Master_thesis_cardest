@@ -136,6 +136,10 @@ class OwnModel:
         vocabularies = PredicateVocabularies.from_json_dict(payload["predicate_vocabularies"], self.metadata)
         self.runtime = TrajectoryDistinctRuntimeConfig.from_dict(self.config.get("trajectory_distinct", {}))
         self.trajectory_spatial = dict(self.config.get("trajectory_spatial", {}) or {})
+        # windows on the segment MBR columns, or (no-MBR ablation) on the segment endpoints
+        self.spatial = ("segment_mbr" if self.trajectory_spatial.get("enabled")
+                        and self.trajectory_spatial.get("representation") == "segment_mbr"
+                        else "segment_endpoints")
         assert_checkpoint_trajectory_config_compatible(payload, self.runtime, self.trajectory_spatial)
         self.srid = self.runtime.srid if self.runtime.srid is not None else self.config.get(
             "predicate_generation", {}).get("trajectory_srid")
@@ -146,7 +150,7 @@ class OwnModel:
         self.payload_step = payload.get("step")
 
     def translate_row(self, row: Dict[str, Any]):
-        translation = self.translate.translate(row, clamp=self.clamp, srid=self.srid)
+        translation = self.translate.translate(row, clamp=self.clamp, srid=self.srid, spatial=self.spatial)
         tables, added = root_connected_tables(self.metadata, translation.record["tables"])
         if not added:
             return translation

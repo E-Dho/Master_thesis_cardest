@@ -17,7 +17,10 @@ row (``SEMANTICS.md``) onto it without changing the model code:
   it with the segment bounding box: diagnostic ``approx:segment_mbr``.
 - ``spatio_temporal`` -> the window and the interval as separate segment
   conditions: ``approx:segment_mbr`` and ``approx:decoupled_space_time``
-  (v3 requires one position of the segment to satisfy both).
+  (v3 requires one position of the segment to satisfy both). A model trained
+  without the MBR columns (``spatial="segment_endpoints"``, the no-MBR
+  ablation) answers a window with both segment endpoints inside it:
+  ``approx:segment_endpoints`` instead.
 
 Routes (which model output answers the label):
 
@@ -41,6 +44,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 APPROX_MBR = "approx:segment_mbr"
+APPROX_ENDPOINTS = "approx:segment_endpoints"
+SPATIAL_NOTES = {"segment_mbr": APPROX_MBR, "segment_endpoints": APPROX_ENDPOINTS}
 APPROX_DECOUPLED = "approx:decoupled_space_time"
 ROUTES = ("distinct", "join", "rows")
 SEGMENT_TABLE = "segments"
@@ -154,9 +159,17 @@ def _window(predicate: Mapping[str, Any], srid: Optional[int]) -> Dict[str, Any]
 
 
 def translate(row: Mapping[str, Any], *, clamp: Optional[Mapping[str, Tuple[int, int]]] = None,
-              srid: Optional[int] = None, temporal_attribute: str = "segment_time") -> Translation:
-    """One v3 row -> the model record, its route and approximation notes."""
+              srid: Optional[int] = None, temporal_attribute: str = "segment_time",
+              spatial: str = "segment_mbr") -> Translation:
+    """One v3 row -> the model record, its route and approximation notes.
 
+    ``spatial`` names how the model answers a window (it only changes the note):
+    ``segment_mbr`` or ``segment_endpoints``.
+    """
+
+    if spatial not in SPATIAL_NOTES:
+        raise ValueError(f"spatial must be one of {sorted(SPATIAL_NOTES)}, got {spatial!r}")
+    spatial_note = SPATIAL_NOTES[spatial]
     clamp = dict(clamp or {})
     query_id = row.get("query_id")
     predicates: List[Dict[str, Any]] = []
@@ -176,14 +189,14 @@ def translate(row: Mapping[str, Any], *, clamp: Optional[Mapping[str, Tuple[int,
                                               query_id))
         elif kind == "spatial":
             predicates.append(_window(predicate, srid))
-            notes.append(APPROX_MBR)
+            notes.append(spatial_note)
         elif kind == "spatio_temporal":
             if table != SEGMENT_TABLE:
                 raise TranslationError(f"{query_id}: spatio-temporal predicate on {table}")
             predicates.append(_window(predicate, srid))
             predicates.extend(_temporal_parts(table, temporal_attribute, predicate.get("lower"),
                                               predicate.get("upper"), query_id))
-            notes.extend([APPROX_MBR, APPROX_DECOUPLED])
+            notes.extend([spatial_note, APPROX_DECOUPLED])
         else:
             raise TranslationError(f"{query_id}: unknown predicate kind {kind!r}")
     record = {"query_id": query_id, "tables": sorted(row["tables"]), "predicates": predicates}

@@ -12,6 +12,8 @@
 #                                with COMPARE_WITH; timing follows with
 #                                PROFILES="cpu_1core gpu_single_query" CPU_CONFIGS=own_model ./submit_timing.sh
 #   AFTER_JOB=<id>               the first job of the stage waits for it (afterok)
+#   CONFIG_DIR=<folder>          configs from another folder, e.g. configs/pol_v3_ablations
+#                                (with P7_MODELS=$THESIS_WORK_ROOT/p7_models/pol_v3_ablations/<ablation>)
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
@@ -19,7 +21,7 @@ source "$SCRIPT_DIR/traj_env.sh"
 traj_resolve_repo_root
 STAGE=${STAGE:?set STAGE=check, truth or run}
 P7_MODELS=${P7_MODELS:-$THESIS_WORK_ROOT/p7_models/$TRAJ_DATASET}
-CONFIG_DIR="$REPO_ROOT/evaluation/trajectory_pol_porto/configs/$TRAJ_DATASET"
+CONFIG_DIR=${CONFIG_DIR:-"$REPO_ROOT/evaluation/trajectory_pol_porto/configs/$TRAJ_DATASET"}
 CONFIG_NAMES=${CONFIG_NAMES:-"own_model own_model_no_dedup"}
 COMPARE_WITH=${COMPARE_WITH-}
 COMPARISON_DIR=${COMPARISON_DIR:-$REPO_ROOT/evaluation/trajectory_pol_porto/results/traj_phase1_$TRAJ_DATASET/p7_comparison}

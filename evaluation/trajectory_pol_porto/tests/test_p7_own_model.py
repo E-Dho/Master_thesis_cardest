@@ -78,6 +78,18 @@ class TranslateTest(unittest.TestCase):
                          [("spatial_intersects", "segment_geom", None),
                           ("temporal_unbounded", "segment_time", ">=")])
 
+    def test_endpoint_windows_are_marked_as_such(self) -> None:
+        # a model trained without the MBR columns (pol_ablation_no_mbr)
+        window = {"min_x": 0.0, "min_y": 1.0, "max_x": 2.0, "max_y": 3.0}
+        row = _row([{"kind": "spatio_temporal", "table": "segments", "attribute": "segment_geom", **window,
+                     "lower": "2020-01-01 00:00:00", "upper": None}], ["segments", "trips"])
+        mbr = tr.translate(row)
+        endpoints = tr.translate(row, spatial="segment_endpoints")
+        self.assertEqual(endpoints.notes, (tr.APPROX_ENDPOINTS, tr.APPROX_DECOUPLED))
+        self.assertEqual(endpoints.record, mbr.record)  # only the note differs
+        with self.assertRaises(ValueError):
+            tr.translate(row, spatial="segment_box")
+
     def test_clamp_keeps_the_null_value_out(self) -> None:
         clamp = tr.parse_clamp(["trips:origin_stand=1:63"])
         self.assertEqual(clamp, {"trips:origin_stand": (1, 63)})
@@ -161,12 +173,14 @@ def _raw_columns(data):
     }
 
 
-def _metadata(data):
+def _metadata(data, mbr: bool = True):
     from model.src.data.schema import ColumnKind, ColumnMetadata, ModelMetadata
 
     raw = _raw_columns(data)
     columns = []
     for table, name in DATA_COLUMNS:
+        if not mbr and name.startswith("seg_m"):  # the no-MBR ablation's preparation has no MBR columns
+            continue
         values = raw[table][f"{table}:{name}"]
         domain = tuple(sorted({v.item() if hasattr(v, "item") else v for v in values}))
         columns.append(ColumnMetadata(f"{table}:{name}", ColumnKind.DATA, domain, table=table))
@@ -247,18 +261,21 @@ class TokenSemanticsTest(unittest.TestCase):
         self.assertGreater(checked["mbr"], 30)
 
 
-def _write_training_config(path: Path) -> None:
+def _write_training_config(path: Path, mbr: bool = True) -> None:
     static = ["agents:age", "agents:educationLevel", "agents:interest", "agents:joviality", "agents:family_size",
               "trips:num_of_segments", "trips:start_time", "trips:end_time"]
     varying = [f"segments:{n}" for n in ("segment_idx", "t_s", "t_e", "s_x", "s_y", "e_x", "e_y", "seg_min_x",
                                           "seg_max_x", "seg_min_y", "seg_max_y")]
+    if not mbr:  # pol_ablation_no_mbr
+        varying = [c for c in varying if "seg_m" not in c]
     # the production encoding (pol_50m_traj_dedup_single_anchor_mbr_segments_first_20k.yaml), small sizes
     lines = ["model:", "  type: predicate_resmade", "  hidden_sizes: [16]", "  residual_connections: true",
              "  direct_io_connections: true", "  input_encoding: duet_binary", "  output_encoding: embed",
              "  output_embedding_size: 8", "  embedding_size: 4", "  fixed_ordering: true",
              "predicate_encoding:", "  mode: two_slot_binary_duet", "  multi_predicate_merge: sum",
              "  max_predicates_per_column: 2",
-             "trajectory_spatial:", "  enabled: true", "  representation: segment_mbr",
+             *(["trajectory_spatial:", "  enabled: true", "  representation: segment_mbr"] if mbr
+               else ["trajectory_spatial:", "  enabled: false"]),
              "factorization:", "  enabled: false",
              "inference:", "  progressive_sampling: false", "  use_log_space_product: true",
              "predicate_generation:", "  trajectory_srid: 26916",
@@ -457,6 +474,138 @@ class BridgeTest(unittest.TestCase):
         self.assertTrue(differs)  # the variants differ exactly on the distinct routes
 
 
+@unittest.skipUnless(_model_available(), "needs torch and the model package")
+class AblationBridgeTest(unittest.TestCase):
+    """configs/pol_v3_ablations: each renders, runs, and differs from own_model.yaml only where it should."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import torch
+
+        from model.src.config import load_simple_yaml
+        from model.src.model.checkpoint import save_resmade_checkpoint
+        from model.src.training.resmade_trainer import build_resmade_from_config, predicate_vocabularies_from_config
+
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.benchmark = _fixture.write_benchmark(cls.root / "benchmark.jsonl")
+        cls.models = {}
+        for mbr in (True, False):
+            torch.manual_seed(0)
+            directory = cls.root / ("mbr" if mbr else "nombr")
+            directory.mkdir()
+            config_path = directory / "training_config.yaml"
+            _write_training_config(config_path, mbr=mbr)
+            config = load_simple_yaml(str(config_path))
+            metadata = _metadata(_fixture.synthetic_data(), mbr=mbr)
+            model = build_resmade_from_config(metadata, config)
+            vocab = predicate_vocabularies_from_config(metadata, config)
+            save_resmade_checkpoint(directory / "checkpoint_best.pt", model, torch.optim.Adam(model.parameters()),
+                                    epoch=0, step=7, metadata=metadata, predicate_vocabularies=vocab, config=config)
+            cls.models[mbr] = directory
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def test_no_mbr_model_answers_windows_on_the_endpoints(self) -> None:
+        bridge = _bridge()
+        model = bridge.OwnModel(self.models[False] / "training_config.yaml", self.models[False] / "checkpoint_best.pt")
+        self.assertEqual(model.spatial, "segment_endpoints")
+        self.assertNotIn("segments:seg_min_x", [c.name for c in model.metadata.columns])
+        mbr = bridge.OwnModel(self.models[True] / "training_config.yaml", self.models[True] / "checkpoint_best.pt")
+        self.assertEqual(mbr.spatial, "segment_mbr")
+        results = {}
+        for relation in ("single", "multi"):
+            out = self.root / f"nombr_{relation}"
+            args = ["evaluate", "--training-config", str(self.models[False] / "training_config.yaml"),
+                    "--checkpoint", str(self.models[False] / "checkpoint_best.pt"),
+                    "--queries-jsonl", str(self.benchmark), "--select-json", json.dumps({"relation": relation}),
+                    "--predictions", str(out / "p.csv"), "--latency", str(out / "l.csv"), "--repetitions", "1"]
+            self.assertEqual(bridge.main(args), 0)
+            results[relation] = _csv(out / "p.csv")
+        rows = {r: [x for x in _fixture.benchmark_rows() if x["category"]["relation"] == r] for r in results}
+        windowed = lambda row: any(p["kind"] in ("spatial", "spatio_temporal") for p in row["predicates"])  # noqa: E731
+        # single queries (table rows): every window is answered, on the endpoints
+        single = results["single"]
+        self.assertTrue(all(p["status"] == "ok" for p in single), single[:3])
+        for prediction, row in zip(single, rows["single"]):
+            self.assertEqual("approx:segment_endpoints" in prediction["diagnostic"], windowed(row), row["query_id"])
+        # multi queries with a window: the model's one-pass segment measure cannot express "intersects"
+        # without the MBR columns, so the model itself refuses them; the others are answered
+        for prediction, row in zip(results["multi"], rows["multi"]):
+            if windowed(row):
+                self.assertEqual((prediction["status"], prediction["diagnostic"]),
+                                 ("unsupported", "not_applicable:unsupported_base_segment_spatial_measure"))
+            else:
+                self.assertEqual(prediction["status"], "ok", row["query_id"])
+        self.assertTrue(any(windowed(row) for row in rows["multi"]))
+        self.assertNotIn("approx:segment_mbr", json.dumps(results))
+
+    def test_shipped_ablation_configs_render_and_run(self) -> None:
+        import re
+        import shlex
+
+        from evaluation.eval_core.config import load_experiment_config
+        from evaluation.eval_core.workload_formats import format_of
+
+        shipped = REPO / "evaluation/trajectory_pol_porto/configs"
+        reference = (shipped / "pol_v3" / "own_model.yaml").read_text(encoding="utf-8")
+        reference = reference[reference.index("extends:"):]
+        ablations = sorted((shipped / "pol_v3_ablations").glob("*.yaml"))
+        self.assertEqual([p.stem for p in ablations],
+                         [f"own_model_ablation_{n}" for n in ("direct_io_off", "no_mbr", "no_window_predicates",
+                                                              "rare_support_off", "root_first_order")])
+        root = self.root / "configs"
+        (root / "pol_v3").mkdir(parents=True)
+        (root / "pol_v3_ablations").mkdir()
+        base = (shipped / "pol_v3" / "_base.yaml").read_text(encoding="utf-8")
+        base = re.sub(r"/work_beegfs/\S+/benchmark\.jsonl", str(self.benchmark), base)
+        base = base.replace("../../../../query_generation/benchmark_v3/pol_v3_config.json", str(_fixture.V3_CONFIG))
+        base = base.replace("expected_query_count: 6000", f"expected_query_count: {8 * _fixture.MULTI}")
+        base = base.replace("expected_query_count: 2000", f"expected_query_count: {8 * _fixture.SINGLE}")
+        (root / "pol_v3" / "_base.yaml").write_text(base, encoding="utf-8")
+        allowed = ("  variant_id:", "  display_name:", "  seeds:", "  installed_version:", "  adaptation:")
+        for path in ablations:
+            short = path.stem.removeprefix("own_model_ablation_")
+            name = f"pol_ablation_{short}"
+            text = path.read_text(encoding="utf-8")
+            body = text[text.index("extends:"):]
+            prefix = "/work_beegfs/sunip956/master_thesis_trajectories/p7_models/"
+            self.assertNotIn(prefix + "pol_v3/seed_", body)
+            restored = body.replace(prefix + f"pol_v3_ablations/{name}/seed_", prefix + "pol_v3/seed_")
+            restored = restored.replace("extends: ../pol_v3/_base.yaml", "extends: _base.yaml")
+            changed = [b for a, b in zip(reference.splitlines(), restored.splitlines()) if a != b]
+            self.assertEqual(len(reference.splitlines()), len(restored.splitlines()), path.name)
+            self.assertTrue(all(line.startswith(allowed) for line in changed), (path.name, changed))
+            self.assertEqual(("  adaptation:" in "".join(changed)), short == "no_mbr", path.name)
+            models = self.root / "p7_models" / name / "seed_0"
+            models.mkdir(parents=True)
+            source = self.models[short != "no_mbr"]
+            for file in ("checkpoint_best.pt", "training_config.yaml"):
+                (models / file).symlink_to(source / file)
+            (root / "pol_v3_ablations" / path.name).write_text(
+                text.replace(prefix + f"pol_v3_ablations/{name}/seed_{{seed}}",
+                             str(self.root / "p7_models" / name / "seed_{seed}")), encoding="utf-8")
+            config = load_experiment_config(root / "pol_v3_ablations" / path.name)
+            self.assertEqual((config.experiment_id, config.method_id, config.variant_id, config.seeds),
+                             ("traj_phase1_pol_v3", "own_model", f"ablation_{short}", (0,)))
+            workload = next(w for w in config.workloads if w.workload_id == "pol_v3_multi")
+            out = self.root / f"rendered_{short}"
+            values = {"seed": "0", "exchange_directory": str(out), "predictions_csv": str(out / "p.csv"),
+                      "latency_csv": str(out / "l.csv"), "query_limit": "3",
+                      **format_of(workload).placeholders(workload)}
+            argv = shlex.split(config.adapter["evaluate_command"].format(**values))
+            self.assertEqual(argv[argv.index("--estimate") + 1], "dedup")
+            self.assertEqual(_bridge().main(argv[2:]), 0)
+            text = (out / "p.csv").read_text(encoding="utf-8")
+            if short == "no_mbr":  # windowed multi queries: refused by the model (see the test above)
+                self.assertIn("unsupported_base_segment_spatial_measure", text)
+                self.assertNotIn("approx:segment_mbr", text)
+            else:
+                self.assertIn("approx:segment_mbr", text)
+
+
 class SubmitP7Test(unittest.TestCase):
     """STAGE=run must not evaluate other checkpoints than P7_MODELS names (review of ab48208)."""
 
@@ -469,7 +618,8 @@ class SubmitP7Test(unittest.TestCase):
             env = {**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}", "FAKE_SBATCH_LOG": str(log),
                    "REPO_ROOT": str(REPO), "STAGE": "run", **env_extra}
             # the caller's shell must not choose the dataset, configs or models (POL is the default)
-            for name in ("P7_MODELS", "TRAJ_DATASET", "CONFIG_NAMES", "COMPARE_WITH", "COMPARISON_DIR", "AFTER_JOB"):
+            for name in ("P7_MODELS", "TRAJ_DATASET", "CONFIG_NAMES", "COMPARE_WITH", "COMPARISON_DIR", "AFTER_JOB",
+                         "CONFIG_DIR"):
                 if name not in env_extra:
                     env.pop(name, None)
             result = subprocess.run(["bash", str(REPO / "evaluation/trajectory_pol_porto/slurm/submit_p7.sh")],
@@ -482,6 +632,20 @@ class SubmitP7Test(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(submitted), 3)  # two seed arrays and the comparison
         self.assertTrue(all("--array=0,1,2" in line for line in submitted[:2]))
+
+    def test_ablation_folder_with_its_own_models(self) -> None:
+        folder = REPO / "evaluation/trajectory_pol_porto/configs/pol_v3_ablations"
+        models = "/work_beegfs/sunip956/master_thesis_trajectories/p7_models/pol_v3_ablations/pol_ablation_no_mbr"
+        result, submitted = self._submit({"CONFIG_DIR": str(folder), "CONFIG_NAMES": "own_model_ablation_no_mbr",
+                                          "P7_MODELS": models})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(submitted), 2)  # one seed array and the comparison
+        self.assertIn("--array=0 ", submitted[0])
+        self.assertIn(f"CONFIG={folder}/own_model_ablation_no_mbr.yaml", submitted[0])
+        # another ablation's models are refused
+        result, submitted = self._submit({"CONFIG_DIR": str(folder), "CONFIG_NAMES": "own_model_ablation_direct_io_off",
+                                          "P7_MODELS": models})
+        self.assertEqual((result.returncode, submitted), (2, []))
 
     def test_after_job_reaches_the_first_submission(self) -> None:
         # also guards the empty-array expansion (bash 3.2 with set -u rejected "${after[@]}")
