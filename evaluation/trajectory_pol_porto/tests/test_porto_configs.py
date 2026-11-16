@@ -494,7 +494,9 @@ class SubmitScriptsDatasetTest(unittest.TestCase):
         for script, extra in self.SCRIPTS.items():
             result, submitted = self._submit(script, extra)
             self.assertEqual(result.returncode, 0, (script, result.stderr))
-            text = "\n".join(submitted).replace("trajectory_pol_porto", "")
+            # the checkout's own path may contain "porto" (worktree Master_thesis_cardest_porto_p9)
+            repo = str(CONFIGS.parents[2])
+            text = "\n".join(submitted).replace(repo, "<repo>").replace("trajectory_pol_porto", "")
             self.assertNotIn("porto", text, script)
             self.assertIn("configs/pol_v3/", text, script)
             if script in ("submit_p4.sh", "submit_timing.sh"):
