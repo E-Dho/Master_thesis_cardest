@@ -14,7 +14,7 @@ experiment:
   seeds: [0]
 source:
   url: https://github.com/E-Dho/Master_thesis_cardest.git
-  installed_version: model trained at model/pol-ablations (a2ace69, config model/configs/pol_ablation_direct_io_off.yaml, seed 0); inference code of this repository (the bridge records the model package it imported)
+  installed_version: model trained at model/pol-ablations (c47b6c4, config model/configs/pol_ablation_direct_io_off.yaml, seed 0); inference code of this repository (the bridge records the model package it imported)
 timing:
   device: cpu
   synchronize_cuda: false
