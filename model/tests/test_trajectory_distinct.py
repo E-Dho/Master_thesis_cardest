@@ -1923,6 +1923,44 @@ trajectory_distinct:
         )
         vocabularies.encode_rows([list(context.tokens)])
 
+    def test_endpoint_window_tokens_use_each_columns_own_domain(self) -> None:
+        # trajectory_spatial disabled (no-MBR ablation): the window bounds are drawn from
+        # the union of the s_x/e_x (s_y/e_y) domains; each column's range token must be
+        # snapped to that column's own values, keep exactly the same values, stay
+        # row-satisfied and be encodable (it raised "outside predicate slot domain").
+        metadata = _pol_segment_metadata()
+        row = _encode_pol_segments(metadata, ((0, 0.0, 10.0, 0.0, 0.0, 1.0, 1.0, 1, 1),))[0]
+        generator = PredicateTrainingContextGenerator(
+            {"enabled": True, "trajectory_query_semantics": "pol_segments",
+             "trajectory_spatial": {"enabled": False}}
+        )
+        vocabularies = PredicateVocabularies.from_metadata(metadata, encoding_mode="two_slot_binary_duet")
+        bounds = {"segments:s_x": "x", "segments:e_x": "x", "segments:s_y": "y", "segments:e_y": "y"}
+        snapped = 0
+        for seed in range(200):
+            generated = generator._sample_pol_spatial_query(  # type: ignore[attr-defined]
+                row, metadata, np.random.default_rng(seed)
+            )
+            if generated is None:
+                continue
+            scalar, spatial = generated
+            window = {"x": (spatial.min_x, spatial.max_x), "y": (spatial.min_y, spatial.max_y)}
+            tokens = [PredicateToken.wildcard()] * len(metadata.columns)
+            for name, token in scalar:
+                index = metadata.column_index(name)
+                domain = metadata.columns[index].domain
+                self.assertEqual(token.op, PredicateOp.RANGE)
+                self.assertIn(token.value, domain)
+                self.assertIn(token.upper, domain)
+                self.assertTrue(token.satisfies(domain[int(row[index])]))
+                low, high = window[bounds[name]]
+                self.assertEqual({v for v in domain if token.satisfies(v)},
+                                 {v for v in domain if low <= v <= high})
+                snapped += (token.value, token.upper) != (low, high)
+                tokens[index] = token
+            vocabularies.encode_rows([tokens])
+        self.assertGreater(snapped, 0)  # the case that used to fail does occur
+
     def test_mbr_generator_sorts_initially_inverted_bounds(self) -> None:
         metadata = _pol_segment_mbr_metadata()
         row = _encode_pol_segments(

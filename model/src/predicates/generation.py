@@ -913,12 +913,25 @@ class PredicateTrainingContextGenerator:
         max_x = float(x_upper_candidates[int(rng.integers(0, len(x_upper_candidates)))])
         min_y = float(y_lower_candidates[int(rng.integers(0, len(y_lower_candidates)))])
         max_y = float(y_upper_candidates[int(rng.integers(0, len(y_upper_candidates)))])
-        scalar = [
-            ("segments:s_x", PredicateToken.range(min_x, max_x)),
-            ("segments:e_x", PredicateToken.range(min_x, max_x)),
-            ("segments:s_y", PredicateToken.range(min_y, max_y)),
-            ("segments:e_y", PredicateToken.range(min_y, max_y)),
-        ]
+        # The window bounds come from the union of the s_x/e_x (s_y/e_y) domains, so a
+        # bound need not be a value of the column it constrains, and the predicate
+        # vocabulary only encodes a column's own values. Snap each column's range to
+        # its own domain (lower bound up, upper bound down), as the MBR path does:
+        # the same set of that column's values, so the condition is unchanged, and
+        # the row's own value lies inside, so the context stays row-satisfied.
+        scalar = []
+        for name, lower, upper in (
+            ("segments:s_x", min_x, max_x),
+            ("segments:e_x", min_x, max_x),
+            ("segments:s_y", min_y, max_y),
+            ("segments:e_y", min_y, max_y),
+        ):
+            cache = compiled.numeric_literals_by_column[compiled.column_name_to_index[name]]
+            low = _ceil_numeric_literal(cache, lower)
+            high = _floor_numeric_literal(cache, upper)
+            if low is None or high is None or low[0] > high[0]:
+                return None
+            scalar.append((name, PredicateToken.range(low[1], high[1])))
         return scalar, SegmentSpatialPredicate(
             min_x=min_x,
             min_y=min_y,
