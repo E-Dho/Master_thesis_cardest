@@ -514,6 +514,11 @@ def _numeric_root_candidates(
     )
     candidates: list[RootDataStratum] = []
     p_equal = float(predicate_probabilities.get("equality", 0.0))
+    # Without native ranges in the predicate mix (native_range_probability 0) a
+    # stratum has no range support to plan for: its expected range support is 0,
+    # which would make "native_range" every stratum's bottleneck and the forced
+    # predicates RANGE tokens the main stream never produces. Leave it undefined.
+    plan_ranges = float(predicate_probabilities.get("range", 0.0)) > 0.0
     for rank, (domain_index, value) in enumerate(comparable):
         foj_count = float(ordered_counts[rank])
         probability = float(probabilities[rank])
@@ -532,7 +537,7 @@ def _numeric_root_candidates(
                     probability=probability,
                     expected_target_rows=n_total * probability,
                     expected_equality_count=expected_equality,
-                    expected_range_support=float(range_equality_support[rank]),
+                    expected_range_support=float(range_equality_support[rank]) if plan_ranges else None,
                     source=source,
                     semantic_type=semantic_type,
                 ),
@@ -557,7 +562,7 @@ def _numeric_root_candidates(
                         probability=probability,
                         expected_target_rows=n_total * probability,
                         expected_lower_count=expected_lower,
-                        expected_range_support=float(range_lower_support[rank]),
+                        expected_range_support=float(range_lower_support[rank]) if plan_ranges else None,
                         source=source,
                         semantic_type=semantic_type,
                     ),
@@ -580,7 +585,7 @@ def _numeric_root_candidates(
                         probability=probability,
                         expected_target_rows=n_total * probability,
                         expected_upper_count=expected_upper,
-                        expected_range_support=float(range_upper_support[rank]),
+                        expected_range_support=float(range_upper_support[rank]) if plan_ranges else None,
                         source=source,
                         semantic_type=semantic_type,
                     ),
