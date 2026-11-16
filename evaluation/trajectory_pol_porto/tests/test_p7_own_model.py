@@ -468,8 +468,10 @@ class SubmitP7Test(unittest.TestCase):
             fake.chmod(0o755)
             env = {**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}", "FAKE_SBATCH_LOG": str(log),
                    "REPO_ROOT": str(REPO), "STAGE": "run", **env_extra}
-            if "P7_MODELS" not in env_extra:
-                env.pop("P7_MODELS", None)
+            # the caller's shell must not choose the dataset, configs or models (POL is the default)
+            for name in ("P7_MODELS", "TRAJ_DATASET", "CONFIG_NAMES", "COMPARE_WITH", "COMPARISON_DIR", "AFTER_JOB"):
+                if name not in env_extra:
+                    env.pop(name, None)
             result = subprocess.run(["bash", str(REPO / "evaluation/trajectory_pol_porto/slurm/submit_p7.sh")],
                                     env=env, capture_output=True, text=True)
             submitted = log.read_text().splitlines() if log.exists() else []
