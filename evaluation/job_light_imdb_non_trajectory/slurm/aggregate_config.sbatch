@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT=/work_beegfs/sunip956/master_thesis_trajectories
-REPO=$ROOT/Master_thesis_cardest_joblight_evaluation
+REPO=${REPO:-$ROOT/Master_thesis_cardest_joblight_evaluation}
 PYTHON=/work_beegfs/sunip956/micromamba/envs/geo-mlp/bin/python
 PACKAGES=$ROOT/joblight_evaluation/python_packages
 CONFIG=${CONFIG:?set CONFIG to an evaluation config path}
