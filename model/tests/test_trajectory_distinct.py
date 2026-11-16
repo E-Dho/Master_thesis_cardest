@@ -769,8 +769,17 @@ class TrajectoryDistinctTest(unittest.TestCase):
         spatial = context.trajectory_query.spatial_predicates[0]
         self.assertEqual(context.tokens[1], PredicateToken(PredicateOp.LESS_THAN, value=temporal.upper))
         self.assertEqual(context.tokens[2], PredicateToken(PredicateOp.GREATER_EQUAL, value=temporal.lower))
-        self.assertEqual(context.tokens[3], PredicateToken.range(spatial.min_x, spatial.max_x))
-        self.assertEqual(context.tokens[5], PredicateToken.range(spatial.min_x, spatial.max_x))
+        # s_x (index 3) and e_x (index 5): the window's x range snapped to each column's
+        # own domain, i.e. the same column values as [min_x, max_x] (a bound need not be
+        # a value of the column; such a token could not be encoded)
+        for index in (3, 5):
+            domain = metadata.columns[index].domain
+            token = context.tokens[index]
+            self.assertEqual(token.op, PredicateOp.RANGE)
+            self.assertIn(token.value, domain)
+            self.assertIn(token.upper, domain)
+            self.assertEqual({v for v in domain if token.satisfies(v)},
+                             {v for v in domain if spatial.min_x <= v <= spatial.max_x})
         self.assertTrue(
             context_satisfies_row_with_trajectory_semantics(context, row[0], metadata)
         )
