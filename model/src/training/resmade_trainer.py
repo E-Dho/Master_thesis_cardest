@@ -19,6 +19,7 @@ from model.src.data.trajectory_distinct import (
 )
 from model.src.model.anpm import ANPMConfig
 from model.src.model.checkpoint import save_resmade_checkpoint
+from model.src.model.factorization import factorization_plan_hash
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.model.resmade import TrajectoryDistinctConfig
 from model.src.predicates.generation import (
@@ -627,6 +628,68 @@ def _predicate_encoding_feature_tables(
     }
 
 
+def _structure_signature(metadata: object) -> list[tuple[Any, ...]]:
+    return [
+        (column.name, column.kind.value, tuple(column.domain), column.fanout_source, column.table)
+        for column in metadata.columns
+    ]
+
+
+def _initialize_from_checkpoint(
+    model: PredicateResMADE,
+    path: object,
+    metadata: object,
+    device: object,
+) -> dict[str, Any] | None:
+    """Start from another run's weights (``training.init_checkpoint``; fine-tuning).
+
+    Data-shift ablation (2026-11-17): a model trained on 80 % of the trips is
+    fine-tuned on the full data. Its preparation keeps the full preparation's
+    columns and value domains (model/scripts/subset_prepared_full_join.py), so
+    the two models share vocabulary and architecture; anything else is
+    refused. Only the weights are loaded: the optimizer starts fresh with this
+    run's learning rate, and the run's own data, join cardinality and schema
+    hash are the ones written to its checkpoints. Without the key nothing changes.
+    """
+
+    if path is None or path == "":
+        return None
+    import hashlib
+
+    import torch
+
+    from model.src.data.schema import ModelMetadata
+
+    checkpoint = Path(str(path))
+    try:
+        payload = torch.load(checkpoint, map_location=device, weights_only=False)
+    except TypeError:  # older PyTorch
+        payload = torch.load(checkpoint, map_location=device)
+    stored = ModelMetadata.from_json_dict(payload["metadata"])
+    if _structure_signature(stored) != _structure_signature(metadata):
+        raise ValueError(
+            f"init_checkpoint {checkpoint} has other columns or value domains than this run's data; "
+            "fine-tuning needs the same vocabulary (prepare the smaller data as a subset of this preparation)"
+        )
+    if factorization_plan_hash(stored.factorization_plan) != factorization_plan_hash(metadata.factorization_plan):
+        raise ValueError(f"init_checkpoint {checkpoint} has another factorization plan")
+    if payload.get("resmade_config") != model.config.to_json_dict():
+        raise ValueError(f"init_checkpoint {checkpoint} has another model architecture")
+    model.load_state_dict(payload["model_state_dict"], strict=True)
+    digest = hashlib.sha256()
+    with checkpoint.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 22), b""):
+            digest.update(block)
+    return {
+        "path": str(checkpoint),
+        "sha256": digest.hexdigest(),
+        "step": payload.get("step"),
+        "join_cardinality": payload.get("join_cardinality"),
+        "schema_hash": stored.schema_hash or stored.stable_schema_hash(),
+        "loaded": "model weights only (fresh optimizer)",
+    }
+
+
 def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -> TrainingResult:
     """Run the ResMADE training loop over full-join batches and save a checkpoint."""
 
@@ -645,6 +708,9 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     optimizer_name = str(training.get("optimizer", "adam")).lower()
     optimizer_class = torch.optim.AdamW if optimizer_name == "adamw" else torch.optim.Adam
     optimizer = optimizer_class(model.parameters(), lr=float(training["learning_rate"]))
+    init_checkpoint_summary = _initialize_from_checkpoint(
+        model, training.get("init_checkpoint"), metadata, device
+    )
     first_loss: float | None = None
     first_uniform_loss: float | None = None
     first_auxiliary_loss_unscaled: float | None = None
@@ -1155,6 +1221,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "last_auxiliary_loss_unscaled": last_auxiliary_loss_unscaled,
         "first_auxiliary_loss_scaled": float(first_auxiliary_loss_scaled or 0.0),
         "last_auxiliary_loss_scaled": last_auxiliary_loss_scaled,
+        "init_checkpoint": init_checkpoint_summary,
         "optimizer_steps": global_step,
         "batch_size": batch_size,
         "total_sampled_tuples": global_step * batch_size,
