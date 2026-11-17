@@ -13,7 +13,7 @@ experiment:
   seeds: [0]
 source:
   url: https://github.com/E-Dho/Master_thesis_cardest.git
-  installed_version: model trained at model/data-shift (58daffe, config model/configs/porto_shift_random80_finetune.yaml); inference code of this repository
+  installed_version: model trained at model/data-shift (f03e151, config model/configs/porto_shift_random80_finetune.yaml); inference code of this repository
 timing:
   device: cpu
   synchronize_cuda: false
