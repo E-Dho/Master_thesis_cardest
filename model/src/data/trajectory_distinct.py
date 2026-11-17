@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
@@ -21,6 +22,9 @@ TEMPORAL_OVERLAP_SEMANTICS_VERSION = "pol_half_open_overlap_v1"
 SPATIAL_INTERSECTS_SEMANTICS_VERSION = "line_segment_aabb_intersects_v1"
 TRAJECTORY_INDEX_FORMAT_VERSION = 3
 _SORTED_NUMERIC_DOMAIN_CACHE: dict[int, bool] = {}
+# id(domain) -> (domain, its numeric literals as _numeric_domain_literals returns them,
+# the non-NaN numerics sorted, their literals); the domain is kept so a reused id is detected
+_NUMERIC_LITERALS_CACHE: dict[int, tuple[tuple[Any, ...], tuple[tuple[float, Any], ...], list[float], tuple[Any, ...]]] = {}
 
 
 class UnsupportedTrajectoryContext(ValueError):
@@ -548,25 +552,57 @@ def _floor_domain_literal_by_scan(
     domain: tuple[Any, ...],
     upper: float,
 ) -> tuple[float, Any] | None:
-    best: tuple[float, Any] | None = None
-    for numeric, literal in _numeric_domain_literals(domain):
-        if numeric <= upper and (best is None or numeric > best[0]):
-            best = (numeric, literal)
-    return best
+    """The largest numeric literal <= ``upper`` among the domain's numeric literals.
+
+    For domains that are not all-numeric-and-sorted, e.g. every column of a
+    snapshot preparation, whose domains end with the ``__OUTER_MISSING__`` token
+    (and may hold ``__SQL_NULL__``). It used to scan and re-sort the whole domain
+    on every call: about 5 s per MBR column per spatial query on Porto's ~10^7
+    coordinates. The sorted numeric literals are now built once per domain and
+    searched by bisection; the result is the scan's (unique numerics, NaN never
+    selected).
+    """
+    if math.isnan(upper):
+        return None
+    _, _, numerics, literals = _numeric_literal_index(domain)
+    index = bisect_right(numerics, upper) - 1
+    if index < 0:
+        return None
+    return numerics[index], literals[index]
 
 
 def _ceil_domain_literal_by_scan(
     domain: tuple[Any, ...],
     lower: float,
 ) -> tuple[float, Any] | None:
-    best: tuple[float, Any] | None = None
-    for numeric, literal in _numeric_domain_literals(domain):
-        if numeric >= lower and (best is None or numeric < best[0]):
-            best = (numeric, literal)
-    return best
+    """The smallest numeric literal >= ``lower``; see ``_floor_domain_literal_by_scan``."""
+    if math.isnan(lower):
+        return None
+    _, _, numerics, literals = _numeric_literal_index(domain)
+    index = bisect_left(numerics, lower)
+    if index >= len(numerics):
+        return None
+    return numerics[index], literals[index]
+
+
+def _numeric_literal_index(
+    domain: tuple[Any, ...],
+) -> tuple[tuple[Any, ...], tuple[tuple[float, Any], ...], list[float], tuple[Any, ...]]:
+    cached = _NUMERIC_LITERALS_CACHE.get(id(domain))
+    if cached is not None and cached[0] is domain:
+        return cached
+    candidates = _numeric_domain_literals_uncached(domain)
+    ordered = sorted((item for item in candidates if not math.isnan(item[0])), key=lambda item: item[0])
+    entry = (domain, candidates, [numeric for numeric, _ in ordered], tuple(literal for _, literal in ordered))
+    _NUMERIC_LITERALS_CACHE[id(domain)] = entry
+    return entry
 
 
 def _numeric_domain_literals(domain: tuple[Any, ...]) -> tuple[tuple[float, Any], ...]:
+    return _numeric_literal_index(domain)[1]
+
+
+def _numeric_domain_literals_uncached(domain: tuple[Any, ...]) -> tuple[tuple[float, Any], ...]:
     values: list[tuple[float, Any]] = []
     seen: set[float] = set()
     for literal in domain:
