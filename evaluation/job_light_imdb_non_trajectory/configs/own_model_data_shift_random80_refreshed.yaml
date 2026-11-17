@@ -1,0 +1,60 @@
+# Data-shift ablation on JOB-light-ranges (decided 2026-11-17), random80, refreshed: the stale model with refreshed join cardinality, current labels.
+# The evaluation of own_model_job_light_ranges_full_schema_step_11000.yaml (same workload, bridge and
+# timing settings) for the run /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_0
+# (model/slurm/job_light_ranges_data_shift_20k.sbatch KIND=stale SPLIT=random80), checkpoint step 11000
+# (the evaluated model's step).
+# Model code: model/imdb-data-shift 03decaf (checkout Master_thesis_cardest_imdb_data_shift).
+schema_version: 1
+experiment:
+  experiment_id: joblight_phase1
+  method_id: own_model
+  variant_id: data_shift_random80_refreshed
+  display_name: Own model, data shift random80 (refreshed)
+  seeds: [0]
+source:
+  url: https://github.com/E-Dho/Master_thesis_cardest.git
+  revision: 03decaf795f896641d0f1c7f965369761ec8ead6
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_imdb_data_shift
+paths:
+  results_root: ../results
+workloads:
+  job_light_ranges:
+    queries_csv: /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv
+    expected_query_count: 1000
+timing:
+  device: cuda
+  synchronize_cuda: true
+  comparison_basis: neural_gpu_inference_with_cpu_supplement
+  published_reference_hardware: Actual cluster CPU and NVIDIA L40S are reported
+  warmup_passes: 1
+  repetitions: 10
+  sequential_single_query: true
+  includes_predicate_encoding: true
+  includes_workload_parsing: false
+  primary_profile: gpu_single_query
+  profiles: [cpu_1core, gpu_single_query]
+  estimate_consistency:
+    mode: deterministic
+    relative_tolerance: 1.0e-4
+    absolute_tolerance: 1.0e-6
+resources:
+  profile: trained_checkpoint_gpu_inference
+  cpu_threads: 4
+artifacts:
+  dataset_root: /work_beegfs/sunip956/master_thesis_trajectories/datasets/job
+  dataset_manifest: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/imdb_dataset_manifest.json
+  checkpoint_template: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/checkpoint_step_11000.pt
+  training_config_template: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/training_config.yaml
+adapter:
+  type: own_model
+  working_directory: ../../..
+  environment:
+    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_imdb_data_shift
+  require_smoke_before_build: true
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --refresh-join-cardinality /work_beegfs/sunip956/master_thesis_trajectories/data_shift/imdb/random80/prepared/subset.json
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --device cpu --refresh-join-cardinality /work_beegfs/sunip956/master_thesis_trajectories/data_shift/imdb/random80/prepared/subset.json
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py build --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --refresh-join-cardinality /work_beegfs/sunip956/master_thesis_trajectories/data_shift/imdb/random80/prepared/subset.json
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cuda --refresh-join-cardinality /work_beegfs/sunip956/master_thesis_trajectories/data_shift/imdb/random80/prepared/subset.json
+  timing_commands:
+    cpu_1core: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cpu --refresh-join-cardinality /work_beegfs/sunip956/master_thesis_trajectories/data_shift/imdb/random80/prepared/subset.json
+    gpu_single_query: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/random80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cuda --refresh-join-cardinality /work_beegfs/sunip956/master_thesis_trajectories/data_shift/imdb/random80/prepared/subset.json

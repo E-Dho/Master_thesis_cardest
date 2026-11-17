@@ -275,84 +275,103 @@ class ImdbDataShiftTest(unittest.TestCase):
             shift.neurocard_workdir(package, self.subset, self.subset, self.root / "nc_other")
 
 
+def build_prepared(root: Path) -> dict:
+    """Synthetic full data with its full preparation, a temporal split, the subset CSVs and
+    the subset preparation (NeuroCard's sampler replaced by an enumeration of the join)."""
+
+    from model.src.data.complete_domain_preparation import (
+        CompleteDomainSpec, build_complete_metadata, build_manifest_payload, encode_sample_dataframe,
+        preparation_stats, write_prepared_artifacts)
+    from model.src.model.factorization import FactorizationConfig
+
+    full_csv = root / "full"
+    _imdb(full_csv, titles=40, seed=5)
+    full_rows = _enumerate_join(full_csv)
+    spec = CompleteDomainSpec(
+        join_tables=shift.JOB_LIGHT_TABLES, join_root="title",
+        join_keys={table: (shift.KEY[table],) for table in shift.JOB_LIGHT_TABLES},
+        join_cardinality=len(full_rows), dataset_name="job_light_test", dataset_type="neurocard_full_join")
+    metadata = build_complete_metadata(_frames(full_csv, MODEL_COLUMNS), spec)
+    names = [column.name for column in metadata.columns]
+    frame = pd.DataFrame(full_rows)[names]
+    encoded = encode_sample_dataframe(frame, metadata, strict=True)
+    full_prepared = root / "prepared_full"
+    write_prepared_artifacts(
+        prepared_directory=full_prepared,
+        manifest_payload=build_manifest_payload(metadata=metadata, spec=spec, sample_rows=len(frame),
+                                                neurocard_use_cols="content"),
+        encoded_rows=encoded.encoded_rows,
+        stats=preparation_stats(metadata=metadata, encoded_sample=encoded, factorization_config=FactorizationConfig()))
+    split = root / "split"
+    shift.write_split(split, shift.select(full_csv, "temporal", expected_full=len(full_rows)))
+    subset_csv = root / "subset"
+    shift.subset_csvs(full_csv, split, subset_csv)
+
+    def fake_sampler(package, csv_directory, use_cols, sample_rows):
+        assert use_cols == "content" and Path(csv_directory) == subset_csv
+        rows = _enumerate_join(csv_directory)
+        return len(rows), pd.DataFrame(rows)[names]
+
+    subset_prepared = root / "prepared_subset"
+    summary = shift.prepare(full_prepared, subset_csv, split, subset_prepared, package=root / "unused",
+                            sampler=fake_sampler)
+    return {"full_csv": full_csv, "full_prepared": full_prepared, "split": split, "subset_csv": subset_csv,
+            "subset_prepared": subset_prepared, "summary": summary, "fake_sampler": fake_sampler, "metadata": metadata}
+
+
+def fixture_config(root: Path, name: str, prepared: Path, extra: str = "") -> Path:
+    """The evaluated model's training config, tiny, on a prepared directory's fixture rows."""
+
+    text = SOURCE_CONFIG.read_text()
+    for pattern, value in ((r"(?m)^  prepared_directory: .*", f"  prepared_directory: {prepared}"),
+                           (r"(?m)^  sampling_mode: live", "  sampling_mode: fixture"),
+                           (r"hidden_sizes: \[512, 512, 512, 512\]", "hidden_sizes: [16, 16]"),
+                           (r"(?m)^  batch_size: 2048", "  batch_size: 16"),
+                           (r"(?m)^  steps_per_epoch: 40000", "  steps_per_epoch: 4"),
+                           (r"(?m)^  checkpoint_interval_steps: 500", "  checkpoint_interval_steps: 2"),
+                           (r"(?m)^  validation_interval_steps: 250", "  validation_interval_steps: 2"),
+                           (r"(?m)^  device: auto", "  device: cpu"),
+                           (r"(?m)^rare_support:\n  enabled: true", "rare_support:\n  enabled: false"),
+                           (r"(?m)^rare_auxiliary:\n  enabled: true", "rare_auxiliary:\n  enabled: false"),
+                           (r"(?m)^  output_directory: .*", f"  output_directory: {root / 'runs' / name}")):
+        text, n = re.subn(pattern, value, text)
+        assert n >= 1, pattern
+    if extra:
+        text = text.replace("training:\n", "training:\n" + extra, 1)
+    path = root / f"{name}.yaml"
+    path.write_text(text)
+    return path
+
+
+def train(path: Path):
+    from model.src.config import load_simple_yaml, validate_config
+    from model.src.data.sample_sources import sample_source_from_config
+    from model.src.training.resmade_trainer import train_resmade_sample_source
+
+    config = load_simple_yaml(str(path))
+    validate_config(config)
+    return train_resmade_sample_source(sample_source_from_config(config), config), config
+
+
 @unittest.skipUnless(__import__("importlib").util.find_spec("torch"), "needs torch")
 class ImdbPrepareAndFineTuneTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        from model.src.data.complete_domain_preparation import (
-            CompleteDomainSpec, build_complete_metadata, build_manifest_payload, encode_sample_dataframe,
-            preparation_stats, write_prepared_artifacts)
-        from model.src.model.factorization import FactorizationConfig
-
         cls.tmp = tempfile.TemporaryDirectory()
-        root = cls.root = Path(cls.tmp.name)
-        cls.full_csv = root / "full"
-        _imdb(cls.full_csv, titles=40, seed=5)
-        full_rows = _enumerate_join(cls.full_csv)
-        spec = CompleteDomainSpec(
-            join_tables=shift.JOB_LIGHT_TABLES, join_root="title",
-            join_keys={table: (shift.KEY[table],) for table in shift.JOB_LIGHT_TABLES},
-            join_cardinality=len(full_rows), dataset_name="job_light_test", dataset_type="neurocard_full_join")
-        metadata = build_complete_metadata(_frames(cls.full_csv, MODEL_COLUMNS), spec)
-        cls.metadata = metadata
-        names = [column.name for column in metadata.columns]
-        frame = pd.DataFrame(full_rows)[names]
-        encoded = encode_sample_dataframe(frame, metadata, strict=True)
-        cls.full_prepared = root / "prepared_full"
-        write_prepared_artifacts(
-            prepared_directory=cls.full_prepared,
-            manifest_payload=build_manifest_payload(metadata=metadata, spec=spec, sample_rows=len(frame),
-                                                    neurocard_use_cols="content"),
-            encoded_rows=encoded.encoded_rows,
-            stats=preparation_stats(metadata=metadata, encoded_sample=encoded, factorization_config=FactorizationConfig()))
-        cls.split = root / "split"
-        shift.write_split(cls.split, shift.select(cls.full_csv, "temporal", expected_full=len(full_rows)))
-        cls.subset_csv = root / "subset"
-        shift.subset_csvs(cls.full_csv, cls.split, cls.subset_csv)
-
-        def fake_sampler(package, csv_directory, use_cols, sample_rows):
-            assert use_cols == "content" and Path(csv_directory) == cls.subset_csv
-            rows = _enumerate_join(csv_directory)
-            return len(rows), pd.DataFrame(rows)[names]
-
-        cls.fake_sampler = staticmethod(fake_sampler)
-        cls.subset_prepared = root / "prepared_subset"
-        cls.summary = shift.prepare(cls.full_prepared, cls.subset_csv, cls.split, cls.subset_prepared,
-                                    package=root / "unused", sampler=fake_sampler)
+        cls.root = Path(cls.tmp.name)
+        built = build_prepared(cls.root)
+        for key, value in built.items():
+            setattr(cls, key, staticmethod(value) if key == "fake_sampler" else value)
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.tmp.cleanup()
 
     def _config(self, name: str, prepared: Path, extra: str = "") -> Path:
-        text = SOURCE_CONFIG.read_text()
-        for pattern, value in ((r"(?m)^  prepared_directory: .*", f"  prepared_directory: {prepared}"),
-                               (r"(?m)^  sampling_mode: live", "  sampling_mode: fixture"),
-                               (r"hidden_sizes: \[512, 512, 512, 512\]", "hidden_sizes: [16, 16]"),
-                               (r"(?m)^  batch_size: 2048", "  batch_size: 16"),
-                               (r"(?m)^  steps_per_epoch: 40000", "  steps_per_epoch: 4"),
-                               (r"(?m)^  checkpoint_interval_steps: 500", "  checkpoint_interval_steps: 2"),
-                               (r"(?m)^  validation_interval_steps: 250", "  validation_interval_steps: 2"),
-                               (r"(?m)^  device: auto", "  device: cpu"),
-                               (r"(?m)^rare_support:\n  enabled: true", "rare_support:\n  enabled: false"),
-                               (r"(?m)^rare_auxiliary:\n  enabled: true", "rare_auxiliary:\n  enabled: false"),
-                               (r"(?m)^  output_directory: .*", f"  output_directory: {self.root / 'runs' / name}")):
-            text, n = re.subn(pattern, value, text)
-            self.assertGreaterEqual(n, 1, pattern)
-        if extra:
-            text = text.replace("training:\n", "training:\n" + extra, 1)
-        path = self.root / f"{name}.yaml"
-        path.write_text(text)
-        return path
+        return fixture_config(self.root, name, prepared, extra)
 
     def _train(self, path: Path):
-        from model.src.config import load_simple_yaml, validate_config
-        from model.src.data.sample_sources import sample_source_from_config
-        from model.src.training.resmade_trainer import train_resmade_sample_source
-
-        config = load_simple_yaml(str(path))
-        validate_config(config)
-        return train_resmade_sample_source(sample_source_from_config(config), config), config
+        return train(path)
 
     def test_subset_preparation_keeps_the_domains_and_takes_the_kept_join(self) -> None:
         full = json.loads((self.full_prepared / "manifest.json").read_text())

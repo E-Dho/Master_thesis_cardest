@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--warmup-passes", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=10)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--refresh-join-cardinality", type=Path, default=None)
     args = parser.parse_args()
 
     timing = _timing()
@@ -43,6 +44,7 @@ def main() -> int:
     model, payload = load_resmade_checkpoint(args.checkpoint, map_location=device)
     model.to(device)
     metadata = ModelMetadata.from_json_dict(payload["metadata"])
+    scale = refresh_scale(args.refresh_join_cardinality, metadata.full_join_cardinality)
     vocabularies = PredicateVocabularies.from_json_dict(payload["predicate_vocabularies"], metadata)
     wrapped = TorchDistributionModel(model, metadata, vocabularies, device=str(device))
     estimator = OnePassEstimator(wrapped, metadata)
@@ -75,7 +77,7 @@ def main() -> int:
             )
             _synchronize(device)
             latency_ms = (time.perf_counter() - started) * 1000.0
-            status, estimate = str(result[0]), float(result[1])
+            status, estimate = str(result[0]), float(result[1]) * scale
             if repetition == 0:
                 reference[query_id] = estimate
                 supported = status != "unsupported"
@@ -106,6 +108,28 @@ def main() -> int:
     _write_csv(args.predictions, predictions)
     _write_csv(args.latencies, latencies)
     return 0
+
+
+def refresh_scale(path: Path | None, model_join_cardinality: float) -> float:
+    """|J_full| / |J_subset| for the data-shift ablation's refreshed variant (1 without a path).
+
+    The estimate is selectivity x the model's join cardinality, so scaling it
+    by this ratio replaces the stale join cardinality by the current one. The
+    model must be the one trained on that subset.
+    """
+
+    if path is None:
+        return 1.0
+    record = json.loads(Path(path).read_text(encoding="utf-8"))
+    subset, full = float(record["subset_join_cardinality"]), float(record["full_join_cardinality"])
+    if not np.isclose(subset, float(model_join_cardinality), rtol=1e-12, atol=0.5):
+        raise ValueError(
+            f"{path} describes a subset with join cardinality {subset:.0f}, the checkpoint was "
+            f"trained with {model_join_cardinality:.0f}"
+        )
+    if not 0 < subset <= full:
+        raise ValueError(f"{path}: implausible join cardinalities {subset} / {full}")
+    return full / subset
 
 
 def _timing():

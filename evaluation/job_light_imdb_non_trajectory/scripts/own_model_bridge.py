@@ -24,6 +24,11 @@ def main() -> int:
     parser.add_argument("--warmup-passes", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=10)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument(
+        "--refresh-join-cardinality", type=Path, default=None,
+        help="data-shift ablation: subset.json of the 80 %% preparation; every estimate is scaled by "
+             "full_join_cardinality / subset_join_cardinality (the stale model with refreshed counts)",
+    )
     args = parser.parse_args()
     _validate(args.config, args.checkpoint)
     if args.command == "prepare":
@@ -44,6 +49,9 @@ def _validate(config: Path, checkpoint: Path) -> None:
 
 def _manifest(args: argparse.Namespace) -> dict:
     return {
+        "refresh_join_cardinality": (
+            None if args.refresh_join_cardinality is None else str(args.refresh_join_cardinality.resolve())
+        ),
         "status": "ready",
         "model_config": str(args.config.resolve()),
         "checkpoint": str(args.checkpoint.resolve()),
@@ -93,6 +101,8 @@ def _evaluate(args: argparse.Namespace, *, smoke: bool) -> None:
         "--repetitions", str(args.repetitions),
         "--device", args.device,
     ]
+    if args.refresh_join_cardinality is not None:
+        command += ["--refresh-join-cardinality", str(args.refresh_join_cardinality)]
     started = time.perf_counter()
     subprocess.run(command, check=True)
     if smoke:
