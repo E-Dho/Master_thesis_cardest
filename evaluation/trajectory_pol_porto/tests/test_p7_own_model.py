@@ -380,6 +380,34 @@ class BridgeTest(unittest.TestCase):
             else:
                 self.assertEqual(prediction["estimated_cardinality"], base["estimated_cardinality"])
 
+    def test_count_refresh_scales_every_estimate(self) -> None:
+        # data-shift ablation: a model of 80 % of the data, its |J| refreshed to the full data's
+        import math
+
+        from model.src.data.schema import ModelMetadata
+        import torch
+
+        payload = torch.load(self.checkpoint, map_location="cpu", weights_only=False)
+        subset = ModelMetadata.from_json_dict(payload["metadata"]).full_join_cardinality
+        record = self.root / "subset.json"
+        record.write_text(json.dumps({"subset_join_cardinality": subset, "full_join_cardinality": subset * 1.25}))
+        for relation in ("multi", "single"):
+            stale, _, stale_components, _ = self._evaluate({"relation": relation}, f"stale_{relation}")
+            refreshed, _, components, out = self._evaluate({"relation": relation}, f"refreshed_{relation}",
+                                                           "--refresh-join-cardinality", str(record))
+            self.assertEqual([p["status"] for p in stale], [p["status"] for p in refreshed])
+            for a, b in zip(stale, refreshed):
+                if a["status"] == "ok":
+                    self.assertTrue(math.isclose(float(b["estimated_cardinality"]),
+                                                 1.25 * float(a["estimated_cardinality"]), rel_tol=1e-12), (a, b))
+            for a, b in zip(stale_components, components):  # the dedup factor is a ratio: unchanged
+                self.assertEqual(a["traj_dedup_factor"], b["traj_dedup_factor"])
+            provenance = json.loads(next(out.glob("*_provenance.json")).read_text())
+            self.assertEqual(provenance["refresh_join_cardinality"]["subset_json"], str(record.resolve()))
+        record.write_text(json.dumps({"subset_join_cardinality": subset + 7, "full_join_cardinality": subset * 2}))
+        with self.assertRaisesRegex(ValueError, "not trained on that preparation"):
+            self._evaluate({"relation": "multi"}, "wrong", "--refresh-join-cardinality", str(record))
+
     def test_single_queries_use_the_row_route(self) -> None:
         predictions, _, components, _ = self._evaluate({"relation": "single"}, "single")
         self.assertTrue(predictions and all(p["status"] == "ok" for p in predictions))

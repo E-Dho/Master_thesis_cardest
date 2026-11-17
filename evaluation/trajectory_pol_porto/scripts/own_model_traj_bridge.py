@@ -108,7 +108,7 @@ class OwnModel:
     """Checkpoint, training config and estimator; one call per query."""
 
     def __init__(self, training_config: Path, checkpoint: Path, *, device: str = "cpu",
-                 clamp: Optional[Dict[str, Any]] = None) -> None:
+                 clamp: Optional[Dict[str, Any]] = None, refresh: Optional[Path] = None) -> None:
         import torch
 
         from model.src.config import load_simple_yaml, validate_config
@@ -148,6 +148,7 @@ class OwnModel:
         self.use_log = bool(self.config.get("inference", {}).get("use_log_space_product", True))
         self.clamp = dict(clamp or {})
         self.payload_step = payload.get("step")
+        self.estimate_scale, self.refresh = refresh_scale(refresh, float(self.metadata.full_join_cardinality))
 
     def translate_row(self, row: Dict[str, Any]):
         translation = self.translate.translate(row, clamp=self.clamp, srid=self.srid, spatial=self.spatial)
@@ -159,6 +160,14 @@ class OwnModel:
                                  notes=translation.notes + (f"fk_ancestors:{','.join(added)}",))
 
     def estimate(self, translation) -> Dict[str, Any]:
+        parts = self._estimate(translation)
+        if self.estimate_scale != 1.0:  # count-refreshed (data-shift ablation): every route scales with |J|
+            for key in ("matching_segment_estimate", "distinct_trajectory_estimate", "join_estimate"):
+                if parts.get(key) is not None:
+                    parts[key] = float(parts[key]) * self.estimate_scale
+        return parts
+
+    def _estimate(self, translation) -> Dict[str, Any]:
         from model.src.data.trajectory_distinct import trajectory_query_has_zero_support
         from model.src.evaluation.pol_query_adapter import pol_workload_record_to_context
 
@@ -189,6 +198,30 @@ class OwnModel:
         if self.device.type == "cuda":
             return str(self.torch.cuda.get_device_name(self.device))
         return "CPU"
+
+
+def refresh_scale(path: Optional[Path], model_join_cardinality: float):
+    """Data-shift ablation, count-refreshed variant: ``(scale, record)``.
+
+    A model trained on 80 % of the trips (``model/scripts/subset_prepared_full_join.py``
+    on branch ``model/data-shift``) estimates for its own data: every estimate is
+    the full-outer-join size |J| times probabilities. Refreshing that one count
+    to the grown database, as a DBMS refreshes its row counts without retraining,
+    multiplies every estimate by |J_full| / |J_subset|. ``path`` is the
+    preparation's ``subset.json``; the checkpoint must have been trained on it.
+    """
+
+    if path is None:
+        return 1.0, None
+    record = json.loads(Path(path).read_text(encoding="utf-8"))
+    subset, full = float(record["subset_join_cardinality"]), float(record["full_join_cardinality"])
+    if abs(model_join_cardinality - subset) > 0.5:
+        raise ValueError(f"the checkpoint's join cardinality {model_join_cardinality:.0f} is not the subset's "
+                         f"{subset:.0f} ({path}): it was not trained on that preparation")
+    if not (full >= subset > 0):
+        raise ValueError(f"invalid join cardinalities in {path}")
+    return full / subset, {"subset_json": str(Path(path).resolve()), "subset_json_sha256": _sha256(Path(path)),
+                           "subset_join_cardinality": subset, "full_join_cardinality": full, "scale": full / subset}
 
 
 def root_connected_tables(metadata, tables) -> tuple:
@@ -380,6 +413,9 @@ def provenance(args: argparse.Namespace) -> Dict[str, Any]:
         "model_package_file": str(Path(model_src.__file__).resolve()),
         "bridge_git": _git_revision(REPO_ROOT),
         "clamp": args.clamp,
+        "refresh_join_cardinality": (None if args.refresh_join_cardinality is None else
+                                     {"subset_json": str(Path(args.refresh_join_cardinality).resolve()),
+                                      "subset_json_sha256": _sha256(args.refresh_join_cardinality)}),
     }
 
 
@@ -402,6 +438,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--warmup-passes", type=int, default=0)
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--refresh-join-cardinality", type=Path,
+                        help="data-shift ablation: the 80 %% preparation's subset.json; scales every estimate "
+                             "to the full data's join size")
     args = parser.parse_args(argv)
     _install_paths(args.model_root.resolve())
     for path in (args.training_config, args.checkpoint):
@@ -411,7 +450,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          REPO_ROOT / "evaluation/trajectory_pol_porto/traj_eval/own_model_translate.py"
                          ).parse_clamp(args.clamp)
     if args.command == "prepare":
-        OwnModel(args.training_config, args.checkpoint, device="cpu", clamp=clamp)  # compatibility checks
+        OwnModel(args.training_config, args.checkpoint, device="cpu", clamp=clamp,
+                         refresh=args.refresh_join_cardinality)  # compatibility checks
         write_json(_required(args.output_directory, "--output-directory") / "prepare_manifest.json",
                    provenance(args))
         return 0
@@ -438,7 +478,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "smoke":
         output = _required(args.output_directory, "--output-directory")
         started = time.perf_counter()
-        model = OwnModel(args.training_config, args.checkpoint, device="cpu", clamp=clamp)
+        model = OwnModel(args.training_config, args.checkpoint, device="cpu", clamp=clamp,
+                         refresh=args.refresh_join_cardinality)
         rows = _rows(queries, select, args.query_limit or 20)
         summary = evaluate_workload(model, rows, output / "smoke_predictions.csv", output / "smoke_latency.csv",
                                     output / "smoke_components.csv", estimate_kind=args.estimate, warmup_passes=0,
@@ -451,7 +492,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     predictions = _required(args.predictions, "--predictions")
     latency = _required(args.latency, "--latency")
     components = args.components or predictions.with_name(predictions.stem + "_components.csv")
-    model = OwnModel(args.training_config, args.checkpoint, device=args.device, clamp=clamp)
+    model = OwnModel(args.training_config, args.checkpoint, device=args.device, clamp=clamp,
+                     refresh=args.refresh_join_cardinality)
     rows = _rows(queries, select, args.query_limit)
     evaluate_workload(model, rows, predictions, latency, components, estimate_kind=args.estimate,
                       warmup_passes=args.warmup_passes, repetitions=args.repetitions, device=args.device)
