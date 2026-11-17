@@ -305,22 +305,110 @@ def subset_csvs(csv_directory: Path, split: Path, output: Path) -> Dict[str, Any
     return summary
 
 
+# ---------------------------------------------------------------- PostgreSQL CSV semantics
+
+
+def _pg_fields(handle: Iterator[str], line: str) -> List[Optional[str]]:
+    """One record as PostgreSQL's COPY ... (FORMAT CSV, NULL '', ESCAPE '\\') reads it.
+
+    The benchmark database (scripts/postgres_admin.py) was loaded this way, and its
+    labels follow it: a quote starts or ends a quoted section anywhere in a field;
+    inside quotes a backslash escapes a following quote or backslash (elsewhere it is
+    a literal character, unlike pandas' ``escapechar``); only an unquoted empty field
+    is NULL. A quoted section may span lines (``handle`` supplies them).
+    """
+
+    fields: List[Optional[str]] = []
+    buffer: List[str] = []
+    saw_quote = in_quote = False
+    i = 0
+    while True:
+        if i >= len(line):
+            if not in_quote:
+                break
+            nxt = next(handle, None)
+            if nxt is None:
+                raise ValueError("unterminated quoted field at the end of the file")
+            line, i = nxt, 0
+            continue
+        c = line[i]
+        if in_quote:
+            if c == "\\" and i + 1 < len(line) and line[i + 1] in ('"', "\\"):
+                buffer.append(line[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_quote = False
+            else:
+                buffer.append(c)
+            i += 1
+            continue
+        if c == '"':
+            in_quote = saw_quote = True
+        elif c == ",":
+            fields.append(None if not saw_quote and not buffer else "".join(buffer))
+            buffer, saw_quote = [], False
+        elif c in "\r\n":
+            break
+        else:
+            buffer.append(c)
+        i += 1
+    fields.append(None if not saw_quote and not buffer else "".join(buffer))
+    return fields
+
+
+def read_pg_csv(path: Path, columns: Sequence[str]) -> Any:
+    """The named columns of a JOB CSV as PostgreSQL loads it (see _pg_fields), typed:
+    a column whose non-NULL values all parse as numbers is numeric, otherwise text."""
+
+    import pandas as pd
+
+    with Path(path).open("r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+        header = _pg_fields(handle, next(handle))
+        indexes = [header.index(column) for column in columns]
+        width = len(header)
+        values: List[List[Optional[str]]] = [[] for _ in columns]
+        for line in handle:
+            if '"' not in line:  # no quoted section: commas split, a backslash is literal
+                fields = line.rstrip("\r\n").split(",")
+                fields = [None if field == "" else field for field in fields]
+            else:
+                fields = _pg_fields(handle, line)
+            if len(fields) != width:
+                raise ValueError(f"{path}: a record has {len(fields)} fields, the header {width}")
+            for target, index in zip(values, indexes):
+                target.append(fields[index])
+    frame = {}
+    for column, raw in zip(columns, values):
+        series = pd.Series(raw, dtype=object)
+        try:
+            frame[column] = pd.to_numeric(series, errors="raise")
+        except (ValueError, TypeError):
+            frame[column] = series
+    return pd.DataFrame(frame)
+
+
 # ---------------------------------------------------------------- exact counts
 
 
 class JobLightCounter:
     """Exact COUNT(*) of JOB-light(-ranges) queries: inner joins of title with child
     tables on movie_id, conjunctive filters, SQL NULL semantics (a comparison with
-    NULL is false). Strings compare in code-point order."""
+    NULL is false). Strings compare in code-point order. The CSVs are read as the
+    benchmark's PostgreSQL database loaded them (read_pg_csv), not as pandas with
+    ``escapechar`` reads them (NeuroCard's loader): the two differ on records whose
+    unquoted text ends in a backslash, which shifts pandas' later columns."""
 
-    def __init__(self, csv_directory: Path, columns: Dict[str, set]) -> None:
-        import pandas as pd
-
+    def __init__(self, csv_directory: Path, columns: Dict[str, set], *,
+                 expected_rows: Optional[Dict[str, int]] = None) -> None:
         self.csv_directory = Path(csv_directory)
         self.frames: Dict[str, Any] = {}
         for table in JOB_LIGHT_TABLES:
             usecols = sorted({KEY[table], *columns.get(table, set())})
-            self.frames[table] = pd.read_csv(self.csv_directory / f"{table}.csv", usecols=usecols, **CSV_OPTIONS)
+            self.frames[table] = read_pg_csv(self.csv_directory / f"{table}.csv", usecols)
+            if expected_rows is not None and len(self.frames[table]) != int(expected_rows[table]):
+                raise ValueError(f"{table}: {len(self.frames[table])} records as PostgreSQL reads them, "
+                                 f"{expected_rows[table]} as pandas reads them")
         title_ids = self.frames["title"]["id"].to_numpy(dtype=np.int64)
         self.order = np.argsort(title_ids)
         self.sorted_ids = title_ids[self.order]
@@ -412,6 +500,32 @@ def load_queries(path: Path) -> List[Tuple[str, set, List[Tuple[str, str, Any]],
     return parsed
 
 
+def pandas_parse_differences(csv_directory: Path, columns: Dict[str, set]) -> Dict[str, Any]:
+    """Per table, the rows whose query columns pandas (``escapechar``, as NeuroCard loads
+    the data) reads differently from PostgreSQL: count and up to five keys."""
+
+    import pandas as pd
+
+    out: Dict[str, Any] = {}
+    for table in JOB_LIGHT_TABLES:
+        usecols = sorted({KEY[table], *columns.get(table, set())})
+        pg = read_pg_csv(Path(csv_directory) / f"{table}.csv", usecols)
+        pandas_frame = pd.read_csv(Path(csv_directory) / f"{table}.csv", usecols=usecols, **CSV_OPTIONS)
+        if len(pg) != len(pandas_frame):
+            out[table] = {"rows": None, "note": f"{len(pg)} vs {len(pandas_frame)} records"}
+            continue
+        differs = np.zeros(len(pg), dtype=bool)
+        for column in usecols:
+            a, b = pg[column].astype(object), pandas_frame[column].astype(object)
+            both_null = a.isna().to_numpy() & b.isna().to_numpy()
+            equal = np.array([x == y or (isinstance(x, (int, float)) and isinstance(y, (int, float)) and float(x) == float(y))
+                              for x, y in zip(a.tolist(), b.tolist())], dtype=bool)
+            differs |= ~(both_null | equal)
+        keys = pg[KEY[table]].to_numpy()[differs][:5].tolist()
+        out[table] = {"rows": int(differs.sum()), "example_keys": [int(k) if not isinstance(k, str) else k for k in keys]}
+    return out
+
+
 def relabel(queries: Path, full_csv: Path, subset_csv: Path, split: Path, output: Path) -> Dict[str, Any]:
     output = Path(output)
     if output.exists():
@@ -426,7 +540,8 @@ def relabel(queries: Path, full_csv: Path, subset_csv: Path, split: Path, output
         for column, _op, _literal in predicates:
             table, name = column.split(":", 1)
             columns.setdefault(table, set()).add(name)
-    full = JobLightCounter(full_csv, columns)
+    full = JobLightCounter(full_csv, columns, expected_rows=loaded["record"]["rows_total"])
+    parse_differences = pandas_parse_differences(full_csv, columns)
     mismatches = [(index, truth, full.count(tables, predicates))
                   for index, (_line, tables, predicates, truth) in enumerate(parsed)]
     mismatches = [item for item in mismatches if item[1] != item[2]]
@@ -434,7 +549,7 @@ def relabel(queries: Path, full_csv: Path, subset_csv: Path, split: Path, output
         raise ValueError(f"the counter does not reproduce {len(mismatches)} of {len(parsed)} labels on the full data; "
                          f"first (query index, label, count): {mismatches[:5]}")
     del full
-    counter = JobLightCounter(subset_csv, columns)
+    counter = JobLightCounter(subset_csv, columns, expected_rows=loaded["record"]["rows_kept"])
     lines, counts = [], []
     for line, tables, predicates, truth in parsed:
         count = counter.count(tables, predicates)
@@ -450,6 +565,8 @@ def relabel(queries: Path, full_csv: Path, subset_csv: Path, split: Path, output
     summary = {
         "queries": str(queries), "queries_sha256": _sha256(Path(queries)), "query_count": len(parsed),
         "full_data_labels_reproduced": len(parsed),
+        "csv_reading": "PostgreSQL COPY (FORMAT CSV, NULL '', ESCAPE '\\\\') semantics, as the benchmark database",
+        "rows_pandas_reads_differently": parse_differences,
         "zero_subset_labels": int(np.count_nonzero(counts_array == 0)),
         "subset_to_full_label_ratio": {q: float(np.percentile(counts_array / truths, q)) for q in (1, 10, 50, 90, 99)}
         if np.all(truths > 0) else None,

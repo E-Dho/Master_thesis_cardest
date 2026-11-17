@@ -32,7 +32,11 @@ from model.scripts import imdb_data_shift as shift
 
 REPO = Path(__file__).resolve().parents[2]
 SOURCE_CONFIG = REPO / "model/configs/job_light_ranges_duet_binary_native_anpm_40k_rare_auxiliary.yaml"
-TRICKY = ['plain', 'with, comma', 'with "quote"', 'two\nlines', 'tab\there', 'end quote"', '']
+TRICKY = ['plain', 'with, comma', 'with "quote"', 'two\nlines', 'tab\there', 'end quote"', '',
+          'back\\slash in "quotes"']
+# an unquoted text ending in a backslash: PostgreSQL reads it literally, pandas' escapechar
+# escapes the following comma and shifts the later columns of that record (as in IMDB)
+SHIFTING = 'ends in a backslash\\'
 # the columns the model sees (a small "content" projection); the CSVs carry more
 MODEL_COLUMNS = {
     "title": ["kind_id", "production_year", "phonetic_code", "series_years"],
@@ -42,17 +46,40 @@ MODEL_COLUMNS = {
     "movie_keyword": ["keyword_id"],
     "movie_info_idx": ["info_type_id"],
 }
+HEADERS = {
+    # text columns before numeric ones, as in IMDB's title and cast_info
+    "title": ["id", "kind_id", "phonetic_code", "series_years", "title", "production_year"],
+    "cast_info": ["id", "movie_id", "note", "role_id", "nr_order"],
+    "movie_companies": ["id", "movie_id", "company_type_id"],
+    "movie_info": ["id", "movie_id", "info_type_id", "info"],
+    "movie_keyword": ["id", "movie_id", "keyword_id"],
+    "movie_info_idx": ["id", "movie_id", "info_type_id"],
+}
+
+
+def _pg_field(value) -> str:
+    """A value as PostgreSQL's COPY ... TO (FORMAT CSV, NULL '', ESCAPE '\\') writes it."""
+
+    if value is None:
+        return ""
+    text = str(value)
+    if text == "":
+        return '""'
+    if any(ch in text for ch in ',"\n\r'):
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return text
 
 
 def _write_csv(path: Path, header, rows) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle, quoting=csv.QUOTE_MINIMAL, escapechar="\\", doublequote=False, lineterminator="\n")
-        writer.writerow(header)
+        handle.write(",".join(header) + "\n")
         for row in rows:
-            writer.writerow(["" if value is None else value for value in row])
+            handle.write(",".join(_pg_field(value) for value in row) + "\n")
 
 
 def _imdb(directory: Path, *, titles: int = 60, orphans: bool = False, seed: int = 0) -> dict:
+    """Synthetic JOB-light CSVs; the true values are kept in ``_truth.json`` next to them."""
+
     rng = np.random.default_rng(seed)
     directory.mkdir(parents=True)
     ids = rng.permutation(np.arange(1, titles + 1) * 7)
@@ -60,29 +87,50 @@ def _imdb(directory: Path, *, titles: int = 60, orphans: bool = False, seed: int
     for index, title_id in enumerate(ids):
         year = None if rng.random() < 0.12 else float(rng.integers(1950, 2021))
         code = None if rng.random() < 0.1 else f"{'ABS'[rng.integers(0, 3)]}{rng.integers(100, 999)}"
+        if index in (3, 4):
+            code = ["", "NA"][index - 3]  # not NULL in PostgreSQL, NaN in pandas
         series = None if rng.random() < 0.5 else f"{rng.integers(1990, 2000)}-{rng.integers(2000, 2010)}"
-        rows.append([int(title_id), TRICKY[index % len(TRICKY)], int(rng.integers(1, 8)), year, code, series])
-    _write_csv(directory / "title.csv", ["id", "title", "kind_id", "production_year", "phonetic_code", "series_years"], rows)
-    children = {
-        "cast_info": (["id", "movie_id", "note", "role_id", "nr_order"],
-                      lambda i: [TRICKY[i % len(TRICKY)], int(rng.integers(1, 5)),
-                                 None if rng.random() < 0.3 else int(rng.integers(1, 6))]),
-        "movie_companies": (["id", "movie_id", "company_type_id"], lambda i: [int(rng.integers(1, 3))]),
-        "movie_info": (["id", "movie_id", "info_type_id", "info"],
-                       lambda i: [int(rng.integers(1, 6)), TRICKY[(i + 3) % len(TRICKY)]]),
-        "movie_keyword": (["id", "movie_id", "keyword_id"], lambda i: [int(rng.integers(1, 9))]),
-        "movie_info_idx": (["id", "movie_id", "info_type_id"], lambda i: [int(rng.integers(99, 102))]),
+        text = SHIFTING if index % 9 == 2 else TRICKY[index % len(TRICKY)]
+        rows.append([int(title_id), int(rng.integers(1, 8)), code, series, text, year])
+    tables = {"title": rows}
+    values = {
+        "cast_info": lambda i: [SHIFTING if i % 7 == 3 else TRICKY[i % len(TRICKY)], int(rng.integers(1, 5)),
+                                None if rng.random() < 0.3 else int(rng.integers(1, 6))],
+        "movie_companies": lambda i: [int(rng.integers(1, 3))],
+        "movie_info": lambda i: [int(rng.integers(1, 6)), TRICKY[(i + 3) % len(TRICKY)]],
+        "movie_keyword": lambda i: [int(rng.integers(1, 9))],
+        "movie_info_idx": lambda i: [int(rng.integers(99, 102))],
     }
-    for table, (header, values) in children.items():
+    for table, value in values.items():
         table_rows, row_id = [], 0
         movie_ids = list(ids) + ([99999, 99999] if orphans and table == "movie_keyword" else [])
         for movie_id in movie_ids:
             for _ in range(int(rng.integers(0, 4)) if movie_id != 99999 else 1):
                 row_id += 1
-                table_rows.append([row_id, int(movie_id), *values(row_id)])
+                table_rows.append([row_id, int(movie_id), *value(row_id)])
         order = rng.permutation(len(table_rows))
-        _write_csv(directory / f"{table}.csv", header, [table_rows[i] for i in order])
+        tables[table] = [table_rows[i] for i in order]
+    for table, table_rows in tables.items():
+        _write_csv(directory / f"{table}.csv", HEADERS[table], table_rows)
+    (directory / "_truth.json").write_text(json.dumps(tables))
     return {"title_ids": np.asarray(ids, dtype=np.int64)}
+
+
+def _truth_db(full_directory: Path, kept_title_ids=None) -> sqlite3.Connection:
+    """SQLite with the true values (not parsed from the CSVs), optionally only the kept titles' data."""
+
+    tables = json.loads((Path(full_directory) / "_truth.json").read_text())
+    kept = None if kept_title_ids is None else set(int(v) for v in kept_title_ids)
+    all_ids = {row[0] for row in tables["title"]}
+    connection = sqlite3.connect(":memory:")
+    for table, rows in tables.items():
+        if kept is not None:
+            rows = [row for row in rows if (row[0] in kept) if table == "title"] if table == "title" else \
+                [row for row in rows if row[1] in kept or row[1] not in all_ids]
+        columns = HEADERS[table]
+        connection.execute(f"CREATE TABLE {table} ({', '.join(columns)})")
+        connection.executemany(f"INSERT INTO {table} VALUES ({', '.join('?' * len(columns))})", rows)
+    return connection
 
 
 def _frames(directory: Path, columns=None) -> dict:
@@ -132,23 +180,16 @@ def _enumerate_join(directory: Path) -> list:
     return rows
 
 
-def _sqlite(directory: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(":memory:")
-    for table, frame in _frames(directory).items():
-        frame.to_sql(table, connection, index=False)
-    return connection
-
-
 def _sql_literal(value) -> str:
     return f"'{value}'" if isinstance(value, str) else repr(value)
 
 
 def _queries(directory: Path, count: int, seed: int = 1) -> list:
-    """Random JOB-light-ranges-like queries (NeuroCard's line format) with SQLite labels."""
+    """Random JOB-light-ranges-like queries (NeuroCard's line format) with SQLite labels on the true values."""
 
     rng = np.random.default_rng(seed)
-    frames = _frames(directory)
-    connection = _sqlite(directory)
+    truth = json.loads((Path(directory) / "_truth.json").read_text())
+    connection = _truth_db(directory)
     children = [table for table in shift.JOB_LIGHT_TABLES if table != "title"]
     lines = []
     for _ in range(count):
@@ -157,17 +198,15 @@ def _queries(directory: Path, count: int, seed: int = 1) -> list:
         for table in tables:
             for column in MODEL_COLUMNS[table]:
                 if rng.random() < 0.3:
-                    values = frames[table][column].dropna()
-                    value = values.iloc[int(rng.integers(0, len(values)))]
-                    value = float(value) if column == "production_year" else (
-                        value if isinstance(value, str) else int(value))
+                    index = HEADERS[table].index(column)
+                    values = [row[index] for row in truth[table] if row[index] not in (None, "")]
+                    value = values[int(rng.integers(0, len(values)))]
                     predicates.append((table, column, str(rng.choice(["=", "<=", ">="])), value))
         joins = ",".join(f"title.id={t}.movie_id" for t in tables[1:])
         filters = ",".join(f"{t}.{c},{op},{v}" for t, c, op, v in predicates)
         where = [f"title.id={t}.movie_id" for t in tables[1:]] + [f"{t}.{c} {op} {_sql_literal(v)}" for t, c, op, v in predicates]
         sql = f"SELECT COUNT(*) FROM {', '.join(tables)}" + (f" WHERE {' AND '.join(where)}" if where else "")
-        truth = connection.execute(sql).fetchone()[0]
-        lines.append((f"{','.join(tables)}#{joins}#{filters}", sql, truth))
+        lines.append((f"{','.join(tables)}#{joins}#{filters}", sql, connection.execute(sql).fetchone()[0]))
     return lines
 
 
@@ -239,7 +278,7 @@ class ImdbDataShiftTest(unittest.TestCase):
         queries.write_text("\n".join(f"{line}#{truth}" for line, _sql, truth in lines) + "\n")
         output = self.root / "queries_subset.csv"
         summary = shift.relabel(queries, self.full, self.subset, self.split, output)
-        subset_db = _sqlite(self.subset)
+        subset_db = _truth_db(self.full, self.selection["kept_title_ids"])
         expected = [subset_db.execute(sql).fetchone()[0] for _line, sql, _truth in lines]
         written = [int(line.rsplit("#", 1)[1]) for line in output.read_text().splitlines()]
         self.assertEqual(written, expected)
@@ -249,11 +288,32 @@ class ImdbDataShiftTest(unittest.TestCase):
         self.assertGreater(sum(truth > 0 for *_rest, truth in lines), 30)  # mostly non-empty queries
         self.assertTrue(any(0 < count < truth for count, (*_r, truth) in zip(expected, lines)))
         self.assertTrue(json.loads(output.with_suffix(".json").read_text())["full_data_labels_reproduced"] == 60)
+        # pandas (NeuroCard's loader) reads the backslash records differently; PostgreSQL semantics are used
+        differences = summary["rows_pandas_reads_differently"]
+        self.assertGreater(differences["title"]["rows"], 0)
+        self.assertGreater(differences["cast_info"]["rows"], 0)
+        self.assertEqual(differences["movie_keyword"]["rows"], 0)
         bad = self.root / "queries_bad.csv"
         line, _sql, truth = lines[0]
         bad.write_text(f"{line}#{truth + 1}\n")
         with self.assertRaisesRegex(ValueError, "does not reproduce 1 of 1"):
             shift.relabel(bad, self.full, self.subset, self.split, self.root / "bad_subset.csv")
+
+    def test_postgres_csv_reading(self) -> None:
+        truth = json.loads((self.full / "_truth.json").read_text())
+        for table in ("title", "cast_info", "movie_info"):
+            frame = shift.read_pg_csv(self.full / f"{table}.csv", HEADERS[table])
+            self.assertEqual(len(frame), len(truth[table]))
+            for row, expected in zip(frame.itertuples(index=False), truth[table]):
+                for value, true in zip(row, expected):
+                    if true is None:
+                        self.assertTrue(pd.isna(value), (table, expected))
+                    else:
+                        self.assertEqual(value, true, (table, expected))
+        pandas_title = pd.read_csv(self.full / "title.csv", escapechar="\\")
+        shifted = [row[0] for row in truth["title"] if row[4] == SHIFTING]
+        self.assertTrue(shifted)
+        self.assertTrue(pandas_title.loc[pandas_title["id"].isin(shifted), "production_year"].isna().all())
 
     def test_neurocard_workdir_links_the_package_and_reads_the_kept_csvs(self) -> None:
         shared = self.root / "neurocard_shared"
