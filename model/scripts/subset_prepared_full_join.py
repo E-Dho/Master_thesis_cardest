@@ -99,22 +99,33 @@ def subset(prepared: Path, split: Path, output: Path, *, trajectory_index: Optio
     if not (int(manifest["join_cardinality"]) == full_rows == trajectory_ids.shape[0] == segment_ids.shape[0]):
         raise ValueError("the preparation does not hold every row of the full outer join "
                          f"(join_cardinality {manifest['join_cardinality']}, {full_rows} sample rows)")
-    if full_rows != int(record["full_join_cardinality_full"]):
-        raise ValueError(f"the preparation has {full_rows} join rows, the snapshot split counts "
-                         f"{record['full_join_cardinality_full']}: not the same data")
     if record["entity_table"] != "trips":
         raise ValueError("only trips are split")
 
-    # rows to keep: a kept trip, or no trip at all (a parent without trips)
+    # rows to keep: a kept trip, or no trip at all (a padded parent row of a full outer join)
     is_trip = np.isin(trajectory_ids, all_trips)
     keep = np.isin(trajectory_ids, kept_trips) | ~is_trip
     padded_rows = int(np.count_nonzero(~is_trip))
     kept_rows = int(keep.sum())
-    if kept_rows != int(record["full_join_cardinality_subset"]):
-        raise ValueError(f"{kept_rows} rows kept, the split's subset join has {record['full_join_cardinality_subset']}")
-    if int(record.get("parents_losing_every_trip") or 0):
-        raise ValueError(f"{record['parents_losing_every_trip']} parent rows lose every trip; their padded "
-                         "full-outer-join row cannot be encoded from the prepared rows")
+    if padded_rows == 0:
+        # Segment rows only: prepare_pol_staging_data and prepare_trajectory_snapshot materialize
+        # every segment row, so parents without trips (20,779 POL agents) are in no row. A parent
+        # that loses every trip then leaves the join like them, exactly as a fresh preparation of
+        # the kept data would have it (decided 2026-11-17 after POL PREPARE 23232606/11).
+        join_kind = "segment_rows"
+        expected_full, expected_kept = int(record["segments_total"]), int(record["segments_kept"])
+    else:
+        join_kind = "full_outer_join"
+        expected_full = int(record["full_join_cardinality_full"])
+        expected_kept = int(record["full_join_cardinality_subset"])
+        if int(record.get("parents_losing_every_trip") or 0):
+            raise ValueError(f"{record['parents_losing_every_trip']} parent rows lose every trip; their padded "
+                             "full-outer-join row cannot be encoded from the prepared rows")
+    if full_rows != expected_full:
+        raise ValueError(f"the preparation has {full_rows} join rows ({join_kind}), the snapshot split counts "
+                         f"{expected_full}: not the same data")
+    if kept_rows != expected_kept:
+        raise ValueError(f"{kept_rows} rows kept, the split's subset ({join_kind}) has {expected_kept}")
 
     # the fanout of the edge into trips (the parent's number of trips) for the kept trips
     fanout_updates = []
@@ -190,7 +201,9 @@ def subset(prepared: Path, split: Path, output: Path, *, trajectory_index: Optio
         "source_schema_hash": metadata.schema_hash or metadata.stable_schema_hash(),
         "full_join_cardinality": full_rows,
         "subset_join_cardinality": kept_rows,
+        "join_kind": join_kind,
         "padded_rows_kept": padded_rows,
+        "parents_leaving_the_join": int(record.get("parents_losing_every_trip") or 0) if join_kind == "segment_rows" else 0,
         "fanout_rows_changed": changed_fanout_rows,
         "domains": "unchanged: the full preparation's (values of the dropped trips included)",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -233,7 +246,8 @@ def subset(prepared: Path, split: Path, output: Path, *, trajectory_index: Optio
     (index_dir / "manifest.json").write_text(json.dumps(index_manifest, sort_keys=True), encoding="utf-8")
 
     summary = {key: subset_record[key] for key in ("full_join_cardinality", "subset_join_cardinality",
-                                                   "padded_rows_kept", "fanout_rows_changed")}
+                                                   "padded_rows_kept", "fanout_rows_changed", "join_kind",
+                                                   "parents_leaving_the_join")}
     summary.update(split_mode=record["mode"], kept_trip_ids_sha256=record["kept_trip_ids_sha256"],
                    schema_hash=subset_metadata_json["schema_hash"], prepared_directory=str(output))
     (partial / "subset.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")

@@ -30,7 +30,9 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _staging(directory: Path, *, agents: int = 30, trips_per_agent: int = 8) -> dict:
+def _staging(directory: Path, *, agents: int = 30, trips_per_agent: int = 8, tripless_agents: int = 3) -> dict:
+    """Agents 1..agents with trips (the last one only late trips, so a temporal split drops all of them),
+    then tripless_agents agents without any trip (POL has 20,779 of them)."""
     rng = np.random.default_rng(0)
     directory.mkdir(parents=True)
     fmt = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")  # noqa: E731
@@ -42,7 +44,8 @@ def _staging(directory: Path, *, agents: int = 30, trips_per_agent: int = 8) -> 
         for _ in range(trips_per_agent):
             trip_id += 1
             count = int(rng.integers(2, 7))
-            start = 1577836800 + int(rng.integers(0, 86400 * 20))
+            late = 86400 * 30 if agent == agents else 0
+            start = 1577836800 + late + int(rng.integers(0, 86400 * 20 if not late else 3600))
             x, y, t = 500000 + rng.uniform(0, 5000), 4400000 + rng.uniform(0, 5000), start
             for index in range(count):
                 nx, ny, nt = x + rng.normal(0, 200), y + rng.normal(0, 200), t + int(rng.integers(30, 600))
@@ -50,6 +53,8 @@ def _staging(directory: Path, *, agents: int = 30, trips_per_agent: int = 8) -> 
                 x, y, t = nx, ny, nt
             trip_lines.append(f"{trip_id}\t{agent}\t{fmt(start)}\t{fmt(t)}\t{count}")
             trips.append((trip_id, agent, start, count))
+    for agent in range(agents + 1, agents + tripless_agents + 1):
+        agent_lines.append(f"{agent}\t{20 + agent % 40}.0\tLow\tA\t0.5\t1")
     (directory / "agents.tsv").write_text("\n".join(agent_lines) + "\n")
     (directory / "trips.tsv").write_text("\n".join(trip_lines) + "\n")
     (directory / "segments.tsv").write_text("\n".join(segment_lines) + "\n")
@@ -101,7 +106,7 @@ def _decoded_rows(prepared: Path) -> dict:
     return decoded
 
 
-def _split(directory: Path, trips: np.ndarray, *, fraction: float = 0.8) -> np.ndarray:
+def _split(directory: Path, trips: np.ndarray, *, fraction: float = 0.8, tripless: int = 3) -> np.ndarray:
     """A temporal split in the format of evaluation/.../data_shift.py select."""
 
     directory.mkdir(parents=True)
@@ -119,8 +124,11 @@ def _split(directory: Path, trips: np.ndarray, *, fraction: float = 0.8) -> np.n
         "mode": "temporal", "fraction": fraction, "entity_table": "trips", "parent": ["agents", "agent_id"],
         "trips_total": int(trip_ids.size), "trips_kept": int(kept.size),
         "parents_losing_every_trip": int(all_parents.size - np.unique(parents[kept_mask]).size),
-        "full_join_cardinality_full": int(np.maximum(counts, 1).sum()),
-        "full_join_cardinality_subset": int(np.maximum(counts[kept_mask], 1).sum()),
+        "segments_total": int(counts.sum()), "segments_kept": int(counts[kept_mask].sum()),
+        # the snapshot's full outer join: + one padded row per agent without (kept) trips
+        "full_join_cardinality_full": int(counts.sum()) + tripless,
+        "full_join_cardinality_subset": int(counts[kept_mask].sum()) + tripless
+        + int(all_parents.size - np.unique(parents[kept_mask]).size),
         "kept_trip_ids_sha256": _sha256(directory / "kept_trip_ids.npy"),
         "all_trip_ids_sha256": _sha256(directory / "all_trip_ids.npy"),
         "all_trip_parent_ids_sha256": _sha256(directory / "all_trip_parent_ids.npy"),
@@ -164,6 +172,12 @@ class DataShiftSubsetTest(unittest.TestCase):
         self.assertEqual(set(subset_rows), set(fresh_rows))
         self.assertEqual(subset_rows, fresh_rows)  # every column, F_agents_to_trips included
         self.assertGreater(self.summary["fanout_rows_changed"], 0)  # agents did lose trips
+        record = json.loads((self.root / "split/split.json").read_text())
+        self.assertEqual(record["parents_losing_every_trip"], 1)  # the late agent leaves the join
+        self.assertEqual(self.summary["join_kind"], "segment_rows")
+        self.assertEqual(self.summary["parents_leaving_the_join"], 1)
+        late_trips = set(self.staging["trips"][self.staging["trips"][:, 1] == 30, 0].tolist())
+        self.assertFalse(late_trips & {key[0] for key in subset_rows})
         manifest = json.loads((self.subset / "manifest.json").read_text())
         fresh = json.loads((self.fresh / "manifest.json").read_text())
         self.assertEqual(manifest["join_cardinality"], fresh["join_cardinality"])
@@ -184,11 +198,11 @@ class DataShiftSubsetTest(unittest.TestCase):
         for name in ("kept_trip_ids.npy", "all_trip_ids.npy", "all_trip_parent_ids.npy"):
             (bad / name).write_bytes((self.root / "split" / name).read_bytes())
         record = json.loads((self.root / "split" / "split.json").read_text())
-        (bad / "split.json").write_text(json.dumps({**record, "full_join_cardinality_full": 1}))
+        (bad / "split.json").write_text(json.dumps({**record, "segments_total": 1}))
         with self.assertRaisesRegex(ValueError, "not the same data"):
             subset(self.full, bad, self.root / "out_bad")
-        (bad / "split.json").write_text(json.dumps({**record, "parents_losing_every_trip": 2}))
-        with self.assertRaisesRegex(ValueError, "lose every trip"):
+        (bad / "split.json").write_text(json.dumps({**record, "segments_kept": record["segments_kept"] - 1}))
+        with self.assertRaisesRegex(ValueError, "rows kept"):
             subset(self.full, bad, self.root / "out_bad2")
         with self.assertRaises(FileExistsError):
             subset(self.full, self.root / "split", self.subset)
@@ -263,6 +277,7 @@ class PortoSubsetTest(unittest.TestCase):
             np.save(split / "all_trip_ids.npy", trip_ids)
             (split / "split.json").write_text(json.dumps({
                 "mode": "temporal", "entity_table": "trips", "parent": None, "parents_losing_every_trip": 0,
+                "segments_total": int(counts.sum()), "segments_kept": int(counts[kept_mask].sum()),
                 "full_join_cardinality_full": int(counts.sum()),
                 "full_join_cardinality_subset": int(counts[kept_mask].sum()),
                 "kept_trip_ids_sha256": _sha256(split / "kept_trip_ids.npy"),
