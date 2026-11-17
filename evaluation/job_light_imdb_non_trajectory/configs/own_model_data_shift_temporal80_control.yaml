@@ -3,7 +3,8 @@
 # timing settings) for the run /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/temporal80_stale/seed_0
 # (model/slurm/job_light_ranges_data_shift_20k.sbatch KIND=stale SPLIT=temporal80), checkpoint step 11000
 # (the evaluated model's step).
-# Model code: model/imdb-data-shift 03decaf (checkout Master_thesis_cardest_imdb_data_shift).
+# Model code: model/imdb-data-shift 03decaf, from the pinned checkout external/master_thesis_cardest_03decaf
+# (source.revision is verified against its HEAD); bridge and runner from the evaluation checkout.
 schema_version: 1
 experiment:
   experiment_id: joblight_phase1
@@ -14,7 +15,7 @@ experiment:
 source:
   url: https://github.com/E-Dho/Master_thesis_cardest.git
   revision: 03decaf795f896641d0f1c7f965369761ec8ead6
-  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_imdb_data_shift
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_03decaf
 paths:
   results_root: ../results
 workloads:
@@ -49,7 +50,7 @@ adapter:
   type: own_model
   working_directory: ../../..
   environment:
-    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_imdb_data_shift
+    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_03decaf
   require_smoke_before_build: true
   prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/temporal80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/temporal80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory}
   smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/temporal80_stale/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_data_shift/temporal80_stale/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/data_shift/imdb/temporal80/job_light_ranges_subset.csv --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --device cpu

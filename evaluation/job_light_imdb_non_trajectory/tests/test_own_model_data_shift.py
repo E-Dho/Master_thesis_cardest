@@ -53,11 +53,13 @@ class DataShiftConfigTest(unittest.TestCase):
                 self.assertTrue(all(b.startswith(allowed) for _a, b in changed), (split, variant, changed))
                 self.assertIn(f"variant_id: data_shift_{split}_{variant}\n", body)
                 self.assertIn("seeds: [0]\n", body)
-                self.assertIn(f"    PYTHONPATH: {B}/Master_thesis_cardest_imdb_data_shift\n", body)
+                self.assertIn(f"    PYTHONPATH: {B}/external/master_thesis_cardest_03decaf\n", body)
+                # the adapter checks source.revision against the checkout's HEAD: a checkout pinned to it
+                self.assertIn(f"  checkout_path: {B}/external/master_thesis_cardest_03decaf\n", body)
                 self.assertEqual(body.count("--refresh-join-cardinality"), 6 if variant == "refreshed" else 0)
                 self.assertEqual("job_light_ranges_subset.csv" in body, variant == "control")
-                revision = revision or re.search(r"(?m)^  revision: (\w+)$", body).group(1)
-                self.assertIn(f"  revision: {revision}\n", body)
+                revision = re.search(r"(?m)^  revision: (\w+)$", body).group(1)
+                self.assertTrue(revision.startswith("03decaf"), revision)
 
 
 def _predictions(path: Path) -> dict:

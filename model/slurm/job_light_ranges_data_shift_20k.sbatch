@@ -88,7 +88,8 @@ sed \
   -e "s#^  output_directory:.*#  output_directory: $RUN_DIR#" \
   "$SOURCE_CONFIG" > "$CONFIG"
 if [[ -n "$INIT_CHECKPOINT" ]]; then
-  sed -i "s#^training:\$#training:\n  init_checkpoint: $INIT_CHECKPOINT#" "$CONFIG"
+  awk -v line="  init_checkpoint: $INIT_CHECKPOINT" '{ print } $0 == "training:" { print line }' "$CONFIG" > "$CONFIG.tmp"
+  mv "$CONFIG.tmp" "$CONFIG"
 fi
 
 "$PYTHON" - "$CONFIG" "$RUN_DIR" "$CSV_DIRECTORY" "$PREPARED_DIRECTORY" "$NEUROCARD_PATH" "$KIND" "$STEPS" "$LEARNING_RATE" "${INIT_CHECKPOINT}" <<'PY'
