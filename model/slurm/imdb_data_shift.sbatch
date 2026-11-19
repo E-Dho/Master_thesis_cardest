@@ -11,7 +11,8 @@
 #   STEP=select   the kept titles and both join cardinalities        -> $DATA/split
 #   STEP=subset   the six CSVs of the kept data                       -> $DATA/csv
 #   STEP=relabel  the query file counted on the kept data (control)   -> $DATA/job_light_ranges_subset.csv
-#   STEP=prepare  NeuroCard working directory + model preparation     -> $DATA/neurocard, $DATA/prepared
+#   STEP=prepare  NeuroCard working directory + model preparation     -> $NEUROCARD_WORKDIR (default
+#                 $DATA/neurocard), $DATA/prepared
 # REPO = a checkout of model/imdb-data-shift. Every step refuses existing outputs.
 set -euo pipefail
 ROOT=/work_beegfs/sunip956/master_thesis_trajectories
@@ -25,10 +26,13 @@ FULL_PREPARED=${FULL_PREPARED:-$ROOT/Master_thesis_cardest/data/neurocard_prepar
 SHARED_NEUROCARD=${SHARED_NEUROCARD:-$ROOT/external/neurocard/neurocard}
 QUERIES=${QUERIES:-$ROOT/external/distjoin/queries/job-light-ranges.csv}
 DATA=$ROOT/data_shift/imdb/$SPLIT
+# a fresh NeuroCard working directory per preparation attempt (a failed attempt may leave a partial cache)
+NEUROCARD_WORKDIR=${NEUROCARD_WORKDIR:-$DATA/neurocard}
 mkdir -p "$DATA"
 cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
+export RAY_DEDUP_LOGS=0
 echo "step=$STEP split=$SPLIT commit=$(git rev-parse HEAD) host=$(hostname) start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 case "$STEP" in
   select) "$PYTHON" -m model.scripts.imdb_data_shift select --csv-directory "$FULL_CSV" --mode "$MODE" --seed 0 \
@@ -39,7 +43,7 @@ case "$STEP" in
              --subset-csv "$DATA/csv" --split "$DATA/split" --output "$DATA/job_light_ranges_subset.csv" ;;
   prepare) "$PYTHON" -m model.scripts.imdb_data_shift prepare --full-prepared "$FULL_PREPARED" --full-csv "$FULL_CSV" \
              --subset-csv "$DATA/csv" --split "$DATA/split" --shared-neurocard "$SHARED_NEUROCARD" \
-             --neurocard-workdir "$DATA/neurocard" --output "$DATA/prepared" ;;
+             --neurocard-workdir "$NEUROCARD_WORKDIR" --output "$DATA/prepared" ;;
   *) echo "STEP must be select, subset, relabel or prepare" >&2; exit 2 ;;
 esac
 echo "end_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

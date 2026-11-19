@@ -621,27 +621,64 @@ def _pushd(path: Path) -> Iterator[None]:
         os.chdir(previous)
 
 
+@contextlib.contextmanager
+def _worker_import_path(package: Path) -> Iterator[None]:
+    """NeuroCard's package on PYTHONPATH while its sampler is built.
+
+    On a cache miss, NeuroCard's prepare() starts Ray and builds the join-count
+    tables in worker processes, which unpickle the join spec (``join_utils``) and
+    import NeuroCard's modules. They inherit the environment, not this process's
+    sys.path (23236408 failed with "No module named 'join_utils'" in the workers).
+    """
+
+    previous = os.environ.get("PYTHONPATH")
+    os.environ["PYTHONPATH"] = os.pathsep.join([str(package), *([previous] if previous else [])])
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = previous
+
+
+def _log(event: str) -> None:
+    print(f"[imdb_data_shift {datetime.now(timezone.utc).isoformat()}] {event}", flush=True)
+
+
 def neurocard_sampler(package: Path, csv_directory: Path, use_cols: str, sample_rows: int) -> Tuple[int, Any]:
     """NeuroCard's join cardinality of the data under ``package``'s working directory and a validation sample."""
+
+    import faulthandler
 
     from model.src.data.neurocard_schema import scoped_neurocard_prepare_cache_bypass
 
     package = Path(package)
     if str(package) not in sys.path:
         sys.path.insert(0, str(package))
-    with _pushd(package.parent):
-        import datasets  # type: ignore
-        import experiments  # type: ignore
-        import factorized_sampler  # type: ignore
-        import join_utils  # type: ignore
+    # a stalled preparation (23236413 ran 12 h without output) prints every thread's stack hourly
+    faulthandler.dump_traceback_later(3600, repeat=True, file=sys.stderr)
+    try:
+        with _pushd(package.parent), _worker_import_path(package):
+            import datasets  # type: ignore
+            import experiments  # type: ignore
+            import factorized_sampler  # type: ignore
+            import join_utils  # type: ignore
 
-        spec = join_utils.get_join_spec(experiments.JOB_LIGHT_BASE)
-        tables = [datasets.LoadImdb(table, data_dir=str(csv_directory) + "/", use_cols=use_cols, try_load_parsed=True)
-                  for table in spec.join_tables]
-        with scoped_neurocard_prepare_cache_bypass(factorized_sampler, spec):
-            sampler = factorized_sampler.FactorizedSampler(tables, spec, sample_rows, rng=np.random.default_rng(0),
-                                                           disambiguate_column_names=True)
-        return int(sampler.join_card), sampler.run()
+            spec = join_utils.get_join_spec(experiments.JOB_LIGHT_BASE)
+            _log(f"join spec loaded: {list(spec.join_tables)}")
+            tables = [datasets.LoadImdb(table, data_dir=str(csv_directory) + "/", use_cols=use_cols,
+                                        try_load_parsed=True) for table in spec.join_tables]
+            _log("tables loaded; building the factorized sampler (join-count tables on a cache miss)")
+            with scoped_neurocard_prepare_cache_bypass(factorized_sampler, spec):
+                sampler = factorized_sampler.FactorizedSampler(tables, spec, sample_rows, rng=np.random.default_rng(0),
+                                                               disambiguate_column_names=True)
+            _log(f"factorized sampler built: join cardinality {int(sampler.join_card)}")
+            frame = sampler.run()
+            _log(f"validation sample drawn: {len(frame)} rows")
+            return int(sampler.join_card), frame
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 def prepare(full_prepared: Path, csv_directory: Path, split: Path, output: Path, *, package: Path,

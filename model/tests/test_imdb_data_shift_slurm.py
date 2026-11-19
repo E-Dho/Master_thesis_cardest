@@ -49,13 +49,13 @@ class TrainingScriptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data = root / "data_shift/imdb/temporal80"
-            for directory in (data / "csv", data / "prepared", data / "neurocard/neurocard",
+            for directory in (data / "csv", data / "prepared", data / "neurocard_r2/neurocard",
                               root / "Master_thesis_cardest/data/neurocard_prepared/job_light_ranges_content"):
                 directory.mkdir(parents=True)
             for prepared in (data / "prepared", root / "Master_thesis_cardest/data/neurocard_prepared/job_light_ranges_content"):
                 (prepared / "manifest.json").write_text(json.dumps({"join_cardinality": 80}))
             (data / "prepared/subset.json").write_text(json.dumps(
-                {"neurocard_package": str(data / "neurocard/neurocard"), "subset_join_cardinality": 80,
+                {"neurocard_package": str(data / "neurocard_r2/neurocard"), "subset_join_cardinality": 80,
                  "full_join_cardinality": 100}))
             result = self._run(root, "finetune")
             self.assertNotEqual(result.returncode, 0)  # the stale checkpoint is missing
@@ -68,7 +68,8 @@ class TrainingScriptTest(unittest.TestCase):
             expected = _recipe(SOURCE.read_text(), str(run))
             expected = re.sub(r"(?m)^  csv_directory:.*$", f"  csv_directory: {data / 'csv'}", expected)
             expected = re.sub(r"(?m)^  prepared_directory:.*$", f"  prepared_directory: {data / 'prepared'}", expected)
-            expected = re.sub(r"(?m)^  neurocard_path:.*$", f"  neurocard_path: {data / 'neurocard/neurocard'}", expected)
+            # the working directory the preparation built, read from prepared/subset.json
+            expected = re.sub(r"(?m)^  neurocard_path:.*$", f"  neurocard_path: {data / 'neurocard_r2/neurocard'}", expected)
             self.assertEqual(stale, expected)
             (run / "checkpoint_step_11000.pt").write_bytes(b"stub")
             result = self._run(root, "finetune")

@@ -33,7 +33,9 @@ case "$KIND" in
   stale)
     CSV_DIRECTORY=$DATA/csv
     PREPARED_DIRECTORY=$DATA/prepared
-    NEUROCARD_PATH=$DATA/neurocard/neurocard
+    # the NeuroCard working directory the preparation built (prepared/subset.json)
+    NEUROCARD_PATH=$("$PYTHON" -c 'import json, sys; print(json.load(open(sys.argv[1]))["neurocard_package"])' \
+      "$PREPARED_DIRECTORY/subset.json")
     STEPS=20000; SUPPORT_STEPS=20000; LEARNING_RATE=0.0001; INIT_CHECKPOINT="" ;;
   finetune)
     CSV_DIRECTORY=$ROOT/datasets/job

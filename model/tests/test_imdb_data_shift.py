@@ -315,6 +315,51 @@ class ImdbDataShiftTest(unittest.TestCase):
         self.assertTrue(shifted)
         self.assertTrue(pandas_title.loc[pandas_title["id"].isin(shifted), "production_year"].isna().all())
 
+    def test_neurocard_sampler_lets_worker_processes_import_the_package(self) -> None:
+        """Ray's workers (NeuroCard's prepare() on a cache miss) are separate processes: they
+        must import NeuroCard's modules from the inherited environment (23236408)."""
+
+        import os
+        import sys as system
+
+        shared = self.root / "neurocard_fake"
+        package = shared / "neurocard"
+        package.mkdir(parents=True)
+        (shared / "datasets").mkdir()
+        (shared / "datasets" / "job").symlink_to(self.full)
+        (package / "experiments.py").write_text("JOB_LIGHT_BASE = {}\n")
+        (package / "join_utils.py").write_text(
+            "class Spec:\n    join_tables = ['title']\n    join_name = 'job-light-test'\n"
+            "def get_join_spec(config):\n    return Spec()\n")
+        (package / "datasets.py").write_text(
+            "def LoadImdb(table, data_dir, use_cols, try_load_parsed):\n    return (table, data_dir, use_cols)\n")
+        (package / "factorized_sampler.py").write_text(
+            "import os, subprocess, sys\n"
+            "import pandas as pd\n"
+            "class prepare_utils:\n"
+            "    @staticmethod\n"
+            "    def check_required_files(spec):\n        return False\n"
+            "class FactorizedSampler:\n"
+            "    def __init__(self, tables, spec, rows, rng, disambiguate_column_names):\n"
+            "        worker = subprocess.run([sys.executable, '-c', 'import join_utils, os; print(os.getcwd())'],\n"
+            "                                capture_output=True, text=True, env=dict(os.environ))\n"
+            "        if worker.returncode:\n            raise RuntimeError(worker.stderr)\n"
+            "        self.worker_cwd = worker.stdout.strip()\n"
+            "        self.join_card = 5\n"
+            "    def run(self):\n        return pd.DataFrame({'worker_cwd': [self.worker_cwd]})\n")
+        copy = shift.neurocard_workdir(package, self.full, self.subset, self.root / "nc_fake_subset")
+        before = os.environ.get("PYTHONPATH")
+        path_before = list(system.path)
+        try:
+            count, frame = shift.neurocard_sampler(copy, self.subset, "content", 4)
+        finally:
+            for name in ("datasets", "experiments", "factorized_sampler", "join_utils"):
+                system.modules.pop(name, None)
+            system.path[:] = path_before
+        self.assertEqual(count, 5)
+        self.assertEqual(Path(frame["worker_cwd"].iloc[0]).resolve(), copy.parent.resolve())
+        self.assertEqual(os.environ.get("PYTHONPATH"), before)  # restored afterwards
+
     def test_neurocard_workdir_links_the_package_and_reads_the_kept_csvs(self) -> None:
         shared = self.root / "neurocard_shared"
         package = shared / "neurocard"
