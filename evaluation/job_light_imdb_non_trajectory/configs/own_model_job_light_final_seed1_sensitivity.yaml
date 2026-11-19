@@ -1,0 +1,13 @@
+extends: own_model_job_light_step_11000_corrected_model_code.yaml
+
+experiment:
+  variant_id: own_model_job_light_final_seed1_sensitivity
+  display_name: Own model JOB-light final checkpoint sensitivity, training seed 1
+  seeds: [1]
+artifacts:
+  checkpoint_template: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/checkpoint_step_38000.pt
+adapter:
+  prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/checkpoint_step_38000.pt --output-directory {exchange_directory}
+  smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/checkpoint_step_38000.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/neurocard/neurocard/queries/job-light.csv --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --device cpu
+  build_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py build --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/checkpoint_step_38000.pt --output-directory {exchange_directory}
+  evaluate_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py evaluate --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_aux_40k/seed_1/checkpoint_step_38000.pt --output-directory {exchange_directory} --queries {queries_csv} --predictions {predictions_csv} --latencies {latency_csv} --warmup-passes 1 --repetitions 10 --device cpu

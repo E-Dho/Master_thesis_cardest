@@ -23,10 +23,8 @@ export PYTHONDONTWRITEBYTECODE=1
 
 for CONFIG in \
   $EVAL/configs/distjoin_job_light.yaml \
-  $EVAL/configs/own_model_job_light_best_median_step_18000_corrected_model_code.yaml \
-  $EVAL/configs/own_model_job_light_step_11000_corrected_model_code.yaml \
-  $EVAL/configs/own_model_job_light_ranges_best_median_step_40000_corrected_model_code.yaml \
-  $EVAL/configs/own_model_job_light_ranges_best_p99_step_19500_corrected_model_code.yaml; do
+  $EVAL/configs/own_model_job_light_rule_step_11000_corrected_model_code.yaml \
+  $EVAL/configs/own_model_job_light_ranges_rule_step_11000_corrected_model_code.yaml; do
   "$PYTHON" -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli aggregate --config "$CONFIG"
 done
 
@@ -50,15 +48,15 @@ replaceable = {
         "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code",
         "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code",
         "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
+        "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
+        "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
     )
 }
 replacement = [
     results / "own_model" / variant / "aggregate" / "comparison.json"
     for variant in (
-        "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code",
-        "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code",
-        "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code",
-        "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
+        "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
+        "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
     )
 ]
 inputs = [Path(path) for path in previous["inputs"] if path not in replaceable] + replacement

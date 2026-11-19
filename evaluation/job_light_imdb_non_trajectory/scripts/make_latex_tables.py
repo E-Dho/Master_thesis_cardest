@@ -73,32 +73,14 @@ GROUP_OF_METHOD = {
 
 DASH = "--"
 
-# These variants are deliberately selected single-checkpoint reports rather
-# than a generic "own_model" row.  Keeping this mapping keyed by variant makes
-# the selection visible in the rendered tables and leaves future ablations
-# unambiguous.
+# Final own-model rows follow one preregistered rule on each workload: use the
+# rare-auxiliary configuration's step-11,000 checkpoint across training seeds
+# 0--2.  The mapping also supplies the immutable training artifacts required to
+# refresh deployable-size and time-to-checkpoint records.
 OWN_MODEL_VARIANTS = {
-    "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code": {
-        "label": r"\OwnModelName{} (best median)",
+    "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code": {
+        "label": r"\OwnModelName{}",
         "selection_order": 0,
-        "checkpoint_paths": (
-            "/work_beegfs/sunip956/master_thesis_trajectories/"
-            "Master_thesis_cardest/model/runs/"
-            "job_light_duet_binary_native_anpm_40k_rare_auxiliary/"
-            "checkpoint_step_18000.pt",
-        ),
-        "training_summaries": (
-            "/work_beegfs/sunip956/master_thesis_trajectories/"
-            "Master_thesis_cardest/model/runs/"
-            "job_light_duet_binary_native_anpm_40k_rare_auxiliary/"
-            "training_summary.json",
-        ),
-        "training_time_mode": "checkpoint",
-    },
-    "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code": {
-        "label": r"\OwnModelName{} (best p99)",
-        "selection_order": 1,
-        "qerror_only": True,
         "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "Master_thesis_cardest/model/runs/"
@@ -125,35 +107,29 @@ OWN_MODEL_VARIANTS = {
         ),
         "training_time_mode": "checkpoint",
     },
-    "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code": {
-        "label": r"\OwnModelName{} (best median)",
+    "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code": {
+        "label": r"\OwnModelName{}",
         "selection_order": 0,
         "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
-            "Master_thesis_cardest/model/runs/"
-            "job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/"
-            "checkpoint_step_40000.pt",
+            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_0/"
+            "checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/"
+            "checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/"
+            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_2/"
+            "checkpoint_step_11000.pt",
         ),
         "training_summaries": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
-            "Master_thesis_cardest/model/runs/"
-            "job_light_ranges_duet_binary_native_anpm_40k_no_rare_support_live_dropout_0_0_seed_0/"
+            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_0/"
             "training_summary.json",
-        ),
-        "training_time_mode": "full_run",
-    },
-    "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code": {
-        "label": r"\OwnModelName{} (best p99)",
-        "selection_order": 1,
-        "qerror_only": True,
-        "checkpoint_paths": (
             "/work_beegfs/sunip956/master_thesis_trajectories/"
             "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/"
-            "checkpoint_step_19500.pt",
-        ),
-        "training_summaries": (
+            "training_summary.json",
             "/work_beegfs/sunip956/master_thesis_trajectories/"
-            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_1/"
+            "joblight_evaluation/own_model_job_light_ranges_rare_aux_20k/seed_2/"
             "training_summary.json",
         ),
         "training_time_mode": "checkpoint",
@@ -543,14 +519,11 @@ def own_model_single_run_note(rows: list[dict]) -> str:
     return ""
 
 
-def own_model_selection_note(rows: list[dict]) -> str:
+def own_model_rule_note(rows: list[dict]) -> str:
     selected = [row for row in rows if row.get("variant_id") in OWN_MODEL_VARIANTS]
-    if len(selected) == 1:
-        return (r"The \OwnModelName{} row was selected on this benchmark's own queries "
-                r"for both median (A) and p99 (B).")
-    if len(selected) > 1:
-        return (r"The two \OwnModelName{} rows are the best-median (A) and best-p99 (B) "
-                r"selections on this benchmark's own queries.")
+    if selected:
+        return (r"The \OwnModelName{} row uses the rare-auxiliary configuration's "
+                r"step-11,000 checkpoint over training seeds 0--2.")
     return ""
 
 
@@ -601,7 +574,7 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
         seeds_note(rows),
         BEST_NOTE,
         own_model_single_run_note(rows),
-        own_model_selection_note(rows),
+        own_model_rule_note(rows),
         (r"Est.\,$<1$ is the number of queries with an estimate below one."
          if has_sub1 else ""),
         coverage_note(rows, data),

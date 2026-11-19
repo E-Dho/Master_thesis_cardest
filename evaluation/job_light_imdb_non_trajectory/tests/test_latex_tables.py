@@ -28,24 +28,26 @@ class LatexTablesTest(unittest.TestCase):
             r"Own$^{\S\ddagger}$",
         )
 
-    def test_best_p99_selection_is_qerror_only(self) -> None:
+    def test_rule_based_own_model_row_is_complete_across_three_seeds(self) -> None:
         rows = MODULE["prepare_rows"]([
             {
                 "workload": "job_light",
                 "method_id": "own_model",
-                "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_18000",
-                "seed_count": 1,
-                "coverage_complete_all_seeds": True,
-            },
-            {
-                "workload": "job_light",
-                "method_id": "own_model",
-                "variant_id": "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code",
+                "variant_id": "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
                 "seed_count": 3,
                 "coverage_complete_all_seeds": True,
             },
         ], "job_light")
-        self.assertEqual([row["_qerror_only"] for row in rows], [False, True])
+        self.assertEqual([row["_qerror_only"] for row in rows], [False])
+        self.assertNotIn(r"$^{\S}$", rows[0]["_label"])
+
+    def test_rule_note_has_no_selection_language(self) -> None:
+        note = MODULE["own_model_rule_note"]([{
+            "variant_id": "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
+        }])
+        self.assertIn("step-11,000", note)
+        self.assertNotIn("best", note.lower())
+        self.assertNotIn("(A)", note)
 
     def test_adapted_mscn_uses_an_explicit_label(self) -> None:
         self.assertEqual(
