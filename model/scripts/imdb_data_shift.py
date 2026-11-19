@@ -646,6 +646,59 @@ def _log(event: str) -> None:
     print(f"[imdb_data_shift {datetime.now(timezone.utc).isoformat()}] {event}", flush=True)
 
 
+def _start_ray() -> Optional[Dict[str, Any]]:
+    """Start Ray ourselves before NeuroCard's prepare() does, with node-local settings.
+
+    PREPARE 23323812 hung for 7 h inside NeuroCard's own ray.init() (worker.connect,
+    after "Failed to determine local IP via external connectivity"), while the same
+    step on another node finished in 2 min. So: loopback address, no dashboard, the
+    job's CPU count, and a short node-local temp dir of its own (Unix socket paths
+    must stay short). NeuroCard's later ray.init(ignore_reinit_error=True) is then a
+    no-op. Returns the settings used (None without Ray or when it already runs).
+    """
+
+    try:
+        import ray  # type: ignore
+    except ImportError:
+        return None
+    if ray.is_initialized():
+        return None
+    settings = {
+        "num_cpus": int(os.environ.get("SLURM_CPUS_PER_TASK") or os.cpu_count() or 1),
+        "include_dashboard": False,
+        "_node_ip_address": "127.0.0.1",
+        "_temp_dir": f"/tmp/ray_ids_{os.environ.get('SLURM_JOB_ID') or os.getpid()}",
+        "ignore_reinit_error": True,
+    }
+    _log(f"starting Ray: {settings}")
+    ray.init(**settings)
+    _log("Ray started")
+    return settings
+
+
+def _watchdog(seconds: float) -> Any:
+    """Abort the process (exit 3, all thread stacks on stderr) if the sampler is not built in time.
+
+    temporal80 built its join-count tables in 2 min; a hang must not hold a node for
+    the whole time limit. IMDB_SHIFT_SAMPLER_TIMEOUT overrides the limit (seconds).
+    """
+
+    import faulthandler
+    import threading
+
+    def abort() -> None:
+        _log(f"factorized sampler not built after {seconds:.0f} s; aborting")
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        sys.stderr.flush()
+        sys.stdout.flush()
+        os._exit(3)
+
+    timer = threading.Timer(seconds, abort)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def neurocard_sampler(package: Path, csv_directory: Path, use_cols: str, sample_rows: int) -> Tuple[int, Any]:
     """NeuroCard's join cardinality of the data under ``package``'s working directory and a validation sample."""
 
@@ -670,9 +723,16 @@ def neurocard_sampler(package: Path, csv_directory: Path, use_cols: str, sample_
             tables = [datasets.LoadImdb(table, data_dir=str(csv_directory) + "/", use_cols=use_cols,
                                         try_load_parsed=True) for table in spec.join_tables]
             _log("tables loaded; building the factorized sampler (join-count tables on a cache miss)")
-            with scoped_neurocard_prepare_cache_bypass(factorized_sampler, spec):
-                sampler = factorized_sampler.FactorizedSampler(tables, spec, sample_rows, rng=np.random.default_rng(0),
-                                                               disambiguate_column_names=True)
+            timer = _watchdog(float(os.environ.get("IMDB_SHIFT_SAMPLER_TIMEOUT", "3600")))
+            try:
+                if not factorized_sampler.prepare_utils.check_required_files(spec):
+                    _start_ray()
+                with scoped_neurocard_prepare_cache_bypass(factorized_sampler, spec):
+                    sampler = factorized_sampler.FactorizedSampler(tables, spec, sample_rows,
+                                                                   rng=np.random.default_rng(0),
+                                                                   disambiguate_column_names=True)
+            finally:
+                timer.cancel()
             _log(f"factorized sampler built: join cardinality {int(sampler.join_card)}")
             frame = sampler.run()
             _log(f"validation sample drawn: {len(frame)} rows")

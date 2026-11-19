@@ -345,8 +345,19 @@ class ImdbDataShiftTest(unittest.TestCase):
             "                                capture_output=True, text=True, env=dict(os.environ))\n"
             "        if worker.returncode:\n            raise RuntimeError(worker.stderr)\n"
             "        self.worker_cwd = worker.stdout.strip()\n"
+            "        import time\n"
+            "        time.sleep(float(os.environ.get('FAKE_SAMPLER_SLEEP', '0')))\n"
             "        self.join_card = 5\n"
             "    def run(self):\n        return pd.DataFrame({'worker_cwd': [self.worker_cwd]})\n")
+        # a stand-in for Ray: records how it was started
+        (package / "ray.py").write_text(
+            "import json, os\n"
+            "_up = False\n"
+            "def is_initialized():\n    return _up\n"
+            "def init(**kwargs):\n"
+            "    global _up\n    _up = True\n"
+            "    open(os.environ['FAKE_RAY_LOG'], 'w').write(json.dumps(kwargs))\n")
+        os.environ["FAKE_RAY_LOG"] = str(self.root / "ray_init.json")
         copy = shift.neurocard_workdir(package, self.full, self.subset, self.root / "nc_fake_subset")
         before = os.environ.get("PYTHONPATH")
         path_before = list(system.path)
@@ -359,6 +370,24 @@ class ImdbDataShiftTest(unittest.TestCase):
         self.assertEqual(count, 5)
         self.assertEqual(Path(frame["worker_cwd"].iloc[0]).resolve(), copy.parent.resolve())
         self.assertEqual(os.environ.get("PYTHONPATH"), before)  # restored afterwards
+        # Ray was started by us, node-locally, before NeuroCard's own ray.init (PREPARE 23323812 hung there)
+        started = json.loads((self.root / "ray_init.json").read_text())
+        self.assertEqual(started["_node_ip_address"], "127.0.0.1")
+        self.assertFalse(started["include_dashboard"])
+        self.assertTrue(started["_temp_dir"].startswith("/tmp/ray_ids_") and len(started["_temp_dir"]) < 40)
+        system.modules.pop("ray", None)
+        # a sampler that does not finish is aborted (exit 3) instead of holding the node
+        script = (f"import sys; sys.path.insert(0, {str(REPO)!r})\n"
+                  "from model.scripts import imdb_data_shift as shift\n"
+                  f"shift.neurocard_sampler(__import__('pathlib').Path({str(copy)!r}), "
+                  f"__import__('pathlib').Path({str(self.subset)!r}), 'content', 4)\n")
+        import subprocess
+        hung = subprocess.run([system.executable, "-c", script], capture_output=True, text=True, timeout=120,
+                              env={**os.environ, "FAKE_SAMPLER_SLEEP": "60", "IMDB_SHIFT_SAMPLER_TIMEOUT": "2"})
+        self.assertEqual(hung.returncode, 3, hung.stderr[-2000:])
+        self.assertIn("aborting", hung.stdout)
+        self.assertIn("Thread", hung.stderr)
+        os.environ.pop("FAKE_RAY_LOG", None)
 
     def test_neurocard_workdir_links_the_package_and_reads_the_kept_csvs(self) -> None:
         shared = self.root / "neurocard_shared"
