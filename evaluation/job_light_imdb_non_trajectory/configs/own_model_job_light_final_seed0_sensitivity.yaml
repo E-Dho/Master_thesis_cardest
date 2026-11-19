@@ -1,4 +1,4 @@
-extends: own_model_job_light_best_median_step_18000_corrected_model_code.yaml
+extends: own_model_job_light_best_median_step_18000.yaml
 
 experiment:
   variant_id: own_model_job_light_final_seed0_sensitivity
