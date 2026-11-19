@@ -162,7 +162,7 @@ class LatexTablesTest(unittest.TestCase):
         table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
         self.assertIn("GPU runs use CUDA mixed precision", table)
         self.assertIn("CPU runs full precision", table)
-        self.assertIn("q-errors are unaffected", table)
+        self.assertIn("the reported q-errors come from the GPU accuracy run", table)
         self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_median_relative_difference}", table)
         self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_max_relative_difference}", table)
 

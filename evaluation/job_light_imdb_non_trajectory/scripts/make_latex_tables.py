@@ -735,7 +735,7 @@ def distjoin_cpu_consistency_note(rows: list[dict], workload: str, data: DataSto
             f"{row_label(row)}'s GPU runs use CUDA mixed precision, its CPU runs full precision; "
             f"CPU estimates differ from the GPU accuracy run by a median of {median_value} "
             f"(maximum {maximum_value}, from rounding very small estimates up to whole rows); "
-            "q-errors are unaffected"
+            "the reported q-errors come from the GPU accuracy run"
         )
     return "; ".join(descriptions) + "."
 
