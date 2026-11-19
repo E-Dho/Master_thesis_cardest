@@ -518,3 +518,29 @@ class SubmitScriptsDatasetTest(unittest.TestCase):
         result, submitted = self._submit("submit_p3.sh", {"TRAJ_DATASET": "porto"})
         self.assertEqual(result.returncode, 2)
         self.assertEqual(submitted, [])
+
+
+class PortoAblationConfigTest(unittest.TestCase):
+    """configs/porto_v3_ablations differs from porto_v3/own_model.yaml only in identity and model paths."""
+
+    def test_rare_support_off(self) -> None:
+        configs = Path(__file__).resolve().parents[1] / "configs"
+        self.assertEqual(sorted(p.name for p in (configs / "porto_v3_ablations").glob("*.yaml")),
+                         ["own_model_ablation_rare_support_off.yaml"])
+        reference = (configs / "porto_v3" / "own_model.yaml").read_text(encoding="utf-8")
+        reference = reference[reference.index("extends:"):]
+        path = configs / "porto_v3_ablations" / "own_model_ablation_rare_support_off.yaml"
+        body = path.read_text(encoding="utf-8")
+        body = body[body.index("extends:"):]
+        prefix = "/work_beegfs/sunip956/master_thesis_trajectories/p7_models/"
+        self.assertNotIn(prefix + "porto_v3/seed_", body)
+        restored = body.replace(prefix + "porto_v3_ablations/porto_ablation_rare_support_off/seed_", prefix + "porto_v3/seed_")
+        restored = restored.replace("extends: ../porto_v3/_base.yaml", "extends: _base.yaml")
+        self.assertEqual(len(reference.splitlines()), len(restored.splitlines()))
+        changed = [b for a, b in zip(reference.splitlines(), restored.splitlines()) if a != b]
+        self.assertEqual([line.split(":")[0] for line in changed],
+                         ["  variant_id", "  display_name", "  installed_version"])
+        experiment = load_simple_yaml(path)["experiment"]  # (rendering needs the cluster's benchmark file)
+        self.assertEqual((experiment["method_id"], experiment["variant_id"], experiment["seeds"]),
+                         ("own_model", "ablation_rare_support_off", [0]))
+        self.assertTrue((path.parent / "../porto_v3/_base.yaml").resolve().is_file())
