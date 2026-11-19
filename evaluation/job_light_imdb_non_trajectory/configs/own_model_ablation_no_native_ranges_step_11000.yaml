@@ -2,7 +2,9 @@
 # own_model_job_light_ranges_full_schema_step_11000.yaml (same workload, checkpoint step,
 # bridge and timing settings) for the ablation's seed-0 run, trained by
 # model/slurm/job_light_ranges_ablation_20k.sbatch ABLATION=imdb_ablation_no_native_ranges at aff8a39
-# (the pinned source checkout; inference code identical to f694978's).
+# (training code). Inference code: the corrected model code 7c156b2 (SQL sentinels masked from range
+# predicates), the checkout the rule row own_model_job_light_ranges_rule_step_11000_corrected_model_code
+# uses (decided 2026-11-19), so the ablation compares with that row.
 schema_version: 1
 experiment:
   experiment_id: joblight_phase1
@@ -12,8 +14,8 @@ experiment:
   seeds: [0]
 source:
   url: https://github.com/E-Dho/Master_thesis_cardest.git
-  revision: aff8a39db2ea26ca80843103d25db4e5a5bfa81a
-  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_aff8a39
+  revision: 7c156b247031d7f5dfbd96e812f111abe14a75f2
+  checkout_path: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_7c156b247031d7f5dfbd96e812f111abe14a75f2
 paths:
   results_root: ../results
 workloads:
@@ -48,7 +50,7 @@ adapter:
   type: own_model
   working_directory: ../../..
   environment:
-    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_aff8a39
+    PYTHONPATH: /work_beegfs/sunip956/master_thesis_trajectories/external/master_thesis_cardest_7c156b247031d7f5dfbd96e812f111abe14a75f2
   require_smoke_before_build: true
   prepare_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py prepare --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_ablations/imdb_ablation_no_native_ranges/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_ablations/imdb_ablation_no_native_ranges/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory}
   smoke_command: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python evaluation/job_light_imdb_non_trajectory/scripts/own_model_bridge.py smoke --config /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_ablations/imdb_ablation_no_native_ranges/seed_{seed}/training_config.yaml --checkpoint /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_ablations/imdb_ablation_no_native_ranges/seed_{seed}/checkpoint_step_11000.pt --output-directory {exchange_directory} --queries /work_beegfs/sunip956/master_thesis_trajectories/external/distjoin/queries/job-light-ranges.csv --query-limit {query_limit} --warmup-passes 0 --repetitions 1 --device cpu
