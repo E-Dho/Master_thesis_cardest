@@ -219,6 +219,8 @@ class TimingStageUnitTests(unittest.TestCase):
                                                              "absolute_tolerance": 0.0})
         self.assertTrue(stochastic["passed"])
         self.assertAlmostEqual(stochastic["max_relative_difference"], 0.25)
+        self.assertAlmostEqual(stochastic["median_relative_difference"], 0.125)
+        self.assertEqual(stochastic["by_workload"]["w"]["violation_count"], 1)
 
     def test_launch_plan_and_core_assignment(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -348,6 +350,7 @@ class TimingStageIntegrationTests(unittest.TestCase):
         summary = json.loads((directories[0] / "timing_summary.json").read_text())
         self.assertTrue(summary["reportable"])
         self.assertTrue(summary["estimate_consistency"]["passed"])
+        self.assertEqual(summary["estimate_consistency"]["median_relative_difference"], 0.0)
         workload = summary["workloads"]["job_light"]
         self.assertEqual(workload["inference"]["observation_count"], 4)
         self.assertIsNotNone(workload["model_core"])

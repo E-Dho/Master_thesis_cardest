@@ -699,6 +699,47 @@ def attach_configured_timing_profiles(results: list[dict], comparison_path: Path
         row["_configured_timing_profiles"] = tuple(str(profile) for profile in profiles)
 
 
+def distjoin_cpu_consistency_note(rows: list[dict], workload: str, data: DataStore) -> str:
+    """Describe the observed CPU-vs-accuracy drift from timing summaries.
+
+    DistJoin's CUDA-AMP accuracy evaluation can round differently before the
+    estimator's final cardinality ceiling. The per-seed medians and maxima
+    must come from accepted timing summaries, not a hand-maintained note.
+    """
+    bounds: list[tuple[dict, float, float]] = []
+    for row in rows:
+        if row.get("method_id") != "distjoin":
+            continue
+        profile = (row.get("standardized_timing") or {}).get("cpu_1core") or {}
+        checks = profile.get("estimate_consistency") or []
+        per_workload = [check.get("by_workload", {}).get(workload, {}) for check in checks]
+        medians = [float(statistic["median_relative_difference"]) for statistic in per_workload
+                   if statistic.get("median_relative_difference") is not None]
+        maxima = [float(statistic["max_relative_difference"]) for statistic in per_workload
+                  if statistic.get("max_relative_difference") is not None]
+        if medians and maxima:
+            bounds.append((row, statistics.median(medians), max(maxima)))
+    if not bounds:
+        return ""
+    descriptions = []
+    for row, median, maximum in bounds:
+        median_value = data.inline(
+            f"{workload}/inference/{row_key(row)}/cpu_accuracy_median_relative_difference",
+            verify_printed(f"${fmt_number(median)}$", [median]),
+        )
+        maximum_value = data.inline(
+            f"{workload}/inference/{row_key(row)}/cpu_accuracy_max_relative_difference",
+            verify_printed(f"${fmt_number(maximum)}$", [maximum]),
+        )
+        descriptions.append(
+            f"{row_label(row)}'s GPU runs use CUDA mixed precision, its CPU runs full precision; "
+            f"CPU estimates differ from the GPU accuracy run by a median of {median_value} "
+            f"(maximum {maximum_value}, from rounding very small estimates up to whole rows); "
+            "q-errors are unaffected"
+        )
+    return "; ".join(descriptions) + "."
+
+
 def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only")]
     for row in rows:
@@ -794,6 +835,7 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
             notes.append(
                 rf"$^{{\P}}${row_label(row)} is missing its standardized {profiles} timing profile{extra}."
             )
+    notes.append(distjoin_cpu_consistency_note(rows, workload, data))
     notes.append(coverage_note(rows, data))
     workload_slug = workload.replace("_", "-")
     return render_table(

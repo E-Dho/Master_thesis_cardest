@@ -2660,7 +2660,7 @@
       "zero_estimate_count.std": 0.0
     },
     {
-      "actual_hardware": "NVIDIA L40S",
+      "actual_hardware": "AMD EPYC 7313 16-Core Processor",
       "coverage_complete_all_seeds": true,
       "coverage_fraction.mean": 1.0,
       "coverage_fraction.std": 0.0,
@@ -2672,18 +2672,28 @@
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
       "evaluate_stage_device": "cuda",
+      "evaluate_stage_inference.mean_ms.mean": 14.097801766225269,
+      "evaluate_stage_inference.mean_ms.std": 0.1826673385990767,
+      "evaluate_stage_inference.p50_ms.mean": 13.572895588974157,
+      "evaluate_stage_inference.p50_ms.std": 0.17981327864009702,
+      "evaluate_stage_inference.p95_ms.mean": 21.782223569850117,
+      "evaluate_stage_inference.p95_ms.std": 0.6412684345279188,
+      "evaluate_stage_inference.p99_ms.mean": 26.328855762258172,
+      "evaluate_stage_inference.p99_ms.std": 0.6314795060820555,
+      "evaluate_stage_inference.throughput_queries_per_second.mean": 70.94103317484269,
+      "evaluate_stage_inference.throughput_queries_per_second.std": 0.9248275507496235,
       "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 14.097801766225269,
-      "inference.mean_ms.std": 0.1826673385990767,
-      "inference.p50_ms.mean": 13.572895588974157,
-      "inference.p50_ms.std": 0.17981327864009702,
-      "inference.p95_ms.mean": 21.782223569850117,
-      "inference.p95_ms.std": 0.6412684345279188,
-      "inference.p99_ms.mean": 26.328855762258172,
-      "inference.p99_ms.std": 0.6314795060820555,
-      "inference.throughput_queries_per_second.mean": 70.94103317484269,
-      "inference.throughput_queries_per_second.std": 0.9248275507496235,
-      "inference_device": "cuda",
+      "inference.mean_ms.mean": 254.94620711856314,
+      "inference.mean_ms.std": 1.1682483495755722,
+      "inference.p50_ms.mean": 234.8242826662196,
+      "inference.p50_ms.std": 1.0083413976159865,
+      "inference.p95_ms.mean": 434.93183246632725,
+      "inference.p95_ms.std": 2.7554003315074804,
+      "inference.p99_ms.mean": 476.53983055361704,
+      "inference.p99_ms.std": 2.4511018186416735,
+      "inference.throughput_queries_per_second.mean": 3.922450979971184,
+      "inference.throughput_queries_per_second.std": 0.017975631323778534,
+      "inference_device": "cpu",
       "inference_profiles": {
         "cuda": {
           "device_names": [
@@ -2715,7 +2725,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 14.097801766225269, \"std\": 0.1826673385990767}, \"p50_ms\": {\"mean\": 13.572895588974157, \"std\": 0.17981327864009702}, \"p95_ms\": {\"mean\": 21.782223569850117, \"std\": 0.6412684345279188}, \"p99_ms\": {\"mean\": 26.328855762258172, \"std\": 0.6314795060820555}, \"throughput_queries_per_second\": {\"mean\": 70.94103317484269, \"std\": 0.9248275507496235}}}}",
       "method_id": "distjoin",
-      "primary_timing_profile": null,
+      "primary_timing_profile": "cpu_1core",
       "protocol": "native",
       "published_reference_hardware": "NVIDIA RTX4070Ti 12GB; AMD Ryzen9 7950X3D",
       "raw_q_error.max.mean": 7.75618334467892,
@@ -2760,6 +2770,142 @@
       "smoothed_q_error_true_zero.p99.mean": null,
       "smoothed_q_error_true_zero.p99.std": null,
       "standardized_timing": {
+        "cpu_1core": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": null
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.015384615384615385,
+                  "median_relative_difference": 0.0005209817442263589,
+                  "violation_count": 56
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.014705882352941176,
+                  "median_relative_difference": 0.0005625213468159339,
+                  "violation_count": 633
+                }
+              },
+              "max_relative_difference": 0.015384615384615385,
+              "median_relative_difference": 0.0005569645414284057,
+              "mode": "deterministic",
+              "passed": false,
+              "seed": 0
+            },
+            {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0038938257802108834,
+                  "median_relative_difference": 0.0004033065366893745,
+                  "violation_count": 57
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.024390243902439025,
+                  "median_relative_difference": 0.00042074646333557135,
+                  "violation_count": 582
+                }
+              },
+              "max_relative_difference": 0.024390243902439025,
+              "median_relative_difference": 0.0004173268942270494,
+              "mode": "deterministic",
+              "passed": false,
+              "seed": 1
+            },
+            {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0017500081001393223,
+                  "median_relative_difference": 0.000494834001166348,
+                  "violation_count": 52
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.5,
+                  "median_relative_difference": 0.0009555434998954395,
+                  "violation_count": 655
+                }
+              },
+              "max_relative_difference": 0.5,
+              "median_relative_difference": 0.0008920278388783584,
+              "mode": "deterministic",
+              "passed": false,
+              "seed": 2
+            }
+          ],
+          "gpu_names": [],
+          "guard_warning_count": 0,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 254.94620711856314,
+              "std": 1.1682483495755722
+            },
+            "p50_ms": {
+              "mean": 234.8242826662196,
+              "std": 1.0083413976159865
+            },
+            "p95_ms": {
+              "mean": 434.93183246632725,
+              "std": 2.7554003315074804
+            },
+            "p99_ms": {
+              "mean": 476.53983055361704,
+              "std": 2.4511018186416735
+            },
+            "throughput_queries_per_second": {
+              "mean": 3.922450979971184,
+              "std": 0.017975631323778534
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              700,
+              700,
+              700
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0,
+              0,
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "n230"
+          ],
+          "report_table": "CPU latency, one physical core",
+          "scopes": [
+            "predicate_encoding_and_estimation"
+          ],
+          "seed_count": 3,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_0/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa/timing/cpu_1core/20261116T092602Z-198922bfae930a83",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_1/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa/timing/cpu_1core/20261116T102408Z-198922bfae930a83",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_2/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa/timing/cpu_1core/20261116T112138Z-198922bfae930a83"
+          ]
+        },
         "gpu_single_query": {
           "available": true,
           "config_drift": [],
@@ -2774,19 +2920,64 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 1
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 2
@@ -2854,6 +3045,20 @@
           ]
         }
       },
+      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.cpu_1core.gpu_names": "",
+      "timing.cpu_1core.hardware_consistent": true,
+      "timing.cpu_1core.hardware_status": "consistent",
+      "timing.cpu_1core.mean_ms.mean": 254.94620711856314,
+      "timing.cpu_1core.mean_ms.std": 1.1682483495755722,
+      "timing.cpu_1core.p50_ms.mean": 234.8242826662196,
+      "timing.cpu_1core.p50_ms.std": 1.0083413976159865,
+      "timing.cpu_1core.p95_ms.mean": 434.93183246632725,
+      "timing.cpu_1core.p95_ms.std": 2.7554003315074804,
+      "timing.cpu_1core.p99_ms.mean": 476.53983055361704,
+      "timing.cpu_1core.p99_ms.std": 2.4511018186416735,
+      "timing.cpu_1core.throughput_queries_per_second.mean": 3.922450979971184,
+      "timing.cpu_1core.throughput_queries_per_second.std": 0.017975631323778534,
       "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
       "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
       "timing.gpu_single_query.hardware_consistent": true,
@@ -2876,7 +3081,7 @@
       "zero_estimate_count.std": 0.0
     },
     {
-      "actual_hardware": "NVIDIA L40S",
+      "actual_hardware": "AMD EPYC 7313 16-Core Processor",
       "coverage_complete_all_seeds": true,
       "coverage_fraction.mean": 1.0,
       "coverage_fraction.std": 0.0,
@@ -2888,18 +3093,28 @@
       "estimate_lt_1_count.mean": 0.0,
       "estimate_lt_1_count.std": 0.0,
       "evaluate_stage_device": "cuda",
+      "evaluate_stage_inference.mean_ms.mean": 18.76804768204068,
+      "evaluate_stage_inference.mean_ms.std": 0.306993598175654,
+      "evaluate_stage_inference.p50_ms.mean": 18.153538772215445,
+      "evaluate_stage_inference.p50_ms.std": 0.28170057662696235,
+      "evaluate_stage_inference.p95_ms.mean": 27.13385163806379,
+      "evaluate_stage_inference.p95_ms.std": 0.5693462485536074,
+      "evaluate_stage_inference.p99_ms.mean": 30.465212886532147,
+      "evaluate_stage_inference.p99_ms.std": 0.5760626507419929,
+      "evaluate_stage_inference.throughput_queries_per_second.mean": 53.291618962285554,
+      "evaluate_stage_inference.throughput_queries_per_second.std": 0.877784417339968,
       "experiment_id": "joblight_phase1",
-      "inference.mean_ms.mean": 18.76804768204068,
-      "inference.mean_ms.std": 0.306993598175654,
-      "inference.p50_ms.mean": 18.153538772215445,
-      "inference.p50_ms.std": 0.28170057662696235,
-      "inference.p95_ms.mean": 27.13385163806379,
-      "inference.p95_ms.std": 0.5693462485536074,
-      "inference.p99_ms.mean": 30.465212886532147,
-      "inference.p99_ms.std": 0.5760626507419929,
-      "inference.throughput_queries_per_second.mean": 53.291618962285554,
-      "inference.throughput_queries_per_second.std": 0.877784417339968,
-      "inference_device": "cuda",
+      "inference.mean_ms.mean": 279.9215557294038,
+      "inference.mean_ms.std": 7.5884332185414145,
+      "inference.p50_ms.mean": 283.28527733295533,
+      "inference.p50_ms.std": 9.026934871783862,
+      "inference.p95_ms.mean": 433.4310580002844,
+      "inference.p95_ms.std": 10.030483379804913,
+      "inference.p99_ms.mean": 464.65215732999553,
+      "inference.p99_ms.std": 10.024755891112278,
+      "inference.throughput_queries_per_second.mean": 3.574205855046587,
+      "inference.throughput_queries_per_second.std": 0.09829576712099912,
+      "inference_device": "cpu",
       "inference_profiles": {
         "cuda": {
           "device_names": [
@@ -2931,7 +3146,7 @@
       },
       "inference_profiles_json": "{\"cuda\": {\"device_names\": [\"NVIDIA L40S\"], \"metrics\": {\"mean_ms\": {\"mean\": 18.76804768204068, \"std\": 0.306993598175654}, \"p50_ms\": {\"mean\": 18.153538772215445, \"std\": 0.28170057662696235}, \"p95_ms\": {\"mean\": 27.13385163806379, \"std\": 0.5693462485536074}, \"p99_ms\": {\"mean\": 30.465212886532147, \"std\": 0.5760626507419929}, \"throughput_queries_per_second\": {\"mean\": 53.291618962285554, \"std\": 0.877784417339968}}}}",
       "method_id": "distjoin",
-      "primary_timing_profile": null,
+      "primary_timing_profile": "cpu_1core",
       "protocol": "native",
       "published_reference_hardware": "NVIDIA RTX4070Ti 12GB; AMD Ryzen9 7950X3D",
       "raw_q_error.max.mean": 3709.3333333333335,
@@ -2976,6 +3191,142 @@
       "smoothed_q_error_true_zero.p99.mean": null,
       "smoothed_q_error_true_zero.p99.std": null,
       "standardized_timing": {
+        "cpu_1core": {
+          "available": true,
+          "config_drift": [],
+          "cpu_models": [
+            "AMD EPYC 7313 16-Core Processor"
+          ],
+          "declared_hardware": [
+            {
+              "cpu_model": "AMD EPYC 7313 16-Core Processor",
+              "gpu_name": null
+            }
+          ],
+          "estimate_consistency": [
+            {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.015384615384615385,
+                  "median_relative_difference": 0.0005209817442263589,
+                  "violation_count": 56
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.014705882352941176,
+                  "median_relative_difference": 0.0005625213468159339,
+                  "violation_count": 633
+                }
+              },
+              "max_relative_difference": 0.015384615384615385,
+              "median_relative_difference": 0.0005569645414284057,
+              "mode": "deterministic",
+              "passed": false,
+              "seed": 0
+            },
+            {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0038938257802108834,
+                  "median_relative_difference": 0.0004033065366893745,
+                  "violation_count": 57
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.024390243902439025,
+                  "median_relative_difference": 0.00042074646333557135,
+                  "violation_count": 582
+                }
+              },
+              "max_relative_difference": 0.024390243902439025,
+              "median_relative_difference": 0.0004173268942270494,
+              "mode": "deterministic",
+              "passed": false,
+              "seed": 1
+            },
+            {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0017500081001393223,
+                  "median_relative_difference": 0.000494834001166348,
+                  "violation_count": 52
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.5,
+                  "median_relative_difference": 0.0009555434998954395,
+                  "violation_count": 655
+                }
+              },
+              "max_relative_difference": 0.5,
+              "median_relative_difference": 0.0008920278388783584,
+              "mode": "deterministic",
+              "passed": false,
+              "seed": 2
+            }
+          ],
+          "gpu_names": [],
+          "guard_warning_count": 0,
+          "hardware_consistent": true,
+          "hardware_declared": true,
+          "metrics": {
+            "mean_ms": {
+              "mean": 279.9215557294038,
+              "std": 7.5884332185414145
+            },
+            "p50_ms": {
+              "mean": 283.28527733295533,
+              "std": 9.026934871783862
+            },
+            "p95_ms": {
+              "mean": 433.4310580002844,
+              "std": 10.030483379804913
+            },
+            "p99_ms": {
+              "mean": 464.65215732999553,
+              "std": 10.024755891112278
+            },
+            "throughput_queries_per_second": {
+              "mean": 3.574205855046587,
+              "std": 0.09829576712099912
+            }
+          },
+          "model_core": {
+            "complete": false,
+            "coverage_fraction_mean": 0.0,
+            "coverage_fraction_min": 0.0,
+            "exposed": false,
+            "latency_observation_counts": [
+              10000,
+              10000,
+              10000
+            ],
+            "metrics": null,
+            "observation_counts": [
+              0,
+              0,
+              0
+            ],
+            "suppressed_reason": "method exposes no model-core boundary"
+          },
+          "model_core_metrics": null,
+          "nodes": [
+            "n230"
+          ],
+          "report_table": "CPU latency, one physical core",
+          "scopes": [
+            "predicate_encoding_and_estimation"
+          ],
+          "seed_count": 3,
+          "timing_directories": [
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_0/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa/timing/cpu_1core/20261116T092602Z-198922bfae930a83",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_1/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa/timing/cpu_1core/20261116T102408Z-198922bfae930a83",
+            "/work_beegfs/sunip956/master_thesis_trajectories/Master_thesis_cardest_joblight_evaluation/evaluation/job_light_imdb_non_trajectory/results/joblight_phase1/distjoin/published_imdb_dynamic_sampler/seed_2/production-20260929-a-4f11f84316b5800494c33b25d85e621be979c5fd3e952b4454cd618bd586f5aa/timing/cpu_1core/20261116T112138Z-198922bfae930a83"
+          ]
+        },
         "gpu_single_query": {
           "available": true,
           "config_drift": [],
@@ -2990,19 +3341,64 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 1
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                },
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 2
@@ -3070,6 +3466,20 @@
           ]
         }
       },
+      "timing.cpu_1core.cpu_models": "AMD EPYC 7313 16-Core Processor",
+      "timing.cpu_1core.gpu_names": "",
+      "timing.cpu_1core.hardware_consistent": true,
+      "timing.cpu_1core.hardware_status": "consistent",
+      "timing.cpu_1core.mean_ms.mean": 279.9215557294038,
+      "timing.cpu_1core.mean_ms.std": 7.5884332185414145,
+      "timing.cpu_1core.p50_ms.mean": 283.28527733295533,
+      "timing.cpu_1core.p50_ms.std": 9.026934871783862,
+      "timing.cpu_1core.p95_ms.mean": 433.4310580002844,
+      "timing.cpu_1core.p95_ms.std": 10.030483379804913,
+      "timing.cpu_1core.p99_ms.mean": 464.65215732999553,
+      "timing.cpu_1core.p99_ms.std": 10.024755891112278,
+      "timing.cpu_1core.throughput_queries_per_second.mean": 3.574205855046587,
+      "timing.cpu_1core.throughput_queries_per_second.std": 0.09829576712099912,
       "timing.gpu_single_query.cpu_models": "AMD EPYC 7313 16-Core Processor",
       "timing.gpu_single_query.gpu_names": "NVIDIA L40S",
       "timing.gpu_single_query.hardware_consistent": true,
@@ -5356,7 +5766,16 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
@@ -5429,7 +5848,16 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 5.087386886918086e-06,
+                  "median_relative_difference": 8.775194351627604e-07,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 5.087386886918086e-06,
+              "median_relative_difference": 8.775194351627604e-07,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
@@ -5651,19 +6079,46 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 1
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 2
@@ -5742,19 +6197,46 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 2.872414394620825e-06,
+                  "median_relative_difference": 5.15033736080276e-07,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 2.872414394620825e-06,
+              "median_relative_difference": 5.15033736080276e-07,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 3.047655002413883e-06,
+                  "median_relative_difference": 6.329698156733872e-07,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 3.047655002413883e-06,
+              "median_relative_difference": 6.329698156733872e-07,
               "mode": "deterministic",
               "passed": true,
               "seed": 1
             },
             {
+              "by_workload": {
+                "job_light": {
+                  "compared_estimates": 70,
+                  "max_relative_difference": 2.989501162891902e-06,
+                  "median_relative_difference": 6.192747754641052e-07,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 2.989501162891902e-06,
+              "median_relative_difference": 6.192747754641052e-07,
               "mode": "deterministic",
               "passed": true,
               "seed": 2
@@ -5982,7 +6464,16 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.006244513868284393,
+                  "median_relative_difference": 7.575617599445203e-07,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.006244513868284393,
+              "median_relative_difference": 7.575617599445203e-07,
               "mode": "deterministic",
               "passed": true,
               "seed": 0
@@ -6055,7 +6546,16 @@
           ],
           "estimate_consistency": [
             {
+              "by_workload": {
+                "job_light_ranges": {
+                  "compared_estimates": 1000,
+                  "max_relative_difference": 0.0,
+                  "median_relative_difference": 0.0,
+                  "violation_count": 0
+                }
+              },
               "max_relative_difference": 0.0,
+              "median_relative_difference": 0.0,
               "mode": "deterministic",
               "passed": true,
               "seed": 0

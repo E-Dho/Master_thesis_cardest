@@ -23,6 +23,8 @@ import hashlib
 import json
 import math
 import os
+import statistics
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -112,6 +114,9 @@ def estimate_consistency(
     missing: list[tuple[str, int]] = []
     max_abs = 0.0
     max_rel = 0.0
+    relative_differences: list[float] = []
+    relative_by_workload: dict[str, list[float]] = defaultdict(list)
+    violations_by_workload: dict[str, int] = defaultdict(int)
     compared = 0
     for record in timing:
         key = (record.workload, record.query_id)
@@ -131,10 +136,13 @@ def estimate_consistency(
         difference = abs(a - b)
         scale = max(abs(a), abs(b))
         rel = difference / scale if scale > 0 else 0.0
+        relative_differences.append(rel)
+        relative_by_workload[key[0]].append(rel)
         max_abs = max(max_abs, difference)
         max_rel = max(max_rel, rel)
         if not math.isclose(a, b, rel_tol=relative, abs_tol=absolute):
             violations.append({"workload": key[0], "query_id": key[1], "accuracy": a, "timing": b})
+            violations_by_workload[key[0]] += 1
     deterministic = settings["mode"] == "deterministic"
     passed = not status_mismatches and not missing and (not deterministic or not violations)
     return {
@@ -144,6 +152,18 @@ def estimate_consistency(
         "compared_estimates": compared,
         "max_absolute_difference": max_abs,
         "max_relative_difference": max_rel,
+        "median_relative_difference": (
+            float(statistics.median(relative_differences)) if relative_differences else None
+        ),
+        "by_workload": {
+            workload: {
+                "compared_estimates": len(values),
+                "median_relative_difference": float(statistics.median(values)),
+                "max_relative_difference": max(values),
+                "violation_count": violations_by_workload[workload],
+            }
+            for workload, values in sorted(relative_by_workload.items())
+        },
         "violation_count": len(violations),
         "violations": violations[:25],
         "status_mismatches": status_mismatches[:25],
@@ -387,6 +407,25 @@ def load_timing_summaries(run_directory: Path) -> dict[str, dict[str, Any]]:
         latest = latest_reportable_timing(run_directory, profile_directory.name)
         if latest is not None:
             summary = json.loads((latest / "timing_summary.json").read_text(encoding="utf-8"))
+            consistency = summary.get("estimate_consistency") or {}
+            # Older accepted summaries predate the median. Derive it from
+            # their immutable accuracy/timing prediction artifacts so table
+            # notes retain the same source of truth without rerunning timing.
+            if ("median_relative_difference" not in consistency
+                    or "by_workload" not in consistency):
+                settings = {
+                    "mode": consistency.get("mode", "deterministic"),
+                    "relative_tolerance": consistency.get("relative_tolerance", 1e-9),
+                    "absolute_tolerance": consistency.get("absolute_tolerance", 0.0),
+                }
+                recovered = estimate_consistency(
+                    read_predictions(Path(run_directory) / "predictions.csv"),
+                    read_predictions(latest / "predictions.csv"),
+                    settings,
+                )
+                consistency["median_relative_difference"] = recovered["median_relative_difference"]
+                consistency["by_workload"] = recovered["by_workload"]
+                summary["estimate_consistency"] = consistency
             summary["timing_directory"] = str(latest)
             results[profile_directory.name] = summary
     return results

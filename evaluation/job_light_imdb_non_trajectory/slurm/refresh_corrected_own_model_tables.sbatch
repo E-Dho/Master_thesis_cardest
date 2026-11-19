@@ -22,6 +22,7 @@ export PYTHONPATH="$REPO"
 export PYTHONDONTWRITEBYTECODE=1
 
 for CONFIG in \
+  $EVAL/configs/distjoin_job_light.yaml \
   $EVAL/configs/own_model_job_light_best_median_step_18000_corrected_model_code.yaml \
   $EVAL/configs/own_model_job_light_step_11000_corrected_model_code.yaml \
   $EVAL/configs/own_model_job_light_ranges_best_median_step_40000_corrected_model_code.yaml \

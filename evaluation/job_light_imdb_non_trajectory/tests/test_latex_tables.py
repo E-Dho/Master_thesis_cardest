@@ -136,6 +136,36 @@ class LatexTablesTest(unittest.TestCase):
         self.assertIn(r"$^{\P}$", table)
         self.assertIn("missing its standardized CPU timing profile", table)
 
+    def test_distjoin_cpu_consistency_note_uses_timing_summary_bound(self) -> None:
+        row = {
+            "workload": "job_light", "method_id": "distjoin", "variant_id": "published",
+            "coverage_complete_all_seeds": True, "seed_count": 3,
+            "_configured_timing_profiles": ("cpu_1core", "gpu_single_query"),
+            "timing.cpu_1core.mean_ms.mean": 100.0,
+            "timing.gpu_single_query.mean_ms.mean": 10.0,
+            "standardized_timing": {
+                "cpu_1core": {
+                    "estimate_consistency": [
+                        {"seed": 0, "by_workload": {"job_light": {
+                            "median_relative_difference": 0.001,
+                            "max_relative_difference": 0.015,
+                        }}},
+                        {"seed": 1, "by_workload": {"job_light": {
+                            "median_relative_difference": 0.003,
+                            "max_relative_difference": 0.5,
+                        }}},
+                    ],
+                },
+            },
+        }
+        rows = MODULE["prepare_rows"]([row], "job_light")
+        table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
+        self.assertIn("GPU runs use CUDA mixed precision", table)
+        self.assertIn("CPU runs full precision", table)
+        self.assertIn("q-errors are unaffected", table)
+        self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_median_relative_difference}", table)
+        self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_max_relative_difference}", table)
+
     def test_missing_size_does_not_clear_selected_training_time(self) -> None:
         attach = MODULE["attach_build_metrics"]
         runtime = attach.__globals__

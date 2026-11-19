@@ -622,7 +622,11 @@ def _aggregate_profile(
                 "seed": summary["seed"],
                 "mode": summary["estimate_consistency"]["mode"],
                 "passed": summary["estimate_consistency"]["passed"],
+                "median_relative_difference": summary["estimate_consistency"].get(
+                    "median_relative_difference"
+                ),
                 "max_relative_difference": summary["estimate_consistency"]["max_relative_difference"],
+                "by_workload": summary["estimate_consistency"].get("by_workload", {}),
             }
             for summary in summaries
         ],
