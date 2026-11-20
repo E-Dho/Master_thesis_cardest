@@ -18,7 +18,7 @@ from model.src.data.trajectory_distinct import (
     trajectory_base_measure_support,
 )
 from model.src.model.anpm import ANPMConfig
-from model.src.model.checkpoint import save_resmade_checkpoint
+from model.src.model.checkpoint import checkpoint_static_fields, save_resmade_checkpoint
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.model.resmade import TrajectoryDistinctConfig
 from model.src.predicates.generation import (
@@ -756,6 +756,15 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     )
     predicate_config = _predicate_generation_config(config)
     context_generator = PredicateTrainingContextGenerator(predicate_config)
+    # validation.save_best_checkpoint: false keeps validation as a learning
+    # curve but writes no checkpoint_best.pt (for runs evaluated at a fixed step).
+    save_best_checkpoint = bool(validation_config.get("save_best_checkpoint", True))
+    # Schemas, vocabularies and the factorization plan do not change during
+    # training; serializing them (with every value domain) once instead of at
+    # every save leaves each checkpoint's content unchanged.
+    checkpoint_static_payload = checkpoint_static_fields(
+        metadata=metadata, predicate_vocabularies=vocabularies
+    )
     if validation_enabled:
         if validation_interval <= 0:
             raise ValueError("validation.enabled=true requires validation.interval_steps > 0")
@@ -881,7 +890,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 )
             interval = int(training.get("checkpoint_interval_steps", 0) or 0)
             if interval and global_step % interval == 0:
-                _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config)
+                _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config,
+                                 static_payload=checkpoint_static_payload)
             if metrics_interval and global_step % metrics_interval == 0:
                 metrics_payload = {
                     "step": global_step,
@@ -930,6 +940,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         batches=validation_batches,
                         seed=seed + 1_000_000 + global_step,
                         source_mode=validation_source_mode,
+                        context_generator=context_generator,
                     )
                     validation_fresh_sampler_rows += int(
                         validation_metrics["validation_fresh_sampler_rows"]
@@ -965,16 +976,18 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     if improved:
                         best_metric = selected_value
                         best_step = global_step
-                        best_checkpoint_path = _save_checkpoint(
-                            model,
-                            optimizer,
-                            epoch,
-                            global_step,
-                            metadata,
-                            vocabularies,
-                            config,
-                            filename="checkpoint_best.pt",
-                        )
+                        if save_best_checkpoint:
+                            best_checkpoint_path = _save_checkpoint(
+                                model,
+                                optimizer,
+                                epoch,
+                                global_step,
+                                metadata,
+                                vocabularies,
+                                config,
+                                filename="checkpoint_best.pt",
+                                static_payload=checkpoint_static_payload,
+                            )
                     validation_history.append({"step": global_step, **validation_metrics})
                     metrics_payload.update(validation_metrics)
                     early_stopping_monitor_value = selected_value
@@ -1029,7 +1042,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         if int(training["steps_per_epoch"]) == 0:
             break
     checkpoint_path = _save_checkpoint(
-        model, optimizer, int(training["epochs"]) - 1, global_step, metadata, vocabularies, config
+        model, optimizer, int(training["epochs"]) - 1, global_step, metadata, vocabularies, config,
+        static_payload=checkpoint_static_payload,
     )
     training_seconds = perf_counter() - training_start
     parameter_size_bytes = int(sum(parameter.numel() * parameter.element_size() for parameter in model.parameters()))
@@ -2177,6 +2191,7 @@ def _run_validation(
     batches: int,
     seed: int,
     source_mode: str = "same_fixture_resampled",
+    context_generator: PredicateTrainingContextGenerator | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -2197,7 +2212,12 @@ def _run_validation(
     fixture_rows = 0
     predicate_config = _predicate_generation_config(config)
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
-    context_generator = PredicateTrainingContextGenerator(predicate_config)
+    if context_generator is None:
+        context_generator = PredicateTrainingContextGenerator(predicate_config)
+    # The generator holds only its configuration and caches derived from the
+    # metadata (sorted domains, rank lookups), so the training loop passes its
+    # own: building a fresh one rebuilt those caches at every validation (the
+    # largest per-validation cost on POL/Porto-sized domains).
     discard_buffer = getattr(sample_source, "discard_buffer", None)
     if discard_buffer is not None:
         discard_buffer()
@@ -2698,6 +2718,7 @@ def _save_checkpoint(
     config: dict[str, Any],
     *,
     filename: str | None = None,
+    static_payload: dict[str, Any] | None = None,
 ) -> Path:
     output_directory = Path(config.get("logging", {}).get("output_directory", "model/runs/resmade"))
     checkpoint_path = output_directory / (filename or f"checkpoint_step_{step}.pt")
@@ -2711,5 +2732,6 @@ def _save_checkpoint(
         predicate_vocabularies=vocabularies,
         config=config,
         preparation_manifest_id=config.get("dataset", {}).get("name"),
+        static_payload=static_payload,
     )
     return checkpoint_path
