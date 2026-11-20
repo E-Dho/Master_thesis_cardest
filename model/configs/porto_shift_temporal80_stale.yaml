@@ -162,7 +162,7 @@ training:
   head_loss_reduction: sum
   mixed_precision: false
   # worker processes preparing the steps' CPU part ahead (results identical; memory-bound count)
-  prefetch_workers: 1
+  prefetch_workers: 3
 
 inference:
   progressive_sampling: false
