@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -79,6 +79,39 @@ class TrainingResult:
     fixture_rows_reused: int
     validation_summary: dict[str, Any]
     early_stopping_summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TrajectoryTargetCandidates:
+    """The CPU part of the dedup targets: base-measure check and segment lookups."""
+
+    candidate_indices: np.ndarray
+    result: object | None
+    skip_counts: dict[str, int]
+
+
+@dataclass
+class PreparedStepInputs:
+    """Everything a training step computes before touching the model.
+
+    It depends only on the data, the configuration and the step number (every
+    random stream of a step is seeded by ``global_step``), so worker processes
+    can prepare future steps while the GPU trains on the current one, with the
+    same result as computing it in the step itself.
+    """
+
+    global_step: int
+    batch: object
+    contexts: list
+    target_rows: np.ndarray
+    generation_stats: object
+    token_rows: list
+    coverage: dict
+    inv_only_weights: np.ndarray
+    rare: dict[str, Any] | None
+    trajectory_candidates: TrajectoryTargetCandidates | None
+    phase_timings: dict[str, float]
+    source_counter_deltas: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -770,14 +803,64 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             raise ValueError("validation.enabled=true requires validation.interval_steps > 0")
         if validation_batches <= 0:
             raise ValueError("validation.enabled=true requires validation.fresh_sampler_batches > 0")
+    # training.prefetch_workers > 0: worker processes prepare the CPU part of the
+    # coming steps (batch, query contexts, inverse-fanout weights, rare batch,
+    # dedup-target lookups) while the GPU trains; every random stream of a step
+    # is seeded by its step number, so the result is the same as without workers.
+    prefetch_workers = int(training.get("prefetch_workers", 0) or 0)
+    worker_phase_timing_history: list[dict[str, float]] = []
+    prepared_steps = None
+    total_steps = int(training["epochs"]) * int(training["steps_per_epoch"])
+    if prefetch_workers > 0 and total_steps > 0:
+        if bool(config.get("importance_sampling", {}).get("enabled", False)):
+            raise ValueError(
+                "training.prefetch_workers needs importance_sampling.enabled: false "
+                "(its context statistics update the sample source during the step)"
+            )
+        context_generator.warm_caches(metadata)  # build once, before the workers fork
+
+        def prepare(step: int) -> PreparedStepInputs:
+            return prepare_step_inputs(
+                sample_source=sample_source,
+                metadata=metadata,
+                config=config,
+                context_generator=context_generator,
+                global_step=step,
+                batch_size=batch_size,
+                compute_expensive_diagnostics=bool(
+                    metrics_interval and (step + 1) % metrics_interval == 0
+                ),
+            )
+
+        prepared_steps = _prefetched_steps(
+            prepare,
+            total_steps=total_steps,
+            workers=prefetch_workers,
+            prefetch_factor=int(training.get("prefetch_factor", 2) or 2),
+        )
     training_start = perf_counter()
     if device == "cuda" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     for epoch in range(int(training["epochs"])):
         for step_in_epoch in range(int(training["steps_per_epoch"])):
-            batch_started = perf_counter()
-            batch = sample_source.batches(batch_size, seed=seed + global_step)
-            batch_sampling_seconds = perf_counter() - batch_started
+            prepared: PreparedStepInputs | None = None
+            prefetch_wait_seconds = 0.0
+            if prepared_steps is not None:
+                wait_started = perf_counter()
+                prepared = _with_column_metadata(next(prepared_steps), metadata)
+                prefetch_wait_seconds = perf_counter() - wait_started
+                if prepared.global_step != global_step:
+                    raise RuntimeError(
+                        f"prefetched step {prepared.global_step} arrived for step {global_step}"
+                    )
+                batch = prepared.batch
+                batch_sampling_seconds = 0.0
+                _apply_source_counter_deltas(sample_source, prepared.source_counter_deltas)
+                worker_phase_timing_history.append(prepared.phase_timings)
+            else:
+                batch_started = perf_counter()
+                batch = sample_source.batches(batch_size, seed=seed + global_step)
+                batch_sampling_seconds = perf_counter() - batch_started
             fresh_sampler_rows += int(getattr(batch, "fresh_rows_drawn", 0))
             fixture_rows_reused += int(getattr(batch, "fixture_rows_reused", 0))
             next_step = global_step + 1
@@ -795,6 +878,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 context_generator=context_generator,
                 compute_expensive_diagnostics=diagnostic_step,
                 batch_sampling_seconds=batch_sampling_seconds,
+                prepared=prepared,
+                prefetch_wait_seconds=prefetch_wait_seconds,
             )
             loss = step_result.loss
             last_loss = loss
@@ -926,6 +1011,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     "trajectory_distinct": last_trajectory_distinct_stats,
                     "phase_timings": step_result.phase_timings,
                     "phase_timing_summary": _phase_summary(phase_timing_history),
+                    **_prefetch_report(prefetch_workers, worker_phase_timing_history),
                 }
                 early_stopping_monitor_value: float | None = None
                 if validation_enabled and global_step % validation_interval == 0:
@@ -1041,6 +1127,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             break
         if int(training["steps_per_epoch"]) == 0:
             break
+    prepared_steps = None  # stops the prefetch workers
     checkpoint_path = _save_checkpoint(
         model, optimizer, int(training["epochs"]) - 1, global_step, metadata, vocabularies, config,
         static_payload=checkpoint_static_payload,
@@ -1194,6 +1281,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "columns_with_unseen_evaluation_token_types": [],
         "training_seconds": training_seconds,
         "phase_timing_summary": _phase_summary(phase_timing_history),
+        **_prefetch_report(prefetch_workers, worker_phase_timing_history),
         "fanout_effective_sample_size": fanout_ess_summary,
         "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
         "importance_sampling": importance_summary,
@@ -1382,6 +1470,296 @@ def _predicate_generation_config(config: dict[str, Any]) -> dict[str, Any]:
     return predicate_config
 
 
+_SOURCE_INT_COUNTERS = (
+    "sample_batches_generated",
+    "fixture_rows_reused",
+    "fresh_rows_drawn",
+    "rare_rows_drawn",
+    "_batch_calls",
+)
+_SOURCE_COUNTER_MAPS = ("selected_stratum_sample_count",)
+
+
+def _source_chain(sample_source: object | None) -> list[object]:
+    chain: list[object] = []
+    current = sample_source
+    while current is not None and all(current is not seen for seen in chain):
+        chain.append(current)
+        current = getattr(current, "base_source", None)
+    return chain
+
+
+def _source_counters(sample_source: object | None) -> dict[str, Any]:
+    """Bookkeeping counters of the sample-source chain (reported in the summary)."""
+
+    counters: dict[str, Any] = {}
+    for depth, source in enumerate(_source_chain(sample_source)):
+        for name in _SOURCE_INT_COUNTERS:
+            value = getattr(source, name, None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                counters[f"{depth}:{name}"] = int(value)
+        for name in _SOURCE_COUNTER_MAPS:
+            value = getattr(source, name, None)
+            if value is not None:
+                counters[f"{depth}:{name}"] = dict(value)
+    return counters
+
+
+def _source_counter_deltas(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    deltas: dict[str, Any] = {}
+    for key, value in after.items():
+        old = before.get(key)
+        if isinstance(value, dict):
+            old = old or {}
+            change = {k: v - old.get(k, 0) for k, v in value.items() if v != old.get(k, 0)}
+            if change:
+                deltas[key] = change
+        elif value != old:
+            deltas[key] = value - int(old or 0)
+    return deltas
+
+
+def _apply_source_counter_deltas(sample_source: object | None, deltas: dict[str, Any]) -> None:
+    """Apply a worker's counter changes to the training process's sample source."""
+
+    chain = _source_chain(sample_source)
+    for key, change in deltas.items():
+        depth, name = key.split(":", 1)
+        source = chain[int(depth)]
+        if isinstance(change, dict):
+            getattr(source, name).update(change)
+        else:
+            setattr(source, name, getattr(source, name) + int(change))
+
+
+def prepare_step_inputs(
+    *,
+    sample_source: object,
+    metadata: object,
+    config: dict[str, Any],
+    context_generator: PredicateTrainingContextGenerator,
+    global_step: int,
+    batch_size: int,
+    compute_expensive_diagnostics: bool,
+) -> PreparedStepInputs:
+    """The CPU part of step ``global_step``, exactly as ``_train_one_batch`` computes it."""
+
+    timer = _PhaseTimer()
+    before = _source_counters(sample_source)
+    seed = int(config["training"].get("seed", 0))
+    batch = timer.run("batch_sampling", sample_source.batches, batch_size, seed=seed + global_step)
+    predicate_config = _predicate_generation_config(config)
+    generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
+    rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
+    contexts, target_rows, generation_stats = timer.run(
+        "predicate_context_generation",
+        context_generator.generate_batch,
+        encoded_rows=batch.encoded_values,
+        metadata=metadata,
+        rng=rng,
+        validate_contexts=compute_expensive_diagnostics,
+        validation_sample_size=int(predicate_config.get("row_validation_sample_size", 32) or 0),
+    )
+    started = perf_counter()
+    token_rows = [list(context.tokens) for context in contexts]
+    coverage = token_coverage([context.tokens for context in contexts], metadata)
+    inv_only_weights = cumulative_inverse_fanout_weights(
+        target_rows,
+        token_rows,
+        metadata,
+        compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
+    )
+    timer.add("coverage_and_inverse_weights", perf_counter() - started)
+    rare = None
+    rare_config = dict(config.get("rare_auxiliary", {}))
+    if bool(rare_config.get("enabled", False)) and float(rare_config.get("beta", 0.0) or 0.0) > 0.0:
+        started = perf_counter()
+        rare = _rare_auxiliary_inputs(
+            sample_source=sample_source,
+            metadata=metadata,
+            config=config,
+            context_generator=context_generator,
+            generator_seed=generator_seed,
+            global_step=global_step,
+        )
+        timer.add("rare_sampling_context_generation", perf_counter() - started)
+    trajectory_candidates = None
+    trajectory_config = TrajectoryDistinctConfig.from_dict(config.get("trajectory_distinct", {}))
+    if (
+        trajectory_config.enabled
+        and trajectory_config.loss_weight > 0.0
+        and getattr(sample_source, "trajectory_multiplicity_provider", None) is not None
+        and batch.trajectory_ids is not None
+    ):
+        trajectory_candidates = timer.run(
+            "trajectory_target_lookup",
+            trajectory_target_candidates,
+            batch=batch,
+            contexts=contexts,
+            generation_stats=generation_stats,
+            sample_source=sample_source,
+        )
+    if rare is not None:
+        rare = {**rare, "rare_batch": _without_column_metadata(rare["rare_batch"], metadata)}
+    return PreparedStepInputs(
+        global_step=int(global_step),
+        batch=_without_column_metadata(batch, metadata),
+        contexts=contexts,
+        target_rows=target_rows,
+        generation_stats=generation_stats,
+        token_rows=token_rows,
+        coverage=coverage,
+        inv_only_weights=inv_only_weights,
+        rare=rare,
+        trajectory_candidates=trajectory_candidates,
+        phase_timings=timer.timings,
+        source_counter_deltas=_source_counter_deltas(before, _source_counters(sample_source)),
+    )
+
+
+def _without_column_metadata(batch: FullJoinBatch, metadata: object) -> FullJoinBatch:
+    """The batch without its column metadata, which holds every value domain.
+
+    Sent between processes it would make each prepared step as large as the
+    domains; the training process puts its own (identical) metadata back.
+    """
+
+    if batch.column_metadata is not metadata.columns:  # type: ignore[attr-defined]
+        raise ValueError("batch column metadata is not the training metadata")
+    return replace(batch, column_metadata=())
+
+
+def _with_column_metadata(prepared: PreparedStepInputs, metadata: object) -> PreparedStepInputs:
+    columns = metadata.columns  # type: ignore[attr-defined]
+    prepared.batch = replace(prepared.batch, column_metadata=columns)
+    if prepared.rare is not None:
+        prepared.rare = {
+            **prepared.rare,
+            "rare_batch": replace(prepared.rare["rare_batch"], column_metadata=columns),
+        }
+    return prepared
+
+
+def _identity(value: object) -> object:
+    return value
+
+
+def _prefetched_steps(
+    prepare: object,
+    *,
+    total_steps: int,
+    workers: int,
+    prefetch_factor: int,
+) -> object:
+    """Prepared steps 0, 1, ... in order, computed by ``workers`` forked processes."""
+
+    import gc
+
+    from torch.utils.data import DataLoader, Dataset
+
+    class _Steps(Dataset):
+        def __len__(self) -> int:
+            return int(total_steps)
+
+        def __getitem__(self, index: int) -> PreparedStepInputs:
+            return prepare(int(index))  # type: ignore[operator]
+
+    loader = DataLoader(
+        _Steps(),
+        batch_size=None,
+        shuffle=False,
+        num_workers=int(workers),
+        prefetch_factor=int(prefetch_factor),
+        collate_fn=_identity,
+        multiprocessing_context="fork",
+        persistent_workers=False,
+    )
+    # Forked workers share the training process's memory copy-on-write; keep the
+    # garbage collector from touching (and so copying) every long-lived object.
+    gc.collect()
+    gc.freeze()
+    return iter(loader)
+
+
+def _prefetch_report(workers: int, history: list[dict[str, float]]) -> dict[str, Any]:
+    if workers <= 0:
+        return {}
+    return {
+        "prefetch_workers": int(workers),
+        "worker_phase_timing_summary": _phase_summary(history),
+    }
+
+
+def _rare_auxiliary_inputs(
+    *,
+    sample_source: object | None,
+    metadata: object,
+    config: dict[str, Any],
+    context_generator: PredicateTrainingContextGenerator,
+    generator_seed: int,
+    global_step: int,
+) -> dict[str, Any]:
+    """The rare auxiliary batch of a step: rows, forced contexts, weights, eligibility."""
+
+    rare_config = dict(config.get("rare_auxiliary", {}))
+    rare_batch_size = int(rare_config.get("batch_size", 0) or 0)
+    if rare_batch_size <= 0:
+        raise ValueError("rare_auxiliary.batch_size must be positive when enabled")
+    rare_batches = getattr(sample_source, "rare_batches", None)
+    if rare_batches is None:
+        raise ValueError("rare_auxiliary.enabled requires a rare_support sample source")
+    rare_batch = rare_batches(
+        rare_batch_size,
+        seed=rare_row_rng_seed(int(config["training"].get("seed", 0)), global_step),
+    )
+    selected_strata = tuple(rare_batch.importance_metadata["selected_strata"])  # type: ignore[index]
+    rare_rng = np.random.default_rng(rare_predicate_rng_seed(generator_seed, global_step))
+    rare_contexts, rare_target_rows, rare_generation_stats = (
+        context_generator.generate_forced_stratum_batch(
+            encoded_rows=rare_batch.encoded_values,
+            metadata=metadata,
+            strata=selected_strata,
+            rng=rare_rng,
+            debug_allow_row_dependent_native_range_tail=bool(
+                rare_config.get("debug_allow_row_dependent_native_range_tail", False)
+            ),
+        )
+    )
+    rare_token_rows = [list(context.tokens) for context in rare_contexts]
+    rare_inv_only_weights = cumulative_inverse_fanout_weights(
+        rare_target_rows,
+        rare_token_rows,
+        metadata,
+        compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
+    )
+    rare_source_indices = np.asarray(
+        rare_generation_stats.source_row_indices,
+        dtype=int,
+    )
+    rare_selected_column_indices = np.asarray(
+        rare_batch.importance_metadata["selected_stratum_column_index"],  # type: ignore[index]
+        dtype=int,
+    )[rare_source_indices]
+    eligibility = auxiliary_eligibility_mask(
+        metadata,
+        rare_selected_column_indices,
+        row_count=rare_target_rows.shape[0],
+    )
+    rare_weights = rare_inv_only_weights * eligibility.astype(float)
+    return {
+        "rare_batch": rare_batch,
+        "selected_strata": selected_strata,
+        "rare_contexts": rare_contexts,
+        "rare_target_rows": rare_target_rows,
+        "rare_generation_stats": rare_generation_stats,
+        "rare_token_rows": rare_token_rows,
+        "rare_inv_only_weights": rare_inv_only_weights,
+        "rare_selected_column_indices": rare_selected_column_indices,
+        "eligibility": eligibility,
+        "rare_weights": rare_weights,
+    }
+
+
 def _train_one_batch(
     model: PredicateResMADE,
     optimizer: object,
@@ -1396,32 +1774,51 @@ def _train_one_batch(
     context_generator: PredicateTrainingContextGenerator | None = None,
     compute_expensive_diagnostics: bool = True,
     batch_sampling_seconds: float = 0.0,
+    prepared: PreparedStepInputs | None = None,
+    prefetch_wait_seconds: float = 0.0,
 ) -> TrainingStepResult:
+    """One optimizer step.
+
+    ``prepared``: the step's inputs computed ahead by ``prepare_step_inputs`` (in
+    a worker process); the step then only waits for them (``prefetch_wait``) and
+    runs the model. Without it the step computes them itself, as before.
+    """
+
     import torch
 
     timer = _PhaseTimer()
-    timer.add("batch_sampling", batch_sampling_seconds)
     predicate_config = _predicate_generation_config(config)
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
-    rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
     if context_generator is None:
         context_generator = PredicateTrainingContextGenerator(predicate_config)
-    contexts, target_rows, generation_stats = timer.run(
-        "predicate_context_generation",
-        context_generator.generate_batch,
-        encoded_rows=batch.encoded_values,
-        metadata=metadata,
-        rng=rng,
-        validate_contexts=compute_expensive_diagnostics,
-        validation_sample_size=int(
-            predicate_config.get("row_validation_sample_size", 32) or 0
-        ),
-    )
-    token_rows = [list(context.tokens) for context in contexts]
-    coverage = token_coverage(
-        [context.tokens for context in contexts],
-        metadata,
-    )
+    if prepared is not None:
+        if prepared.global_step != global_step or prepared.batch is not batch:
+            raise ValueError("prepared step inputs belong to another step")
+        timer.add("prefetch_wait", prefetch_wait_seconds)
+        contexts = prepared.contexts
+        target_rows = prepared.target_rows
+        generation_stats = prepared.generation_stats
+        token_rows = prepared.token_rows
+        coverage = prepared.coverage
+    else:
+        timer.add("batch_sampling", batch_sampling_seconds)
+        rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
+        contexts, target_rows, generation_stats = timer.run(
+            "predicate_context_generation",
+            context_generator.generate_batch,
+            encoded_rows=batch.encoded_values,
+            metadata=metadata,
+            rng=rng,
+            validate_contexts=compute_expensive_diagnostics,
+            validation_sample_size=int(
+                predicate_config.get("row_validation_sample_size", 32) or 0
+            ),
+        )
+        token_rows = [list(context.tokens) for context in contexts]
+        coverage = token_coverage(
+            [context.tokens for context in contexts],
+            metadata,
+        )
     literal_occurrences: dict[str, dict[str, dict[str, int]]] = {}
     context_diagnostics: dict[str, Any] = {}
     if compute_expensive_diagnostics:
@@ -1446,11 +1843,15 @@ def _train_one_batch(
             context_generator.table_subset_sampling == "neurocard_table_dropout_rooted"
         )
         timer.add("diagnostics", perf_counter() - diag_started)
-    inv_only_weights = cumulative_inverse_fanout_weights(
-        target_rows,
-        token_rows,
-        metadata,
-        compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
+    inv_only_weights = (
+        prepared.inv_only_weights
+        if prepared is not None
+        else cumulative_inverse_fanout_weights(
+            target_rows,
+            token_rows,
+            metadata,
+            compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
+        )
     )
     weights = inv_only_weights
     importance_stats: dict[str, Any] = {"enabled": False}
@@ -1508,52 +1909,31 @@ def _train_one_batch(
     rare_enabled = bool(rare_config.get("enabled", False))
     rare_beta = float(rare_config.get("beta", 0.0) or 0.0)
     if rare_enabled and rare_beta > 0.0:
-        rare_started = perf_counter()
-        rare_batch_size = int(rare_config.get("batch_size", 0) or 0)
-        if rare_batch_size <= 0:
-            raise ValueError("rare_auxiliary.batch_size must be positive when enabled")
-        rare_batches = getattr(sample_source, "rare_batches", None)
-        if rare_batches is None:
-            raise ValueError("rare_auxiliary.enabled requires a rare_support sample source")
-        rare_batch = rare_batches(
-            rare_batch_size,
-            seed=rare_row_rng_seed(int(config["training"].get("seed", 0)), global_step),
-        )
-        selected_strata = tuple(rare_batch.importance_metadata["selected_strata"])  # type: ignore[index]
-        rare_rng = np.random.default_rng(rare_predicate_rng_seed(generator_seed, global_step))
-        rare_contexts, rare_target_rows, rare_generation_stats = (
-            context_generator.generate_forced_stratum_batch(
-                encoded_rows=rare_batch.encoded_values,
+        if prepared is not None:
+            rare = prepared.rare
+        else:
+            rare_started = perf_counter()
+            rare = _rare_auxiliary_inputs(
+                sample_source=sample_source,
                 metadata=metadata,
-                strata=selected_strata,
-                rng=rare_rng,
-                debug_allow_row_dependent_native_range_tail=bool(
-                    rare_config.get("debug_allow_row_dependent_native_range_tail", False)
-                ),
+                config=config,
+                context_generator=context_generator,
+                generator_seed=generator_seed,
+                global_step=global_step,
             )
-        )
-        rare_token_rows = [list(context.tokens) for context in rare_contexts]
-        rare_inv_only_weights = cumulative_inverse_fanout_weights(
-            rare_target_rows,
-            rare_token_rows,
-            metadata,
-            compute_in_log_space=bool(config["fanout"].get("compute_weights_in_log_space", True)),
-        )
-        rare_source_indices = np.asarray(
-            rare_generation_stats.source_row_indices,
-            dtype=int,
-        )
-        rare_selected_column_indices = np.asarray(
-            rare_batch.importance_metadata["selected_stratum_column_index"],  # type: ignore[index]
-            dtype=int,
-        )[rare_source_indices]
-        eligibility = auxiliary_eligibility_mask(
-            metadata,
-            rare_selected_column_indices,
-            row_count=rare_target_rows.shape[0],
-        )
-        rare_weights = rare_inv_only_weights * eligibility.astype(float)
-        timer.add("rare_sampling_context_generation", perf_counter() - rare_started)
+            timer.add("rare_sampling_context_generation", perf_counter() - rare_started)
+        if rare is None:
+            raise ValueError("prepared step inputs lack the rare auxiliary batch")
+        rare_batch = rare["rare_batch"]
+        selected_strata = rare["selected_strata"]
+        rare_contexts = rare["rare_contexts"]
+        rare_target_rows = rare["rare_target_rows"]
+        rare_generation_stats = rare["rare_generation_stats"]
+        rare_token_rows = rare["rare_token_rows"]
+        rare_inv_only_weights = rare["rare_inv_only_weights"]
+        rare_selected_column_indices = rare["rare_selected_column_indices"]
+        eligibility = rare["eligibility"]
+        rare_weights = rare["rare_weights"]
 
     token_encode_started = perf_counter()
     all_token_rows = token_rows + rare_token_rows
@@ -1626,6 +2006,9 @@ def _train_one_batch(
             config=config,
             sample_source=sample_source,
             device=device,
+            precomputed_candidates=(
+                prepared.trajectory_candidates if prepared is not None else None
+            ),
         )
         total_loss = total_loss + trajectory_config.loss_weight * traj_loss
         timer.add("trajectory_target_generation", perf_counter() - traj_started)
@@ -1730,6 +2113,45 @@ def _train_one_batch(
     )
 
 
+def trajectory_target_candidates(
+    *,
+    batch: FullJoinBatch,
+    contexts: list[GeneratedTrainingContext],
+    generation_stats: object,
+    sample_source: object | None,
+) -> TrajectoryTargetCandidates:
+    """Contexts with a segment base measure and their anchors' segment counts (no model)."""
+
+    provider = getattr(sample_source, "trajectory_multiplicity_provider", None)
+    if provider is None:
+        raise ValueError(
+            "trajectory_distinct.enabled requires sample_source.trajectory_multiplicity_provider"
+        )
+    source_indices = np.asarray(generation_stats.source_row_indices, dtype=int)
+    if source_indices.shape != (len(contexts),):
+        raise ValueError("trajectory source_row_indices must align with contexts")
+    anchor_ids = [batch.trajectory_ids[int(index)] for index in source_indices]
+    base_supported_indices: list[int] = []
+    skip_counts: dict[str, int] = {}
+    for context_index, context in enumerate(contexts):
+        support = trajectory_base_measure_support(context)
+        if support.eligible:
+            base_supported_indices.append(context_index)
+        else:
+            reason = support.reason or "unsupported_base_segment_measure"
+            skip_counts[reason] = int(skip_counts.get(reason, 0)) + 1
+    candidate_indices = np.asarray(base_supported_indices, dtype=int)
+    result = None
+    if candidate_indices.size:
+        result = provider.evaluate_batch(
+            anchor_trajectory_ids=[anchor_ids[int(index)] for index in candidate_indices],
+            contexts=[contexts[int(index)] for index in candidate_indices],
+        )
+    return TrajectoryTargetCandidates(
+        candidate_indices=candidate_indices, result=result, skip_counts=skip_counts
+    )
+
+
 def trajectory_dedup_loss_for_batch(
     *,
     predictions: object,
@@ -1742,8 +2164,13 @@ def trajectory_dedup_loss_for_batch(
     config: dict[str, Any],
     sample_source: object | None,
     device: str,
+    precomputed_candidates: TrajectoryTargetCandidates | None = None,
 ) -> tuple[object, dict[str, Any]]:
-    """Compute weighted MSE for the query-only trajectory deduplication factor."""
+    """Compute weighted MSE for the query-only trajectory deduplication factor.
+
+    ``precomputed_candidates``: ``trajectory_target_candidates`` of this batch,
+    computed ahead (in a prefetch worker); identical to computing them here.
+    """
 
     import torch
 
@@ -1767,29 +2194,23 @@ def trajectory_dedup_loss_for_batch(
             "fraction_targets_eligible": 0.0,
             "warning": "missing trajectory provenance; skipped trajectory loss",
         }
-    source_indices = np.asarray(generation_stats.source_row_indices, dtype=int)
-    if source_indices.shape != (len(contexts),):
-        raise ValueError("trajectory source_row_indices must align with contexts")
-    anchor_ids = [batch.trajectory_ids[int(index)] for index in source_indices]
-    base_supported_indices: list[int] = []
-    skip_counts: dict[str, int] = {}
-    for context_index, context in enumerate(contexts):
-        support = trajectory_base_measure_support(context)
-        if support.eligible:
-            base_supported_indices.append(context_index)
-        else:
-            reason = support.reason or "unsupported_base_segment_measure"
-            skip_counts[reason] = int(skip_counts.get(reason, 0)) + 1
-    candidate_indices = np.asarray(base_supported_indices, dtype=int)
-    result = None
+    candidates = (
+        precomputed_candidates
+        if precomputed_candidates is not None
+        else trajectory_target_candidates(
+            batch=batch,
+            contexts=contexts,
+            generation_stats=generation_stats,
+            sample_source=sample_source,
+        )
+    )
+    candidate_indices = candidates.candidate_indices
+    result = candidates.result
+    skip_counts: dict[str, int] = dict(candidates.skip_counts)
     provider_seconds = 0.0
     lookup_seconds = 0.0
     predicate_eval_seconds = 0.0
     if candidate_indices.size:
-        result = provider.evaluate_batch(
-            anchor_trajectory_ids=[anchor_ids[int(index)] for index in candidate_indices],
-            contexts=[contexts[int(index)] for index in candidate_indices],
-        )
         provider_seconds = float(result.provider_seconds)
         lookup_seconds = float(result.lookup_seconds)
         predicate_eval_seconds = float(result.predicate_eval_seconds)
