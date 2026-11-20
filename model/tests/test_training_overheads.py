@@ -11,21 +11,27 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import torch
-
 from model.src.config import load_simple_yaml
 from model.src.data.full_join_sampler import SyntheticFullJoinSampleSource
-from model.src.model.checkpoint import checkpoint_static_fields, save_resmade_checkpoint
 from model.src.predicates import generation
-from model.src.predicates.vocabulary import PredicateVocabularies
-from model.src.training import resmade_trainer
-from model.src.training.resmade_trainer import build_resmade_from_config, train_resmade_sample_source
+
+# The training and checkpoint tests need PyTorch; the module stays importable
+# without it (unittest discovery), and the literal-statistics test still runs.
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+if HAS_TORCH:
+    import torch
+
+    from model.src.model.checkpoint import checkpoint_static_fields, save_resmade_checkpoint
+    from model.src.predicates.vocabulary import PredicateVocabularies
+    from model.src.training import resmade_trainer
+    from model.src.training.resmade_trainer import build_resmade_from_config, train_resmade_sample_source
 
 
 def _config(output_directory: str, **validation) -> dict:
@@ -69,6 +75,7 @@ def _equal_payload(left: dict, right: dict) -> bool:
     return True
 
 
+@unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
 class ValidationGeneratorTest(unittest.TestCase):
     def test_runs_equal_a_fresh_generator_per_validation(self) -> None:
         original = resmade_trainer._run_validation
@@ -107,6 +114,7 @@ class ValidationGeneratorTest(unittest.TestCase):
             self.assertEqual(len([r for r in _metrics(Path(directory)) if "validation_nll" in r]), 3)
 
 
+@unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
 class CheckpointStaticFieldsTest(unittest.TestCase):
     def test_precomputed_fields_give_the_same_checkpoint(self) -> None:
         source = SyntheticFullJoinSampleSource()
