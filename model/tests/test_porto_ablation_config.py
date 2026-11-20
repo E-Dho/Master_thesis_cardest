@@ -37,7 +37,7 @@ class PortoAblationConfigTest(unittest.TestCase):
         self.assertFalse(config["rare_support"]["enabled"])
         self.assertFalse(config["rare_auxiliary"]["enabled"])
         self.assertTrue(evaluated["rare_support"]["enabled"] and evaluated["rare_auxiliary"]["enabled"])
-        self.assertEqual(config["training"].pop("prefetch_workers"), 1)
+        self.assertEqual(config["training"].pop("prefetch_workers"), 3)
         for key in ("dataset", "model", "training", "predicate_generation", "trajectory_distinct"):
             self.assertEqual(config.get(key), evaluated.get(key), key)
 
