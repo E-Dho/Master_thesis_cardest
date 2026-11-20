@@ -10,6 +10,28 @@ from model.src.predicates.vocabulary import PredicateVocabularies
 from model.src.data.trajectory_distinct import TRAJECTORY_TARGET_SEMANTICS_VERSION
 
 
+def checkpoint_static_fields(
+    *,
+    metadata: ModelMetadata,
+    predicate_vocabularies: PredicateVocabularies,
+) -> dict[str, Any]:
+    """The checkpoint fields that depend only on the schema and vocabularies.
+
+    They hold every value domain, so building them (dataclass conversion plus the
+    schema hash) dominates a save on large domains; a training run builds them once
+    and passes them to every ``save_resmade_checkpoint`` call.
+    """
+
+    return {
+        "metadata": metadata.to_json_dict(),
+        "predicate_vocabularies": predicate_vocabularies.to_json_dict(),
+        "output_slices": metadata.model_output_slices,
+        "join_cardinality": metadata.full_join_cardinality,
+        "factorization_plan": metadata.factorization_plan.to_json_dict(),
+        "factorization_hash": factorization_plan_hash(metadata.factorization_plan),
+    }
+
+
 def save_resmade_checkpoint(
     path: str | Path,
     model: PredicateResMADE,
@@ -21,11 +43,19 @@ def save_resmade_checkpoint(
     predicate_vocabularies: PredicateVocabularies,
     config: dict[str, Any],
     preparation_manifest_id: str | None = None,
+    static_payload: dict[str, Any] | None = None,
 ) -> None:
-    """Persist model state, optimizer state, schemas, vocabularies, and ordering."""
+    """Persist model state, optimizer state, schemas, vocabularies, and ordering.
+
+    ``static_payload``: ``checkpoint_static_fields`` of the same metadata and
+    vocabularies, computed once by the caller (the content is identical).
+    """
 
     import torch
 
+    static = static_payload if static_payload is not None else checkpoint_static_fields(
+        metadata=metadata, predicate_vocabularies=predicate_vocabularies
+    )
     payload = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
@@ -33,13 +63,13 @@ def save_resmade_checkpoint(
         "step": step,
         "resmade_config": model.config.to_json_dict(),
         "model_configuration": config,
-        "metadata": metadata.to_json_dict(),
-        "predicate_vocabularies": predicate_vocabularies.to_json_dict(),
-        "output_slices": metadata.model_output_slices,
-        "join_cardinality": metadata.full_join_cardinality,
+        "metadata": static["metadata"],
+        "predicate_vocabularies": static["predicate_vocabularies"],
+        "output_slices": static["output_slices"],
+        "join_cardinality": static["join_cardinality"],
         "factorization": dict(config.get("factorization", {})),
-        "factorization_plan": metadata.factorization_plan.to_json_dict(),
-        "factorization_hash": factorization_plan_hash(metadata.factorization_plan),
+        "factorization_plan": static["factorization_plan"],
+        "factorization_hash": static["factorization_hash"],
         "anpm": dict(config.get("anpm", {})),
         "preparation_manifest_id": preparation_manifest_id,
         "trajectory_distinct": dict(config.get("trajectory_distinct", {})),
