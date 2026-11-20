@@ -1120,6 +1120,11 @@ class PredicateTrainingContextGenerator:
         upper = comparable_values[int(rng.integers(start, len(comparable_values)))]
         return PredicateToken.range(lower, upper)
 
+    def warm_caches(self, metadata: ModelMetadata) -> None:
+        """Build the per-metadata caches now (e.g. before worker processes fork)."""
+
+        self._compiled(metadata)
+
     def _compiled(self, metadata: ModelMetadata) -> _CompiledGenerationMetadata:
         key = id(metadata)
         cached = self._compiled_by_metadata_id.get(key)
