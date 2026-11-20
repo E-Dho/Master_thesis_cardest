@@ -817,6 +817,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 "training.prefetch_workers needs importance_sampling.enabled: false "
                 "(its context statistics update the sample source during the step)"
             )
+        _assert_prefetch_deterministic_source(sample_source)
         context_generator.warm_caches(metadata)  # build once, before the workers fork
 
         def prepare(step: int) -> PreparedStepInputs:
@@ -1640,6 +1641,41 @@ def _with_column_metadata(prepared: PreparedStepInputs, metadata: object) -> Pre
     return prepared
 
 
+_PREFETCH_SOURCE_TYPES = (
+    "SyntheticFullJoinSampleSource",
+    "NeuroCardFullJoinSampleSource",
+    "FactorizedMetadataSampleSource",
+    "RareSupportSampleSource",
+    "ColumnReorderedSampleSource",
+)
+_PREFETCH_SAMPLING_MODES = ("fixture", "materialized_large_sample")
+
+
+def _assert_prefetch_deterministic_source(sample_source: object) -> None:
+    """Prefetch needs batches that depend only on (batch size, seed).
+
+    Accepted: the synthetic and fixture sources and the wrappers that only
+    transform their batches (factorized metadata, rare support, column order).
+    Refused: live sampling (a buffered sampler whose batches depend on earlier
+    calls), importance sampling, and any source type not known to be stateless.
+    """
+
+    for source in _source_chain(sample_source):
+        name = type(source).__name__
+        if name not in _PREFETCH_SOURCE_TYPES:
+            raise ValueError(
+                f"training.prefetch_workers does not support sample source {name}: "
+                "only sources whose batches depend on the seed alone"
+            )
+        mode = getattr(source, "sampling_mode", None)
+        if name == "NeuroCardFullJoinSampleSource" or mode is not None:
+            if mode not in _PREFETCH_SAMPLING_MODES:
+                raise ValueError(
+                    f"training.prefetch_workers needs dataset.sampling_mode in "
+                    f"{_PREFETCH_SAMPLING_MODES}, not {mode!r} (live sampling is buffered)"
+                )
+
+
 def _identity(value: object) -> object:
     return value
 
@@ -1655,6 +1691,7 @@ def _prefetched_steps(
 
     import gc
 
+    import torch
     from torch.utils.data import DataLoader, Dataset
 
     class _Steps(Dataset):
@@ -1664,8 +1701,12 @@ def _prefetched_steps(
         def __getitem__(self, index: int) -> PreparedStepInputs:
             return prepare(int(index))  # type: ignore[operator]
 
+    # The loader draws its workers' base seed from `generator`; without one it would
+    # draw from the global torch generator and shift every later random draw of the
+    # training process (dropout), so prefetch would change the training.
     loader = DataLoader(
         _Steps(),
+        generator=torch.Generator().manual_seed(0),
         batch_size=None,
         shuffle=False,
         num_workers=int(workers),

@@ -121,6 +121,20 @@ class PrefetchEquivalenceTest(unittest.TestCase):
                 train_resmade_sample_source(SyntheticFullJoinSampleSource(), config)
             _assert_same(self, Path(serial), Path(parallel))
 
+    def test_dropout_sees_the_same_random_stream(self) -> None:
+        # the loader must not draw from the global torch generator that dropout uses
+        with tempfile.TemporaryDirectory() as serial, tempfile.TemporaryDirectory() as parallel:
+            for directory, workers in ((serial, 0), (parallel, 2)):
+                config = load_simple_yaml("model/configs/resmade_smoke.yaml")
+                config["model"]["hidden_sizes"] = [16, 16]
+                config["model"]["embedding_size"] = 4
+                config["model"]["residual_dropout"] = 0.3
+                config["training"].update(batch_size=8, steps_per_epoch=5, checkpoint_interval_steps=0,
+                                          validation_interval_steps=0, prefetch_workers=workers)
+                config["logging"]["output_directory"] = directory
+                train_resmade_sample_source(SyntheticFullJoinSampleSource(), config)
+            _assert_same(self, Path(serial), Path(parallel))
+
     def test_pol_trajectory_source_with_rare_support_and_dedup_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -155,6 +169,31 @@ class PrefetchEquivalenceTest(unittest.TestCase):
             self.assertGreater(summary["rare_support"]["rare_rows_drawn"], 0)
             self.assertGreater(summary["trajectory_distinct"]["trajectory_targets_generated"], 0)
             _assert_same(self, outputs["serial"], outputs["parallel"])
+
+
+class PrefetchSourceCheckTest(unittest.TestCase):
+    def test_only_step_seeded_sources_are_accepted(self) -> None:
+        from types import SimpleNamespace
+
+        from model.src.data.full_join_sampler import (
+            LiveNeuroCardFullJoinSampleSource,
+            NeuroCardFullJoinSampleSource,
+        )
+        from model.src.training.resmade_trainer import _assert_prefetch_deterministic_source
+
+        fixture = object.__new__(NeuroCardFullJoinSampleSource)
+        fixture.sampling_mode = "fixture"
+        _assert_prefetch_deterministic_source(fixture)
+        live = object.__new__(LiveNeuroCardFullJoinSampleSource)
+        live.sampling_mode = "live"  # buffered sampler: batches depend on earlier calls
+        with self.assertRaisesRegex(ValueError, "prefetch_workers"):
+            _assert_prefetch_deterministic_source(live)
+        disguised = object.__new__(NeuroCardFullJoinSampleSource)
+        disguised.sampling_mode = "live"
+        with self.assertRaisesRegex(ValueError, "prefetch_workers"):
+            _assert_prefetch_deterministic_source(disguised)
+        with self.assertRaisesRegex(ValueError, "prefetch_workers"):
+            _assert_prefetch_deterministic_source(SimpleNamespace(base_source=fixture))  # unknown wrapper
 
 
 if __name__ == "__main__":
