@@ -171,6 +171,7 @@ class PrefetchEquivalenceTest(unittest.TestCase):
             _assert_same(self, outputs["serial"], outputs["parallel"])
 
 
+@unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")  # the trainer module needs it
 class PrefetchSourceCheckTest(unittest.TestCase):
     def test_only_step_seeded_sources_are_accepted(self) -> None:
         from types import SimpleNamespace
