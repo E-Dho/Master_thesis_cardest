@@ -22,6 +22,26 @@ from collections import defaultdict
 from pathlib import Path
 
 
+def _write_cprofile(profiler, directory: Path) -> None:
+    """Top functions by cumulative time, and the call tree below the sampling functions."""
+
+    import io
+    import pstats
+
+    stream = io.StringIO()
+    stats = pstats.Stats(profiler, stream=stream)
+    stats.sort_stats("cumulative").print_stats(80)
+    (directory / "cprofile_top.txt").write_text(stream.getvalue())
+    stream = io.StringIO()
+    stats = pstats.Stats(profiler, stream=stream)
+    stats.sort_stats("cumulative")
+    for pattern in ("batches", "rare_batches", "_sample_conditionals_from_source", "sample_root_strata_rows",
+                    "_encode", "encode"):
+        stats.print_callees(pattern)
+    (directory / "cprofile_sampling.txt").write_text(stream.getvalue())
+    profiler.dump_stats(str(directory / "training.pstats"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", required=True)
@@ -29,6 +49,8 @@ def main() -> int:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--checkpoint-interval", type=int, default=100)
     parser.add_argument("--output-directory", required=True, type=Path)
+    parser.add_argument("--cprofile", action="store_true",
+                        help="also run cProfile over training; writes cprofile_top.txt and cprofile_sampling.txt")
     args = parser.parse_args()
     if args.output_directory.exists() and any(args.output_directory.iterdir()):
         raise SystemExit(f"{args.output_directory} is not empty; refusing")
@@ -88,9 +110,18 @@ def main() -> int:
     config["training"]["checkpoint_interval_steps"] = int(args.checkpoint_interval)
     config["training"]["early_stopping_patience_steps"] = 0
     config.setdefault("logging", {})["output_directory"] = str(args.output_directory)
+    profiler = None
+    if args.cprofile:
+        import cProfile
+
+        profiler = cProfile.Profile()
+        profiler.enable()
     started = time.perf_counter()
     result = trainer.train_resmade_sample_source(source, config)
     wall = time.perf_counter() - started
+    if profiler is not None:
+        profiler.disable()
+        _write_cprofile(profiler, args.output_directory)
     report = {
         "config": args.config,
         "steps": args.steps,
