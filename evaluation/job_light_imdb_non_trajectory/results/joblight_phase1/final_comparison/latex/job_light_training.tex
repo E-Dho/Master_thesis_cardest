@@ -24,12 +24,12 @@
     FOJ sampling ($N=1{,}000{,}000$) & \JLcell{job_light/training/foj_sampling/n1000000/preprocessing} & \JLcell{job_light/training/foj_sampling/n1000000/training} & \JLcell{job_light/training/foj_sampling/n1000000/total} \\
     FOJ sampling ($N=7{,}168{,}000$) & \JLcell{job_light/training/foj_sampling/n7168000/preprocessing} & \JLcell{job_light/training/foj_sampling/n7168000/training} & \JLcell{job_light/training/foj_sampling/n7168000/total} \\
     \midrule
-    \OwnModelName{} (best median)$^{\S}$ & \JLcell{job_light/training/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/preprocessing} & \JLcell{job_light/training/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/training} & \JLcell{job_light/training/own_model/duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code/total} \\
+    \OwnModelName{} & \JLcell{job_light/training/own_model/duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code/preprocessing} & \JLcell{job_light/training/own_model/duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code/training} & \JLcell{job_light/training/own_model/duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code/total} \\
     \bottomrule
   \end{tabular}
   \end{adjustbox}
   \par\smallskip
   \begin{minipage}{\linewidth}\footnotesize
-    Wall-clock time of the preprocessing stage, the training (or statistics-collection) stage, and their sum. Values are mean\,$\pm$\,standard deviation over three seeds (PostgreSQL: a single deterministic run). Bold marks the best value in the training and total-build columns. $^{\S}$This selected checkpoint was evaluated for one seed; no same-step three-seed aggregate is available. For selected own-model checkpoints, training and total-build time is measured to the selected checkpoint; final-step selections use the recorded full-run time. FOJ sampling uses the recorded cumulative reservoir draw time at each sample prefix; the zero-valued cache-hit build timer is not reported.
+    Wall-clock time. Mean\,$\pm$\,std over three seeds (PostgreSQL: one run). Bold: best training and total time. \OwnModelName{}: training up to step 11,000. FOJ sampling: cumulative reservoir draw time.
   \end{minipage}
 \end{table}

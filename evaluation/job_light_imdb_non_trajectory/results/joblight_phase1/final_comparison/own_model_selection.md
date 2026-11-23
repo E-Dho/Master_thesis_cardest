@@ -6,6 +6,19 @@ A candidate is eligible only when it proves the canonical full workload **and co
 
 A minimizes smoothed p50; B minimizes smoothed p99. Smoothed q-error floors estimate and truth independently at one. Neither workload has a different raw-median winner.
 
+## Interim Rule-Row Assembly
+
+Until the queued three-seed rule evaluations and timing jobs complete, the
+rendered JOB-light row uses the existing corrected-code step-11,000 aggregate
+for seeds 0--2. The rendered JOB-light-ranges row uses the completed archived
+three-seed step-11,000 accuracy aggregate
+`duet_neurocard_distjoin_rare_aux_content_step_11000`, standardized CPU/GPU
+timing from `duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code`,
+and deployment metadata measured from the selected step-11,000 checkpoints.
+This substitution is limited to table assembly. The pending refresh replaces it
+with the real `*_rule_step_11000_corrected_model_code` aggregate without a
+further generator change.
+
 ## Selected Checkpoints
 
 | Workload | Pick | Step | Original seed | Smoothed p50 / p90 / p95 / p99 / max | Raw p50 / p99 | Est. < 1 | Checkpoint | Training config | Source summary |
