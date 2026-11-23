@@ -59,7 +59,13 @@ replacement = [
         "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
     )
 ]
-inputs = [Path(path) for path in previous["inputs"] if path not in replaceable] + replacement
+excluded = {
+    results / "foj_sampling" / "n7168000" / "aggregate" / "comparison.json",
+}
+inputs = [
+    Path(path) for path in previous["inputs"]
+    if path not in replaceable and path not in excluded
+] + replacement
 if len(inputs) != len(set(inputs)):
     raise RuntimeError("comparison input list contains duplicates")
 command = [

@@ -19,7 +19,7 @@ all evaluated methods and the execution contract used by their adapters.
 | DeepDB JOB-light-ranges adapted | Subprocess `deepdb` adapter, `protocol: adapted` | Project-owned extension of `imdb-light` modeling the six columns JOB-light-ranges filters on; string columns as PostgreSQL-collation ranks; separate preprocessing and a newly trained ensemble with the published budgets |
 | NeuroCard | Subprocess `neurocard` adapter | Native JOB-light and JOB-light-ranges ResMADE configurations, native factorized sampling, 8,000 progressive samples |
 | DistJoin | Subprocess `distjoin` adapter | Published IMDB configuration and upstream dynamic sampler/ANPM implementation |
-| FOJ sampling | Native `foj_sampling` adapter | Independent seeded Exact Weight full-outer-join subsets at 1k, 10k, 100k, 1M, and 7,168,000 rows |
+| FOJ sampling | Native `foj_sampling` adapter | Independent seeded Exact Weight full-outer-join subsets at 1k, 10k, 100k, and 1M rows |
 | Own approach | Subprocess `own_model` adapter | Arbitrary named config/checkpoint/ablation with the same result contract |
 
 Duet is intentionally deferred to a separate multi-table adaptation study.
