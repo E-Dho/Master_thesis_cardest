@@ -53,8 +53,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from evaluation.job_light_imdb_non_trajectory.joblight_eval.config import load_experiment_config
-
 WORKLOADS = {
     "job_light": "JOB-light",
     "job_light_ranges": "JOB-light-ranges",
@@ -134,6 +132,25 @@ OWN_MODEL_VARIANTS = {
         ),
         "training_time_mode": "checkpoint",
     },
+}
+
+_OWN_MODEL_RULE_VARIANT = {
+    "job_light": "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
+    "job_light_ranges": "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
+}
+_INTERIM_OWN_MODEL_VARIANT = {
+    "job_light": "duet_neurocard_distjoin_rare_aux_step_11000_corrected_model_code",
+    "job_light_ranges": "duet_neurocard_distjoin_rare_aux_content_step_11000",
+}
+_INTERIM_RANGES_ACCURACY_VARIANT = _INTERIM_OWN_MODEL_VARIANT["job_light_ranges"]
+_INTERIM_RANGES_TIMING_VARIANT = (
+    "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code"
+)
+_SUPERSEDED_OWN_MODEL_VARIANTS = {
+    *_INTERIM_OWN_MODEL_VARIANT.values(),
+    _INTERIM_RANGES_TIMING_VARIANT,
+    "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code",
+    "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
 }
 
 # Methods that are shown in the inference table but excluded from its best-value
@@ -467,10 +484,66 @@ def render_table(rows: list[dict], columns: list[Column], *, caption: str,
 # --------------------------------------------------------------------------- #
 # Rows
 # --------------------------------------------------------------------------- #
-def prepare_rows(results: list[dict], workload: str) -> list[dict]:
+def _interim_ranges_rule_row(results: list[dict], interim_accuracy: dict | None) -> dict | None:
+    """Join archived step-11k accuracy with the existing step-40k timing.
+
+    The queued rule run supersedes this compatibility row as soon as its
+    aggregate is present.  It intentionally exists only at table-render time:
+    the comparison/provenance input remains the immutable set of completed
+    aggregates.
+    """
+    if interim_accuracy is None:
+        return None
+    timing_source = next(
+        (row for row in results
+         if row.get("method_id") == "own_model"
+         and row.get("variant_id") == _INTERIM_RANGES_TIMING_VARIANT),
+        None,
+    )
+    if timing_source is None:
+        return None
+    row = dict(interim_accuracy)
+    for key, value in timing_source.items():
+        if key.startswith("timing.") or key in {
+            "standardized_timing", "primary_timing_profile", "inference_device",
+            "evaluate_stage_device", "actual_hardware", "inference_profiles",
+            "inference_profiles_json", "published_reference_hardware",
+            "_configured_timing_profiles",
+        }:
+            row[key] = value
+    row["variant_id"] = _OWN_MODEL_RULE_VARIANT["job_light_ranges"]
+    row["_interim_ranges_substitution"] = True
+    return row
+
+
+def prepare_rows(results: list[dict], workload: str,
+                 *, interim_ranges_accuracy: dict | None = None) -> list[dict]:
+    target_own_model_variant = _OWN_MODEL_RULE_VARIANT[workload]
+    own_model_rows = [row for row in results if row.get("method_id") == "own_model"]
+    has_rule_row = any(row.get("variant_id") == target_own_model_variant for row in own_model_rows)
+    interim_rule = None
+    if not has_rule_row:
+        if workload == "job_light_ranges":
+            interim_rule = _interim_ranges_rule_row(results, interim_ranges_accuracy)
+        else:
+            interim_source = next(
+                (row for row in own_model_rows
+                 if row.get("variant_id") == _INTERIM_OWN_MODEL_VARIANT[workload]),
+                None,
+            )
+            if interim_source is not None:
+                interim_rule = dict(interim_source)
+                interim_rule["variant_id"] = target_own_model_variant
     rows = []
     for result in results:
         if result["workload"] != workload:
+            continue
+        if (workload == "job_light_ranges" and result.get("method_id") == "deepdb"
+                and result.get("variant_id") == "imdb_light_rdc_published"):
+            continue
+        if (result.get("method_id") == "own_model"
+                and (has_rule_row
+                     or result.get("variant_id") in _SUPERSEDED_OWN_MODEL_VARIANTS)):
             continue
         row = dict(result)
         label = row_label(row)
@@ -483,6 +556,22 @@ def prepare_rows(results: list[dict], workload: str) -> list[dict]:
         row["_label"] = label
         row["_eligible"] = is_complete(row)
         rows.append(row)
+    if has_rule_row:
+        rows.extend(dict(row) for row in own_model_rows
+                    if row.get("workload") == workload
+                    and row.get("variant_id") == target_own_model_variant)
+    elif interim_rule is not None:
+        rows.append(interim_rule)
+    for row in rows:
+        label = row_label(row)
+        if not is_complete(row):
+            label += r"$^{\dagger}$"
+        variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
+        row["_qerror_only"] = bool(variant.get("qerror_only"))
+        if row.get("method_id") == "own_model" and int(row.get("seed_count", 1)) == 1:
+            label += r"$^{\S}$"
+        row["_label"] = label
+        row["_eligible"] = is_complete(row)
     rows.sort(key=lambda r: (
         GROUP_OF_METHOD.get(r["method_id"], 99),
         OWN_MODEL_VARIANTS.get(r.get("variant_id"), {}).get("selection_order", 0),
@@ -501,15 +590,15 @@ def coverage_note(rows: list[dict], data: DataStore) -> str:
             data.inline(f"{row['workload']}/coverage/{row_key(row)}", fmt_percent(fraction))
             if fraction is not None else "part"
         )
-        parts.append(f"{row_label(row)} supports only {share} of the queries")
+        parts.append(f"{row_label(row)} answers only {share} of the queries")
     return (
         r"$^{\dagger}$" + "; ".join(parts)
-        + "; its values are computed on that subset and are not considered for the best value."
+        + "; not considered for bold."
     )
 
 
 def seeds_note(rows: list[dict]) -> str:
-    return "Values are mean\\,$\\pm$\\,standard deviation over three seeds (PostgreSQL: a single deterministic run)."
+    return "Mean\\,$\\pm$\\,std over three seeds (PostgreSQL: one run)."
 
 
 def own_model_single_run_note(rows: list[dict]) -> str:
@@ -519,18 +608,10 @@ def own_model_single_run_note(rows: list[dict]) -> str:
     return ""
 
 
-def own_model_rule_note(rows: list[dict]) -> str:
-    selected = [row for row in rows if row.get("variant_id") in OWN_MODEL_VARIANTS]
-    if selected:
-        return (r"The \OwnModelName{} row uses the rare-auxiliary configuration's "
-                r"step-11,000 checkpoint over training seeds 0--2.")
-    return ""
-
-
 # --------------------------------------------------------------------------- #
 # Q-error tables
 # --------------------------------------------------------------------------- #
-BEST_NOTE = r"Bold marks the best value per column."
+BEST_NOTE = r"Bold: best per column."
 
 
 def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
@@ -565,17 +646,16 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
         + r" \cmidrule(lr){2-6}"
     )
     description = (
-        "Estimates and true cardinalities are clamped to at least one before the q-error is computed."
+        "Estimate and true cardinality clamped to at least one."
         if kind == "Smoothed"
-        else "Q-error on the unclamped estimates."
+        else "Unclamped estimates."
     )
     notes = [
         description,
         seeds_note(rows),
         BEST_NOTE,
         own_model_single_run_note(rows),
-        own_model_rule_note(rows),
-        (r"Est.\,$<1$ is the number of queries with an estimate below one."
+        (r"Est.\,$<1$: estimates below one."
          if has_sub1 else ""),
         coverage_note(rows, data),
     ]
@@ -639,6 +719,90 @@ def _missing_timing_profiles(row: dict) -> list[str]:
     ]
 
 
+def _table_yaml_scalar(value_text: str) -> Any:
+    if value_text.startswith("[") and value_text.endswith("]"):
+        inner = value_text[1:-1].strip()
+        return [] if not inner else [_table_yaml_scalar(value.strip()) for value in inner.split(",")]
+    if value_text == "false":
+        return False
+    if value_text == "true":
+        return True
+    if value_text == "null":
+        return None
+    try:
+        return float(value_text) if "." in value_text or "e" in value_text.lower() else int(value_text)
+    except ValueError:
+        return value_text.strip("\"'")
+
+
+def _load_table_yaml(path: Path) -> dict[str, Any]:
+    """Read the evaluation configs without importing the Torch-backed model stack."""
+    root: dict[str, Any] = {}
+    lines = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if line:
+            lines.append((len(line) - len(line.lstrip(" ")), line.strip()))
+    stack: list[tuple[int, Any]] = [(-1, root)]
+    for index, (indent, line) in enumerate(lines):
+        while indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        if line.startswith("- "):
+            if not isinstance(parent, list):
+                raise ValueError(f"YAML list item has no list parent: {path}")
+            parent.append(_table_yaml_scalar(line[2:].strip()))
+            continue
+        key, value_text = line.split(":", 1)
+        value_text = value_text.strip()
+        if value_text:
+            if not isinstance(parent, dict):
+                raise ValueError(f"YAML mapping item has no mapping parent: {path}")
+            parent[key] = _table_yaml_scalar(value_text)
+            continue
+        child_is_list = next(
+            (next_line.startswith("- ") for next_indent, next_line in lines[index + 1:]
+             if next_indent > indent),
+            False,
+        )
+        value: dict[str, Any] | list[Any] = [] if child_is_list else {}
+        if not isinstance(parent, dict):
+            raise ValueError(f"YAML mapping item has no mapping parent: {path}")
+        parent[key] = value
+        stack.append((indent, value))
+    return root
+
+
+def _table_deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _table_deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _timing_config_identity(path: Path) -> tuple[str, str, tuple[str, ...]]:
+    config = _load_table_yaml(path)
+    extends = config.pop("extends", None)
+    if extends:
+        base = _load_table_yaml((path.parent / str(extends)).resolve())
+        if "extends" in base:
+            raise ValueError(f"nested config inheritance is not supported: {path}")
+        config = _table_deep_merge(base, config)
+    experiment = config.get("experiment") or {}
+    timing = config.get("timing") or {}
+    if not isinstance(experiment, dict) or not isinstance(timing, dict):
+        raise ValueError(f"invalid experiment/timing block: {path}")
+    profiles = timing.get("profiles") or []
+    if not isinstance(profiles, list):
+        raise ValueError(f"timing.profiles must be a list: {path}")
+    return str(experiment.get("method_id")), str(experiment.get("variant_id")), tuple(
+        str(profile) for profile in profiles
+    )
+
+
 def attach_configured_timing_profiles(results: list[dict], comparison_path: Path) -> None:
     """Annotate comparison rows with profiles declared by their source config.
 
@@ -665,11 +829,10 @@ def attach_configured_timing_profiles(results: list[dict], comparison_path: Path
         config_path = source_path if source_path.exists() else local_config_directory / source_path.name
         if not config_path.exists():
             raise ValueError(f"cannot read timing config for comparison row {key}: {source_path}")
-        config = load_experiment_config(config_path)
-        if (config.method_id, config.variant_id) != key:
+        method_id, variant_id, profiles = _timing_config_identity(config_path)
+        if (method_id, variant_id) != key:
             raise ValueError(f"provenance config identity mismatch for comparison row {key}: {config_path}")
-        profiles = config.timing.get("profiles") or []
-        row["_configured_timing_profiles"] = tuple(str(profile) for profile in profiles)
+        row["_configured_timing_profiles"] = profiles
 
 
 def distjoin_cpu_consistency_note(rows: list[dict], workload: str, data: DataStore) -> str:
@@ -705,10 +868,8 @@ def distjoin_cpu_consistency_note(rows: list[dict], workload: str, data: DataSto
             verify_printed(f"${fmt_number(maximum)}$", [maximum]),
         )
         descriptions.append(
-            f"{row_label(row)}'s GPU runs use CUDA mixed precision, its CPU runs full precision; "
-            f"CPU estimates differ from the GPU accuracy run by a median of {median_value} "
-            f"(maximum {maximum_value}, from rounding very small estimates up to whole rows); "
-            "the reported q-errors come from the GPU accuracy run"
+            f"{row_label(row)}: GPU runs use mixed precision; CPU estimates differ from them "
+            f"by a median of {median_value} (max {maximum_value}); q-errors come from the GPU runs"
         )
     return "; ".join(descriptions) + "."
 
@@ -763,25 +924,20 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
         data.inline(f"{workload}/inference/hardware", ", ".join(hardware)) if hardware else ""
     )
     notes = [
-        "Per-query end-to-end estimation latency under the standardized timing profiles"
-        + (f" ({hardware_text})" if hardware else "") + ".",
+        "Latency per query" + (f" ({hardware_text})" if hardware else "") + ".",
         seeds_note(rows),
-        "-- marks a device type the method has no inference implementation for.",
+        "--: no implementation for this device.",
     ]
     out_of_competition = [r for r in rows if r["method_id"] in INFERENCE_OUT_OF_COMPETITION]
     if out_of_competition:
         names = ", ".join(sorted({row_label(r) for r in out_of_competition}))
-        notes.append(
-            rf"$^{{\circ}}${names} is shown out of competition: as a query-driven model it "
-            r"evaluates one small set-convolution network per query, whereas all other methods "
-            r"estimate from a model or sample of the data. Bold marks the best value per column "
-            r"among the remaining methods."
-        )
+        notes.append(rf"$^{{\circ}}${names}: query-driven, out of competition. "
+                     r"Bold: best per column among the other methods.")
     else:
         notes.append(BEST_NOTE)
     notes.append(own_model_single_run_note(rows))
     if any(_cpu_profile(r) == "cpu_postgres_2core" for r in rows):
-        notes.append(r"$^{\ast}$Measured with client and PostgreSQL backend pinned to one core each.")
+        notes.append(r"$^{\ast}$Client and PostgreSQL backend on one core each.")
     for row in rows:
         missing_profiles = _missing_timing_profiles(row)
         if not missing_profiles:
@@ -977,7 +1133,7 @@ def refresh_selected_own_model_build_records(rows: list[dict], results_root: Pat
         runs = _run_dirs_from_timing(row, results_root) or _run_dirs_from_scan(row, results_root)
         if not runs:
             continue
-        if len(metadata) not in (1, len(runs)):
+        if len(metadata) not in (1, len(runs)) and len(runs) != 1:
             raise ValueError(f"selected metadata/run mismatch for {row['variant_id']}")
         for index, run in enumerate(runs):
             path = run / "build_metrics.json"
@@ -986,7 +1142,18 @@ def refresh_selected_own_model_build_records(rows: list[dict], results_root: Pat
             except (OSError, json.JSONDecodeError):
                 continue
             artifact = document.setdefault("artifacts", {})
-            artifact.update(metadata[index if len(metadata) > 1 else 0])
+            if len(runs) == 1 and len(metadata) > 1:
+                for key in metadata[0]:
+                    values = [item.get(key) for item in metadata]
+                    if all(isinstance(value, (int, float)) for value in values):
+                        mean, std = _mean_std([float(value) for value in values])
+                        artifact[key] = mean
+                        artifact[f"{key}_std"] = std
+                    else:
+                        artifact[key] = metadata[0][key]
+                artifact["selected_checkpoint_metadata_aggregation"] = "three-seed interim mean"
+            else:
+                artifact.update(metadata[index if len(metadata) > 1 else 0])
             if training is not None:
                 artifact["selected_checkpoint_training_seconds"] = training[0]
                 artifact["selected_checkpoint_training_seconds_std"] = training[1]
@@ -1058,6 +1225,13 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
         recorded_selected_training = _mean_std(collect(
             lambda m: artifacts(m).get("selected_checkpoint_training_seconds")
         ))
+        if len(metrics) == 1 and recorded_selected_training[0] is not None:
+            recorded_selected_training = (
+                recorded_selected_training[0],
+                float(artifacts(metrics[0]).get(
+                    "selected_checkpoint_training_seconds_std"
+                ) or 0.0),
+            )
         selected_training = recorded_selected_training
         if selected_training[0] is None:
             selected_training = _selected_own_model_training_seconds(row)
@@ -1072,6 +1246,11 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
         selected_size = _mean_std(collect(
             lambda m: artifacts(m).get("inference_state_dict_mb")
         ))
+        if len(metrics) == 1 and selected_size[0] is not None:
+            selected_size = (
+                selected_size[0],
+                float(artifacts(metrics[0]).get("inference_state_dict_mb_std") or 0.0),
+            )
         if selected_size[0] is not None:
             row["_build.size_mb.mean"], row["_build.size_mb.std"] = selected_size
             row["_build.size_is_inference_state_dict"] = True
@@ -1136,19 +1315,16 @@ def training_table(rows: list[dict], workload: str, show_std: bool, data: DataSt
                key="total"),
     ]
     notes = [
-        "Wall-clock time of the preprocessing stage, the training (or statistics-collection) "
-        "stage, and their sum.",
+        "Wall-clock time.",
         seeds_note(rows),
-        "Bold marks the best value in the training and total-build columns.",
+        "Bold: best training and total time.",
         own_model_single_run_note(rows),
-        ("For selected own-model checkpoints, training and total-build time is measured to "
-         "the selected checkpoint; final-step selections use the recorded full-run time."
+        (r"\OwnModelName{}: training up to step 11,000."
          if any(r.get("_build.training_record_is_selected_checkpoint") for r in rows) else ""),
         ("-- denotes a pretrained/reused checkpoint load rather than a training/statistics time."
          if any(r.get("_build.checkpoint_load_only") and not r.get("_build.training_record_is_selected_checkpoint")
                 for r in rows) else ""),
-        ("FOJ sampling uses the recorded cumulative reservoir draw time at each sample prefix; "
-         "the zero-valued cache-hit build timer is not reported."
+        ("FOJ sampling: cumulative reservoir draw time."
          if any(r.get("_build.foj_cumulative_sampling") for r in rows) else ""),
         coverage_note(rows, data),
         _missing_build_note(rows),
@@ -1178,9 +1354,8 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool, data: Data
                key="serialized_mb"),
     ]
     notes = [
-        "Trainable parameter count and serialized model or summary size in decimal MB "
-        "($10^6$ bytes); -- where not applicable.",
-        (r"For \OwnModelName{}, serialized size is the inference-only \texttt{state\_dict}."
+        r"MB = $10^6$ bytes; --: not applicable.",
+        (r"\OwnModelName{}: inference-only state dict."
          if any(r.get("_build.size_is_inference_state_dict") for r in rows) else ""),
         BEST_NOTE,
         own_model_single_run_note(rows),
@@ -1222,6 +1397,43 @@ PREAMBLE = r"""% Generated by make_latex_tables.py -- macros used by the JOB-lig
 """
 
 
+def _row_from_aggregate(aggregate_path: Path, workload: str) -> dict[str, Any]:
+    """Extract one table row from an archived aggregate without re-aggregating it."""
+    aggregate = json.loads(aggregate_path.read_text(encoding="utf-8"))
+    result = aggregate["workloads"][workload]
+    timing_protocol = result.get("timing_protocol") or {}
+    row: dict[str, Any] = {
+        "experiment_id": aggregate["experiment_id"],
+        "method_id": aggregate["method_id"],
+        "variant_id": aggregate["variant_id"],
+        "display_name": aggregate["display_name"],
+        "protocol": aggregate.get("protocol", "native"),
+        "workload": workload,
+        "seed_count": aggregate["seed_count"],
+        "coverage_complete_all_seeds": result["coverage_complete_all_seeds"],
+        "primary_timing_profile": result.get("primary_timing_profile"),
+        "inference_device": timing_protocol.get("primary_device"),
+        "evaluate_stage_device": timing_protocol.get("primary_device"),
+        "published_reference_hardware": timing_protocol.get("published_reference_hardware", ""),
+    }
+    for name, metric in result["metrics"].items():
+        row[f"{name}.mean"] = metric["mean"]
+        row[f"{name}.std"] = metric["std"]
+    return row
+
+
+def _interim_ranges_accuracy(results_root: Path) -> dict[str, Any] | None:
+    """Load the completed, pre-rule three-seed ranges accuracy aggregate."""
+    path = (results_root / "own_model" / _INTERIM_RANGES_ACCURACY_VARIANT
+            / "aggregate" / "comparison.json")
+    if not path.exists():
+        return None
+    row = _row_from_aggregate(path, "job_light_ranges")
+    if row["variant_id"] != _INTERIM_RANGES_ACCURACY_VARIANT:
+        raise ValueError(f"unexpected interim aggregate identity: {path}")
+    return row
+
+
 def main() -> None:
     here = Path(__file__).resolve().parent
     default_root = here.parent / "results" / "joblight_phase1"
@@ -1244,13 +1456,16 @@ def main() -> None:
     data = json.loads(args.comparison.read_text(encoding="utf-8"))
     results = data["results"]
     attach_configured_timing_profiles(results, args.comparison)
+    interim_ranges_accuracy = _interim_ranges_accuracy(args.results_root)
     show_std = not args.no_std
     args.output.mkdir(parents=True, exist_ok=True)
     if args.refresh_own_model_build_records:
         refreshed = 0
         for workload in WORKLOADS:
             refreshed += refresh_selected_own_model_build_records(
-                prepare_rows(results, workload), args.results_root
+                prepare_rows(
+                    results, workload, interim_ranges_accuracy=interim_ranges_accuracy,
+                ), args.results_root
             )
         print(f"refreshed {refreshed} selected own-model build records")
 
@@ -1268,7 +1483,9 @@ def main() -> None:
         }
         build_found = None
         for name, builder in builders.items():
-            rows = prepare_rows(results, workload)  # fresh copy: labels get markers
+            rows = prepare_rows(
+                results, workload, interim_ranges_accuracy=interim_ranges_accuracy,
+            )  # fresh copy: labels get markers
             if name in ("training", "model_size"):
                 found = attach_build_metrics(rows, args.results_root)
                 validate_selected_own_model_build_metrics(rows)
@@ -1277,7 +1494,7 @@ def main() -> None:
             path.write_text(builder(rows), encoding="utf-8")
             written.append(path.name)
         print(f"{workload}: build metrics found for {build_found} of "
-              f"{len(prepare_rows(results, workload))} rows")
+              f"{len(prepare_rows(results, workload, interim_ranges_accuracy=interim_ranges_accuracy))} rows")
 
     (args.output / "joblight_data.tex").write_text(
         store.render([f"comparison: {args.comparison}", f"build metrics: {args.results_root}"]),

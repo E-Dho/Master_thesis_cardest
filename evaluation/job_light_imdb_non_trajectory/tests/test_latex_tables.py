@@ -17,6 +17,25 @@ class LatexTablesTest(unittest.TestCase):
         self.assertEqual(MODULE["fmt_number"](9.997), "10.0")
         self.assertEqual(MODULE["fmt_number"](0.9997), "1.00")
 
+    def test_timing_config_reader_resolves_one_level_of_inheritance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "base.yaml").write_text(
+                "experiment:\n  method_id: own_model\n  variant_id: base\n"
+                "timing:\n  profiles:\n    - cpu_1core\n",
+                encoding="utf-8",
+            )
+            child = root / "child.yaml"
+            child.write_text(
+                "extends: base.yaml\nexperiment:\n  variant_id: child\n"
+                "timing:\n  profiles:\n    - cpu_1core\n    - gpu_single_query\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                MODULE["_timing_config_identity"](child),
+                ("own_model", "child", ("cpu_1core", "gpu_single_query")),
+            )
+
     def test_preprocessing_column_is_never_marked_best(self) -> None:
         column = MODULE["Column"]("Preprocessing", lambda _: 0.0, lambda _: "$0$", mark_best=False)
         rows = [{"_eligible": True}]
@@ -41,13 +60,65 @@ class LatexTablesTest(unittest.TestCase):
         self.assertEqual([row["_qerror_only"] for row in rows], [False])
         self.assertNotIn(r"$^{\S}$", rows[0]["_label"])
 
-    def test_rule_note_has_no_selection_language(self) -> None:
-        note = MODULE["own_model_rule_note"]([{
+    def test_rule_rows_do_not_add_a_selection_note(self) -> None:
+        row = {
+            "workload": "job_light",
+            "method_id": "own_model",
             "variant_id": "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
-        }])
-        self.assertIn("step-11,000", note)
-        self.assertNotIn("best", note.lower())
-        self.assertNotIn("(A)", note)
+            "seed_count": 3,
+            "coverage_complete_all_seeds": True,
+            "smoothed_q_error.p50.mean": 1.0,
+            "smoothed_q_error.p50.std": 0.0,
+            "smoothed_q_error.p90.mean": 1.0,
+            "smoothed_q_error.p90.std": 0.0,
+            "smoothed_q_error.p95.mean": 1.0,
+            "smoothed_q_error.p95.std": 0.0,
+            "smoothed_q_error.p99.mean": 1.0,
+            "smoothed_q_error.p99.std": 0.0,
+            "smoothed_q_error.max.mean": 1.0,
+            "smoothed_q_error.max.std": 0.0,
+        }
+        table = MODULE["qerror_table"](
+            MODULE["prepare_rows"]([row], "job_light"), "job_light",
+            "smoothed_q_error", False, MODULE["DataStore"](),
+        )
+        self.assertNotIn("step-11,000", table)
+
+    def test_ranges_excludes_native_deepdb_but_keeps_adapted(self) -> None:
+        rows = MODULE["prepare_rows"]([
+            {"workload": "job_light_ranges", "method_id": "deepdb",
+             "variant_id": "imdb_light_rdc_published", "coverage_complete_all_seeds": True},
+            {"workload": "job_light_ranges", "method_id": "deepdb",
+             "variant_id": "imdb_light_ranges_adapted", "protocol": "adapted",
+             "coverage_complete_all_seeds": True},
+        ], "job_light_ranges")
+        self.assertEqual([row["variant_id"] for row in rows], ["imdb_light_ranges_adapted"])
+
+    def test_interim_ranges_rule_uses_old_accuracy_and_current_timing(self) -> None:
+        legacy = {
+            "workload": "job_light_ranges", "method_id": "own_model",
+            "variant_id": "duet_neurocard_distjoin_rare_aux_content_step_11000",
+            "seed_count": 3, "coverage_complete_all_seeds": True,
+            "smoothed_q_error.p50.mean": 2.0,
+        }
+        timing = {
+            "workload": "job_light_ranges", "method_id": "own_model",
+            "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code",
+            "seed_count": 1, "coverage_complete_all_seeds": True,
+            "timing.cpu_1core.mean_ms.mean": 10.0,
+            "timing.gpu_single_query.mean_ms.mean": 3.0,
+            "_configured_timing_profiles": ("cpu_1core", "gpu_single_query"),
+        }
+        rows = MODULE["prepare_rows"](
+            [legacy, timing], "job_light_ranges", interim_ranges_accuracy=legacy,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["variant_id"],
+            "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
+        )
+        self.assertEqual(rows[0]["smoothed_q_error.p50.mean"], 2.0)
+        self.assertEqual(rows[0]["timing.cpu_1core.mean_ms.mean"], 10.0)
 
     def test_adapted_mscn_uses_an_explicit_label(self) -> None:
         self.assertEqual(
@@ -123,7 +194,7 @@ class LatexTablesTest(unittest.TestCase):
         rows = MODULE["prepare_rows"]([row], "job_light")
         table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
         self.assertNotIn(r"$^{\P}$", table)
-        self.assertIn("device type the method has no inference implementation", table)
+        self.assertIn("no implementation for this device", table)
 
     def test_declared_but_unmeasured_standardized_profile_is_marked(self) -> None:
         row = {
@@ -162,9 +233,8 @@ class LatexTablesTest(unittest.TestCase):
         }
         rows = MODULE["prepare_rows"]([row], "job_light")
         table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
-        self.assertIn("GPU runs use CUDA mixed precision", table)
-        self.assertIn("CPU runs full precision", table)
-        self.assertIn("the reported q-errors come from the GPU accuracy run", table)
+        self.assertIn("GPU runs use mixed precision", table)
+        self.assertIn("q-errors come from the GPU runs", table)
         self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_median_relative_difference}", table)
         self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_max_relative_difference}", table)
 
@@ -212,6 +282,49 @@ class LatexTablesTest(unittest.TestCase):
             row["_build.has_selected_checkpoint_training_seconds"] = True
             validate([row])
         finally:
+            del runtime["OWN_MODEL_VARIANTS"][variant]
+
+    def test_interim_build_record_aggregates_three_checkpoints_into_one_cpu_run(self) -> None:
+        refresh = MODULE["refresh_selected_own_model_build_records"]
+        attach = MODULE["attach_build_metrics"]
+        runtime = refresh.__globals__
+        variant = "test_interim_selected_own_model"
+        originals = {
+            "timing": runtime["_run_dirs_from_timing"],
+            "scan": runtime["_run_dirs_from_scan"],
+            "metadata": runtime["_selected_own_model_metadata"],
+            "training": runtime["_selected_own_model_training_seconds"],
+        }
+        runtime["OWN_MODEL_VARIANTS"][variant] = {"label": "Test", "training_time_mode": "checkpoint"}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                run = Path(directory)
+                (run / "build_metrics.json").write_text("{}", encoding="utf-8")
+                runtime["_run_dirs_from_timing"] = lambda _row, _root: [run]
+                runtime["_run_dirs_from_scan"] = lambda _row, _root: [run]
+                runtime["_selected_own_model_metadata"] = lambda _row: [
+                    {"inference_state_dict_mb": 10.0},
+                    {"inference_state_dict_mb": 20.0},
+                    {"inference_state_dict_mb": 30.0},
+                ]
+                runtime["_selected_own_model_training_seconds"] = lambda _row: (90.0, 9.0)
+                row = {"workload": "job_light_ranges", "method_id": "own_model",
+                       "variant_id": variant}
+                self.assertEqual(refresh([row], run), 1)
+                document = json.loads((run / "build_metrics.json").read_text())
+                artifact = document["artifacts"]
+                self.assertEqual(artifact["inference_state_dict_mb"], 20.0)
+                self.assertEqual(artifact["inference_state_dict_mb_std"], 10.0)
+                self.assertEqual(artifact["selected_checkpoint_training_seconds"], 90.0)
+                self.assertEqual(artifact["selected_checkpoint_training_seconds_std"], 9.0)
+                attach([row], run)
+                self.assertEqual(row["_build.size_mb.std"], 10.0)
+                self.assertEqual(row["_build.training_s.std"], 9.0)
+        finally:
+            runtime["_run_dirs_from_timing"] = originals["timing"]
+            runtime["_run_dirs_from_scan"] = originals["scan"]
+            runtime["_selected_own_model_metadata"] = originals["metadata"]
+            runtime["_selected_own_model_training_seconds"] = originals["training"]
             del runtime["OWN_MODEL_VARIANTS"][variant]
 
 
