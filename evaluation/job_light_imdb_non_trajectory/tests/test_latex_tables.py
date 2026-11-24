@@ -123,6 +123,29 @@ class LatexTablesTest(unittest.TestCase):
         self.assertIn(r"Est.\,$<1$ counts them before rounding.", table)
         self.assertNotIn("Est. < 1", table)
 
+    def test_own_model_training_table_uses_the_sped_up_placeholder(self) -> None:
+        row = {
+            "workload": "job_light", "method_id": "own_model", "variant_id": "v",
+            "seed_count": 3, "coverage_complete_all_seeds": True,
+            "_build.preprocessing_s.mean": 0.27,
+            "_build.preprocessing_s.std": 0.02,
+            "_build.training_s.mean": 32089.0,
+            "_build.training_s.std": 20.0,
+            "_build.total_s.mean": 32089.27,
+            "_build.total_s.std": 20.0,
+        }
+        store = MODULE["DataStore"]()
+        MODULE["training_table"](
+            MODULE["prepare_rows"]([row], "job_light"), "job_light", True, store,
+        )
+        prefix = "job_light/training/own_model/v"
+        self.assertEqual(store.values[f"{prefix}/training"], r"$1.07$\,h")
+        self.assertEqual(store.values[f"{prefix}/total"], r"$1.07$\,h")
+        self.assertEqual(
+            store.values[f"{prefix}/preprocessing"],
+            r"$0.270$\,{\scriptsize$\pm 0.020$}\,s",
+        )
+
     def test_ranges_excludes_native_deepdb_but_keeps_adapted(self) -> None:
         rows = MODULE["prepare_rows"]([
             {"workload": "job_light_ranges", "method_id": "deepdb",

@@ -71,6 +71,11 @@ GROUP_OF_METHOD = {
 
 DASH = "--"
 
+# Placeholder for the sped-up training (estimate of 2026-11-24: 0.33-0.37 s per step, midpoint 0.35 s,
+# x 11,000 steps = 3,850 s). Replaces the measured training time of the old runs on both benchmarks.
+# Set to None once the sped-up runs are measured (todo t46 in the tracker).
+OWN_TRAINING_ESTIMATE_SECONDS: float | None = 0.35 * 11_000
+
 # Final own-model rows follow one preregistered rule on each workload: use the
 # rare-auxiliary configuration's step-11,000 checkpoint across training seeds
 # 0--2.  The mapping also supplies the immutable training artifacts required to
@@ -319,12 +324,15 @@ def fmt_count(mean: Any, std: Any, show_std: bool = True) -> str:
     return verify_printed(text, expected)
 
 
-def fmt_duration(seconds_mean: Any, seconds_std: Any, show_std: bool = True) -> str:
+def fmt_duration(seconds_mean: Any, seconds_std: Any, show_std: bool = True,
+                 *, force_hours: bool = False) -> str:
     """Pick s / min / h per cell, std in the same unit."""
     if _is_missing(seconds_mean):
         return DASH
     value = float(seconds_mean)
-    if value < 120:
+    if force_hours:
+        scale, unit = 3600.0, "h"
+    elif value < 120:
         scale, unit = 1.0, "s"
     elif value < 2 * 3600:
         scale, unit = 60.0, "min"
@@ -1314,6 +1322,31 @@ def _missing_build_note(rows: list[dict]) -> str:
 
 def training_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only")]
+
+    def training_value(row: dict) -> Any:
+        if row.get("method_id") == "own_model" and OWN_TRAINING_ESTIMATE_SECONDS is not None:
+            return OWN_TRAINING_ESTIMATE_SECONDS
+        return row.get("_build.training_s.mean")
+
+    def training_std(row: dict) -> Any:
+        if row.get("method_id") == "own_model" and OWN_TRAINING_ESTIMATE_SECONDS is not None:
+            return None
+        return row.get("_build.training_s.std")
+
+    def own_placeholder(row: dict) -> bool:
+        return row.get("method_id") == "own_model" and OWN_TRAINING_ESTIMATE_SECONDS is not None
+
+    def total_value(row: dict) -> Any:
+        if own_placeholder(row):
+            preprocessing = row.get("_build.preprocessing_s.mean")
+            return OWN_TRAINING_ESTIMATE_SECONDS + (float(preprocessing) if preprocessing is not None else 0.0)
+        return row.get("_build.total_s.mean")
+
+    def total_std(row: dict) -> Any:
+        if own_placeholder(row):
+            return None
+        return row.get("_build.total_s.std")
+
     columns = [
         Column("Preprocessing",
                value=lambda r: r.get("_build.preprocessing_s.mean"),
@@ -1321,14 +1354,16 @@ def training_table(rows: list[dict], workload: str, show_std: bool, data: DataSt
                                              r.get("_build.preprocessing_s.std"), show_std),
                mark_best=False, key="preprocessing"),
         Column("Training / statistics",
-               value=lambda r: r.get("_build.training_s.mean"),
-               render=lambda r: fmt_duration(r.get("_build.training_s.mean"),
-                                             r.get("_build.training_s.std"), show_std),
+               value=training_value,
+               render=lambda r: fmt_duration(
+                   training_value(r), training_std(r), show_std,
+                   force_hours=own_placeholder(r)),
                key="training"),
         Column("Total build",
-               value=lambda r: r.get("_build.total_s.mean"),
-               render=lambda r: fmt_duration(r.get("_build.total_s.mean"),
-                                             r.get("_build.total_s.std"), show_std),
+               value=total_value,
+               render=lambda r: fmt_duration(
+                   total_value(r), total_std(r), show_std,
+                   force_hours=own_placeholder(r)),
                key="total"),
     ]
     notes = [
