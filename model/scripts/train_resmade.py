@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from model.src.config import load_simple_yaml, validate_config
+from model.src.runtime_interpreter import maybe_reexec, report_and_check_cuda
 from model.src.data.sample_sources import sample_source_from_config
 
 
@@ -12,6 +14,9 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     config = load_simple_yaml(args.config)
+    # runtime.python: continue under the configured interpreter (see runtime_interpreter).
+    maybe_reexec(config, "model.scripts.train_resmade", sys.argv[1:])
+    report_and_check_cuda(config)
     validate_config(config)
     source = sample_source_from_config(config)
     try:
