@@ -829,7 +829,7 @@ def literal_token_stats(
             PredicateOp.GREATER_THAN,
             PredicateOp.RANGE,
         ):
-            available = _available_literal_token_count(column.domain, op)
+            available = _available_literal_token_count_cached(column.domain, op)
             observed_counts = list(observed_by_op.get(op.value, {}).values())
             column_stats[op.value] = {
                 "unique_literal_tokens_observed": len(observed_counts),
@@ -1152,6 +1152,25 @@ def _literal_key(value: Any, upper: Any) -> str:
     if upper is None:
         return repr(value)
     return f"{value!r}..{upper!r}"
+
+
+_AVAILABLE_LITERAL_TOKEN_COUNTS: dict[tuple[int, str], tuple[tuple[Any, ...], int]] = {}
+
+
+def _available_literal_token_count_cached(domain: tuple[Any, ...], op: PredicateOp) -> int:
+    """``_available_literal_token_count``, computed once per domain object and operator.
+
+    A domain does not change during training, but the count scans it (all values for
+    ranges), and ``literal_token_stats`` runs at every metrics write.
+    """
+
+    key = (id(domain), op.value)
+    cached = _AVAILABLE_LITERAL_TOKEN_COUNTS.get(key)
+    if cached is not None and cached[0] is domain:
+        return cached[1]
+    count = _available_literal_token_count(domain, op)
+    _AVAILABLE_LITERAL_TOKEN_COUNTS[key] = (domain, count)
+    return count
 
 
 def _available_literal_token_count(domain: tuple[Any, ...], op: PredicateOp) -> int:
