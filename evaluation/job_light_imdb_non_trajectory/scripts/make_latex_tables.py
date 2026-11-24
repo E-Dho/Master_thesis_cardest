@@ -24,9 +24,9 @@ a diff of joblight_data.tex alone.  Every formatted number is also parsed back
 and checked against its source value before it is written; generation aborts if
 a value does not round to what is printed.
 
-The best value per column is wrapped in ``\\best{...}`` (bold by default).  Rows
-whose coverage is incomplete, and rows listed as out of competition, are shown
-but never marked as best.
+Bold marks identify the best data-driven result and underlines identify the
+best overall result. Rows whose coverage is incomplete are shown but never
+marked.
 
 Required LaTeX packages: booktabs, adjustbox.
 
@@ -158,9 +158,8 @@ _SUPERSEDED_OWN_MODEL_VARIANTS = {
     "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
 }
 
-# Methods that are shown in the inference table but excluded from its best-value
-# marking (see the table note for the reason).
-INFERENCE_OUT_OF_COMPETITION = {"mscn"}
+DATA_DRIVEN_METHODS = {"own_model", "deepdb", "neurocard", "distjoin"}
+SAMPLING_METHODS = {"foj_sampling"}
 
 _CHECKPOINT_LOAD_STATUSES = {
     "pretrained_checkpoint",
@@ -367,6 +366,7 @@ class DataStore:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
         self.best: set[str] = set()
+        self.under: set[str] = set()
 
     def add(self, key: str, text: str) -> str:
         if not self._KEY_RE.match(key):
@@ -390,8 +390,10 @@ class DataStore:
             "",
         ]
         lines += [f"\\JLdef{{{key}}}{{{self.values[key]}}}" for key in sorted(self.values)]
-        lines += ["", "% Cells marked as best value of their column."]
+        lines += ["", "% Cells marked bold as best data-driven value of their column."]
         lines += [f"\\JLbest{{{key}}}" for key in sorted(self.best)]
+        lines += ["", "% Cells underlined as best overall value of their column."]
+        lines += [f"\\JLunder{{{key}}}" for key in sorted(self.under)]
         return "\n".join(lines) + "\n"
 
 
@@ -414,29 +416,93 @@ class Column:
         self.key = key or re.sub(r"[^A-Za-z0-9]+", "_", header).strip("_").lower()
 
 
-def best_rows(rows: list[dict], column: Column) -> set[int]:
-    candidates = []
-    for index, row in enumerate(rows):
-        if not row["_eligible"]:
-            continue
-        value = column.value(row)
-        if _is_missing(value):
-            continue
-        candidates.append((float(value), index))
-    if not candidates or not column.mark_best:
+def _printed_cell_value(column: Column, row: dict) -> float | None:
+    """Primary displayed number used for mark comparisons.
+
+    Marks must follow the value a reader sees, not hidden precision from the
+    aggregate.  The first number is the displayed mean; any deviation follows.
+    """
+    text = column.render(row)
+    if text == DASH:
+        return None
+    numbers = parse_printed_numbers(text)
+    return numbers[0][0] if numbers else None
+
+
+def marked_rows(rows: list[dict], column: Column,
+                eligible_methods: set[str]) -> set[int]:
+    """Return tied best rows at printed precision for distinct eligible methods."""
+    if not column.mark_best:
         return set()
-    target = min(v for v, _ in candidates) if column.lower_is_better else max(
-        v for v, _ in candidates
+    by_method: dict[str, list[tuple[int, float]]] = {}
+    for index, row in enumerate(rows):
+        method = row.get("method_id")
+        if (not row.get("_eligible") or method not in eligible_methods
+                or method in SAMPLING_METHODS):
+            continue
+        value = _printed_cell_value(column, row)
+        if value is not None:
+            by_method.setdefault(method, []).append((index, value))
+    if len(by_method) < 2:
+        return set()
+    method_best = {
+        method: (min(value for _, value in entries) if column.lower_is_better
+                 else max(value for _, value in entries))
+        for method, entries in by_method.items()
+    }
+    target = (min(method_best.values()) if column.lower_is_better
+              else max(method_best.values()))
+    return {
+        index
+        for method, entries in by_method.items()
+        if method_best[method] == target
+        for index, value in entries
+        if value == target
+    }
+
+
+def best_rows(rows: list[dict], column: Column) -> set[int]:
+    """Backward-compatible alias for all non-sampling methods."""
+    return marked_rows(
+        rows, column,
+        {row.get("method_id") for row in rows if row.get("method_id") not in SAMPLING_METHODS},
     )
-    tolerance = 1e-12 * max(1.0, abs(target))
-    return {i for v, i in candidates if abs(v - target) <= tolerance}
+
+
+def column_marks(rows: list[dict], columns: list[Column]) -> list[tuple[set[int], set[int]]]:
+    """Bold data-driven and underline overall marks for ordinary tables."""
+    overall_methods = {
+        row.get("method_id") for row in rows if row.get("method_id") not in SAMPLING_METHODS
+    }
+    return [
+        (marked_rows(rows, column, DATA_DRIVEN_METHODS),
+         marked_rows(rows, column, overall_methods))
+        for column in columns
+    ]
+
+
+def marks_note(prefix: str, marks: list[tuple[set[int], set[int]]], rows: list[dict]) -> str:
+    has_bold = any(bold for bold, _ in marks)
+    has_under = any(under for _, under in marks)
+    descriptions = []
+    if has_bold:
+        descriptions.append("bold best data-driven method")
+    if has_under:
+        descriptions.append("underline best overall")
+    if not descriptions:
+        return ""
+    suffix = "; sampling not marked." if any(
+        row.get("method_id") in SAMPLING_METHODS for row in rows
+    ) else "."
+    return f"{prefix}: " + ", ".join(descriptions) + suffix
 
 
 def render_table(rows: list[dict], columns: list[Column], *, caption: str,
                  label: str, data: DataStore, key_prefix: str,
                  header_prefix: str = "", notes: Iterable[str] = (),
-                 col_spec: str | None = None) -> str:
-    best = [best_rows(rows, column) for column in columns]
+                 col_spec: str | None = None,
+                 marks: list[tuple[set[int], set[int]]] | None = None) -> str:
+    marks = column_marks(rows, columns) if marks is None else marks
     keys = [column.key for column in columns]
     if len(set(keys)) != len(keys):
         raise ValueError(f"duplicate column keys in {key_prefix}: {keys}")
@@ -471,8 +537,11 @@ def render_table(rows: list[dict], columns: list[Column], *, caption: str,
             text = column.render(row)
             key = f"{key_prefix}/{row_key(row)}/{column.key}"
             cells.append(data.cell(key, text))
-            if index in best[column_index] and text != DASH:
-                data.best.add(key)
+            if text != DASH:
+                if index in marks[column_index][0]:
+                    data.best.add(key)
+                if index in marks[column_index][1]:
+                    data.under.add(key)
         lines.append(f"    {row['_label']} & " + " & ".join(cells) + r" \\")
     lines += [
         r"    \bottomrule",
@@ -601,7 +670,7 @@ def coverage_note(rows: list[dict], data: DataStore) -> str:
         parts.append(f"{row_label(row)} answers only {share} of the queries")
     return (
         r"$^{\dagger}$" + "; ".join(parts)
-        + "; not considered for bold."
+        + "; not considered for marks."
     )
 
 
@@ -619,8 +688,6 @@ def own_model_single_run_note(rows: list[dict]) -> str:
 # --------------------------------------------------------------------------- #
 # Q-error tables
 # --------------------------------------------------------------------------- #
-BEST_NOTE = r"Bold: best per column."
-QERROR_BEST_NOTE = r"Bold: best per column (Est.\,$<1$ not marked)."
 
 
 def _sub_one_value(row: dict[str, Any]) -> Any:
@@ -670,10 +737,11 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
         if kind == "Smoothed"
         else "Unclamped estimates."
     )
+    marks = column_marks(rows, columns)
     notes = [
         description,
         seeds_note(rows),
-        QERROR_BEST_NOTE,
+        marks_note(r"Per column (Est.\,$<1$ not marked)", marks, rows),
         own_model_single_run_note(rows),
         (r"Est.\,$<1$: estimates below one."
          if has_sub1 else ""),
@@ -694,6 +762,7 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
         header_prefix=header_prefix,
         notes=notes,
         col_spec="l" + "r" * 5 + ("r" if has_sub1 else ""),
+        marks=marks,
     )
 
 
@@ -711,14 +780,6 @@ def _cpu_profile(row: dict) -> str | None:
     if not _is_missing(row.get("timing.cpu_postgres_2core.mean_ms.mean")):
         return "cpu_postgres_2core"
     return None
-
-
-def _names(value: Any) -> list[str]:
-    if isinstance(value, str):
-        return [part.strip() for part in value.split(";") if part.strip()]
-    if isinstance(value, (list, tuple)):
-        return [str(part) for part in value if part]
-    return []
 
 
 def _append_footnote_marker(label: str, marker: str) -> str:
@@ -860,43 +921,48 @@ def attach_configured_timing_profiles(results: list[dict], comparison_path: Path
         row["_configured_timing_profiles"] = profiles
 
 
-def distjoin_cpu_consistency_note(rows: list[dict], workload: str, data: DataStore) -> str:
-    """Describe the observed CPU-vs-accuracy drift from timing summaries.
+def inference_marks(rows: list[dict], columns: list[Column]) -> list[tuple[set[int], set[int]]]:
+    """Mark timing statistics across CPU and GPU, one best device per method."""
+    if len(columns) != 8:
+        raise ValueError("inference marking expects four CPU and four GPU columns")
+    marks = [(set(), set()) for _ in columns]
+    overall_methods = {
+        row.get("method_id") for row in rows if row.get("method_id") not in SAMPLING_METHODS
+    }
 
-    DistJoin's CUDA-AMP accuracy evaluation can round differently before the
-    estimator's final cardinality ceiling. The per-seed medians and maxima
-    must come from accepted timing summaries, not a hand-maintained note.
-    """
-    bounds: list[tuple[dict, float, float]] = []
-    for row in rows:
-        if row.get("method_id") != "distjoin":
-            continue
-        profile = (row.get("standardized_timing") or {}).get("cpu_1core") or {}
-        checks = profile.get("estimate_consistency") or []
-        per_workload = [check.get("by_workload", {}).get(workload, {}) for check in checks]
-        medians = [float(statistic["median_relative_difference"]) for statistic in per_workload
-                   if statistic.get("median_relative_difference") is not None]
-        maxima = [float(statistic["max_relative_difference"]) for statistic in per_workload
-                  if statistic.get("max_relative_difference") is not None]
-        if medians and maxima:
-            bounds.append((row, statistics.median(medians), max(maxima)))
-    if not bounds:
-        return ""
-    descriptions = []
-    for row, median, maximum in bounds:
-        median_value = data.inline(
-            f"{workload}/inference/{row_key(row)}/cpu_accuracy_median_relative_difference",
-            verify_printed(f"${fmt_number(median)}$", [median]),
-        )
-        maximum_value = data.inline(
-            f"{workload}/inference/{row_key(row)}/cpu_accuracy_max_relative_difference",
-            verify_printed(f"${fmt_number(maximum)}$", [maximum]),
-        )
-        descriptions.append(
-            f"{row_label(row)}: GPU runs use mixed precision; CPU estimates differ from them "
-            f"by a median of {median_value} (max {maximum_value}); q-errors come from the GPU runs"
-        )
-    return "; ".join(descriptions) + "."
+    def mark_statistic(indices: tuple[int, int], eligible_methods: set[str]) -> set[tuple[int, int]]:
+        by_method: dict[str, list[tuple[int, int, float]]] = {}
+        for row_index, row in enumerate(rows):
+            method = row.get("method_id")
+            if (not row.get("_eligible") or method not in eligible_methods
+                    or method in SAMPLING_METHODS):
+                continue
+            for column_index in indices:
+                value = _printed_cell_value(columns[column_index], row)
+                if value is not None:
+                    by_method.setdefault(method, []).append((row_index, column_index, value))
+        if len(by_method) < 2:
+            return set()
+        method_best = {
+            method: min(value for _, _, value in entries)
+            for method, entries in by_method.items()
+        }
+        target = min(method_best.values())
+        return {
+            (row_index, column_index)
+            for method, entries in by_method.items()
+            if method_best[method] == target
+            for row_index, column_index, value in entries
+            if value == target
+        }
+
+    for metric_index in range(4):
+        indices = (metric_index, metric_index + 4)
+        for row_index, column_index in mark_statistic(indices, DATA_DRIVEN_METHODS):
+            marks[column_index][0].add(row_index)
+        for row_index, column_index in mark_statistic(indices, overall_methods):
+            marks[column_index][1].add(row_index)
+    return marks
 
 
 def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
@@ -909,9 +975,6 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
             row["_label"] = _append_footnote_marker(row["_label"], r"\ddagger")
         elif missing_profiles:
             row["_label"] = _append_footnote_marker(row["_label"], r"\P")
-        if row["method_id"] in INFERENCE_OUT_OF_COMPETITION:
-            row["_eligible"] = False
-            row["_label"] = _append_footnote_marker(row["_label"], r"\circ")
     metrics = [("mean_ms", "Mean"), ("p50_ms", "p50"), ("p95_ms", "p95"), ("p99_ms", "p99")]
     columns = []
     for metric, header in metrics:
@@ -939,27 +1002,12 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
         r"& \multicolumn{4}{c}{CPU, 1 core (ms)} & \multicolumn{4}{c}{GPU, single query (ms)} \\"
         r" \cmidrule(lr){2-5} \cmidrule(lr){6-9}"
     )
-    hardware = sorted({
-        name
-        for row in rows
-        for key in ("timing.cpu_1core.cpu_models", "timing.gpu_single_query.gpu_names")
-        for name in _names(row.get(key))
-    })
-    hardware_text = (
-        data.inline(f"{workload}/inference/hardware", ", ".join(hardware)) if hardware else ""
-    )
+    marks = inference_marks(rows, columns)
     notes = [
-        "Latency per query" + (f" ({hardware_text})" if hardware else "") + ".",
+        "Latency per query.",
         seeds_note(rows),
-        "--: no implementation for this device.",
+        marks_note("Per statistic across both devices", marks, rows),
     ]
-    out_of_competition = [r for r in rows if r["method_id"] in INFERENCE_OUT_OF_COMPETITION]
-    if out_of_competition:
-        names = ", ".join(sorted({row_label(r) for r in out_of_competition}))
-        notes.append(rf"$^{{\circ}}${names}: query-driven, out of competition. "
-                     r"Bold: best per column among the other methods.")
-    else:
-        notes.append(BEST_NOTE)
     notes.append(own_model_single_run_note(rows))
     if any(_cpu_profile(r) == "cpu_postgres_2core" for r in rows):
         notes.append(r"$^{\ast}$Client and PostgreSQL backend on one core each.")
@@ -989,7 +1037,6 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
             notes.append(
                 rf"$^{{\P}}${row_label(row)} is missing its standardized {profiles} timing profile{extra}."
             )
-    notes.append(distjoin_cpu_consistency_note(rows, workload, data))
     notes.append(coverage_note(rows, data))
     workload_slug = workload.replace("_", "-")
     return render_table(
@@ -1001,6 +1048,7 @@ def inference_table(rows: list[dict], workload: str, show_std: bool, data: DataS
         header_prefix=header_prefix,
         notes=notes,
         col_spec="l" + "r" * 8,
+        marks=marks,
     )
 
 
@@ -1366,16 +1414,14 @@ def training_table(rows: list[dict], workload: str, show_std: bool, data: DataSt
                    force_hours=own_placeholder(r)),
                key="total"),
     ]
+    marks = column_marks(rows, columns)
     notes = [
         "Wall-clock time.",
         seeds_note(rows),
-        "Bold: best training and total time.",
+        marks_note("For training and total time", marks, rows),
         own_model_single_run_note(rows),
         (r"\OwnModelName{}: training up to step 11,000."
          if any(r.get("_build.training_record_is_selected_checkpoint") for r in rows) else ""),
-        ("-- denotes a pretrained/reused checkpoint load rather than a training/statistics time."
-         if any(r.get("_build.checkpoint_load_only") and not r.get("_build.training_record_is_selected_checkpoint")
-                for r in rows) else ""),
         ("FOJ sampling: cumulative reservoir draw time."
          if any(r.get("_build.foj_cumulative_sampling") for r in rows) else ""),
         coverage_note(rows, data),
@@ -1389,6 +1435,7 @@ def training_table(rows: list[dict], workload: str, show_std: bool, data: DataSt
         data=data,
         key_prefix=f"{workload}/training",
         notes=notes,
+        marks=marks,
     )
 
 
@@ -1405,11 +1452,12 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool, data: Data
                                          r.get("_build.size_mb.std"), show_std=show_std),
                key="serialized_mb"),
     ]
+    marks = column_marks(rows, columns)
     notes = [
-        r"MB = $10^6$ bytes; --: not applicable.",
+        r"MB = $10^6$ bytes.",
         (r"\OwnModelName{}: inference-only state dict."
          if any(r.get("_build.size_is_inference_state_dict") for r in rows) else ""),
-        BEST_NOTE,
+        marks_note("For parameters and size", marks, rows),
         own_model_single_run_note(rows),
         coverage_note(rows, data),
         _missing_build_note(rows),
@@ -1422,6 +1470,7 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool, data: Data
         data=data,
         key_prefix=f"{workload}/model_size",
         notes=notes,
+        marks=marks,
     )
 
 
@@ -1434,16 +1483,18 @@ PREAMBLE = r"""% Generated by make_latex_tables.py -- macros used by the JOB-lig
 \providecommand{\best}[1]{{\boldmath\bfseries #1}}
 \providecommand{\OwnModelName}{Own model}
 \makeatletter
-% \JLdef{key}{value} stores a value; \JLbest{key} marks that cell as best.
+% \JLdef{key}{value} stores a value; \JLbest{key} bolds data-driven best cells.
 \providecommand{\JLdef}[2]{\@namedef{JL@v@#1}{#2}}
 \providecommand{\JLbest}[1]{\@namedef{JL@b@#1}{}}
-% \JLval{key} prints a value; \JLcell{key} prints it and applies \best if marked.
+\providecommand{\JLunder}[1]{\@namedef{JL@u@#1}{}}
+\providecommand{\bestall}[1]{\underline{#1}}
+% \JLval{key} prints a value; \JLcell{key} applies underline and/or \best.
 \providecommand{\JLval}[1]{%
   \@ifundefined{JL@v@#1}%
     {\textbf{??}\PackageWarning{joblight-tables}{No value for key #1}}%
     {\@nameuse{JL@v@#1}}}
-\providecommand{\JLcell}[1]{%
-  \@ifundefined{JL@b@#1}{\JLval{#1}}{\best{\JLval{#1}}}}
+\providecommand{\JLboldcell}[1]{\@ifundefined{JL@b@#1}{\JLval{#1}}{\best{\JLval{#1}}}}
+\providecommand{\JLcell}[1]{\@ifundefined{JL@u@#1}{\JLboldcell{#1}}{\bestall{\JLboldcell{#1}}}}
 \makeatother
 \input{\JobLightTableDir/joblight_data}
 """

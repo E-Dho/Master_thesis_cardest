@@ -119,7 +119,8 @@ class LatexTablesTest(unittest.TestCase):
             MODULE["prepare_rows"]([row], "job_light"), "job_light",
             "raw_q_error", False, MODULE["DataStore"](),
         )
-        self.assertIn(r"Bold: best per column (Est.\,$<1$ not marked).", table)
+        self.assertNotIn("Est. < 1", table)
+        self.assertNotIn("Bold: best per column", table)
         self.assertIn(r"Est.\,$<1$ counts them before rounding.", table)
         self.assertNotIn("Est. < 1", table)
 
@@ -216,20 +217,21 @@ class LatexTablesTest(unittest.TestCase):
             "Median", lambda row: row["v"], lambda row: MODULE["fmt_cell"](row["v"]), key="p50"
         )
         rows = [
-            {"method_id": "a", "variant_id": "x", "_eligible": True, "_label": "A", "v": 2.0},
-            {"method_id": "b", "variant_id": "y", "_eligible": True, "_label": "B", "v": 1.5},
+            {"method_id": "deepdb", "variant_id": "x", "_eligible": True, "_label": "A", "v": 2.0},
+            {"method_id": "neurocard", "variant_id": "y", "_eligible": True, "_label": "B", "v": 1.5},
         ]
         table = MODULE["render_table"](
             rows, [column], caption="T", label="tab:t", data=store, key_prefix="w/t"
         )
-        self.assertIn(r"\JLcell{w/t/a/x/p50}", table)
+        self.assertIn(r"\JLcell{w/t/deepdb/x/p50}", table)
         self.assertNotIn("1.50", table)
-        self.assertEqual(store.values["w/t/b/y/p50"], "$1.50$")
-        self.assertEqual(store.best, {"w/t/b/y/p50"})
+        self.assertEqual(store.values["w/t/neurocard/y/p50"], "$1.50$")
+        self.assertEqual(store.best, {"w/t/neurocard/y/p50"})
+        self.assertEqual(store.under, {"w/t/neurocard/y/p50"})
         with self.assertRaises(ValueError):
-            store.add("w/t/b/y/p50", "$1.60$")
+            store.add("w/t/neurocard/y/p50", "$1.60$")
 
-    def test_out_of_competition_rows_are_never_marked_best(self) -> None:
+    def test_mscn_can_be_underlined_but_not_bold(self) -> None:
         store = MODULE["DataStore"]()
         base = {
             "workload": "job_light", "seed_count": 3, "coverage_complete_all_seeds": True,
@@ -239,11 +241,13 @@ class LatexTablesTest(unittest.TestCase):
         rows = MODULE["prepare_rows"]([
             dict(base, method_id="mscn", variant_id="m", **{"timing.cpu_1core.mean_ms.mean": 0.7}),
             dict(base, method_id="deepdb", variant_id="d", **{"timing.cpu_1core.mean_ms.mean": 9.3}),
+            dict(base, method_id="neurocard", variant_id="n", **{"timing.cpu_1core.mean_ms.mean": 12.0}),
         ], "job_light")
         table = MODULE["inference_table"](rows, "job_light", True, store)
-        self.assertIn(r"MSCN$^{\circ}$", table)
-        self.assertIn("job_light/inference/deepdb/d/cpu_mean_ms", store.best)
-        self.assertNotIn("job_light/inference/mscn/m/cpu_mean_ms", store.best)
+        self.assertIn("MSCN &", table)
+        self.assertIn("job_light/inference/deepdb/d/gpu_mean_ms", store.best)
+        self.assertNotIn("job_light/inference/mscn/m/gpu_mean_ms", store.best)
+        self.assertIn("job_light/inference/mscn/m/cpu_mean_ms", store.under)
 
     def test_cpu_only_declared_profile_is_not_marked_missing(self) -> None:
         row = {
@@ -254,9 +258,10 @@ class LatexTablesTest(unittest.TestCase):
             "timing.gpu_single_query.mean_ms.mean": None,
         }
         rows = MODULE["prepare_rows"]([row], "job_light")
-        table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
+        store = MODULE["DataStore"]()
+        table = MODULE["inference_table"](rows, "job_light", False, store)
         self.assertNotIn(r"$^{\P}$", table)
-        self.assertIn("no implementation for this device", table)
+        self.assertNotIn("no implementation for this device", table)
 
     def test_declared_but_unmeasured_standardized_profile_is_marked(self) -> None:
         row = {
@@ -267,11 +272,12 @@ class LatexTablesTest(unittest.TestCase):
             "timing.gpu_single_query.mean_ms.mean": 1.0,
         }
         rows = MODULE["prepare_rows"]([row], "job_light")
-        table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
+        store = MODULE["DataStore"]()
+        table = MODULE["inference_table"](rows, "job_light", False, store)
         self.assertIn(r"$^{\P}$", table)
         self.assertIn("missing its standardized CPU timing profile", table)
 
-    def test_distjoin_cpu_consistency_note_uses_timing_summary_bound(self) -> None:
+    def test_distjoin_cpu_consistency_note_is_not_rendered(self) -> None:
         row = {
             "workload": "job_light", "method_id": "distjoin", "variant_id": "published",
             "coverage_complete_all_seeds": True, "seed_count": 3,
@@ -294,11 +300,53 @@ class LatexTablesTest(unittest.TestCase):
             },
         }
         rows = MODULE["prepare_rows"]([row], "job_light")
-        table = MODULE["inference_table"](rows, "job_light", False, MODULE["DataStore"]())
-        self.assertIn("GPU runs use mixed precision", table)
-        self.assertIn("q-errors come from the GPU runs", table)
-        self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_median_relative_difference}", table)
-        self.assertIn(r"\JLval{job_light/inference/distjoin/published/cpu_accuracy_max_relative_difference}", table)
+        store = MODULE["DataStore"]()
+        table = MODULE["inference_table"](rows, "job_light", False, store)
+        self.assertNotIn("GPU runs use mixed precision", table)
+        self.assertNotIn("q-errors come from the GPU runs", table)
+        self.assertFalse(any("cpu_accuracy_" in key for key in store.values))
+
+    def test_marking_requires_two_distinct_data_driven_methods(self) -> None:
+        column = MODULE["Column"]("Metric", lambda row: row["v"], lambda row: MODULE["fmt_cell"](row["v"]))
+        rows = [{"method_id": "own_model", "_eligible": True, "v": 1.0}]
+        self.assertEqual(MODULE["marked_rows"](rows, column, MODULE["DATA_DRIVEN_METHODS"]), set())
+
+    def test_sampling_rows_are_never_marked(self) -> None:
+        column = MODULE["Column"]("Metric", lambda row: row["v"], lambda row: MODULE["fmt_cell"](row["v"]))
+        rows = [
+            {"method_id": "own_model", "_eligible": True, "v": 2.0},
+            {"method_id": "neurocard", "_eligible": True, "v": 3.0},
+            {"method_id": "foj_sampling", "_eligible": True, "v": 0.1},
+        ]
+        self.assertEqual(MODULE["marked_rows"](rows, column, MODULE["DATA_DRIVEN_METHODS"]), {0})
+
+    def test_inference_cpu_gpu_of_one_method_counts_once(self) -> None:
+        columns = [
+            MODULE["Column"](f"cpu_{index}", lambda row, i=index: row["cpu"][i],
+                             lambda row, i=index: MODULE["fmt_cell"](row["cpu"][i]))
+            for index in range(4)
+        ] + [
+            MODULE["Column"](f"gpu_{index}", lambda row, i=index: row["gpu"][i],
+                             lambda row, i=index: MODULE["fmt_cell"](row["gpu"][i]))
+            for index in range(4)
+        ]
+        rows = [{"method_id": "own_model", "_eligible": True,
+                 "cpu": [10.0] * 4, "gpu": [1.0] * 4}]
+        self.assertEqual(MODULE["inference_marks"](rows, columns), [(set(), set())] * 8)
+
+    def test_ties_and_dagger_rows_follow_marking_rules(self) -> None:
+        column = MODULE["Column"]("Metric", lambda row: row["v"], lambda row: MODULE["fmt_cell"](row["v"]))
+        tied = [
+            {"method_id": "own_model", "_eligible": True, "v": 1.0},
+            {"method_id": "deepdb", "_eligible": True, "v": 1.0},
+        ]
+        self.assertEqual(MODULE["marked_rows"](tied, column, MODULE["DATA_DRIVEN_METHODS"]), {0, 1})
+        partial = [
+            {"method_id": "own_model", "_eligible": False, "v": 0.1},
+            {"method_id": "deepdb", "_eligible": True, "v": 1.0},
+            {"method_id": "neurocard", "_eligible": True, "v": 2.0},
+        ]
+        self.assertEqual(MODULE["marked_rows"](partial, column, MODULE["DATA_DRIVEN_METHODS"]), {1})
 
     def test_missing_size_does_not_clear_selected_training_time(self) -> None:
         attach = MODULE["attach_build_metrics"]
