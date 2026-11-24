@@ -4,15 +4,17 @@
 \providecommand{\best}[1]{{\boldmath\bfseries #1}}
 \providecommand{\OwnModelName}{Own model}
 \makeatletter
-% \JLdef{key}{value} stores a value; \JLbest{key} marks that cell as best.
+% \JLdef{key}{value} stores a value; \JLbest{key} bolds data-driven best cells.
 \providecommand{\JLdef}[2]{\@namedef{JL@v@#1}{#2}}
 \providecommand{\JLbest}[1]{\@namedef{JL@b@#1}{}}
-% \JLval{key} prints a value; \JLcell{key} prints it and applies \best if marked.
+\providecommand{\JLunder}[1]{\@namedef{JL@u@#1}{}}
+\providecommand{\bestall}[1]{\underline{#1}}
+% \JLval{key} prints a value; \JLcell{key} applies underline and/or \best.
 \providecommand{\JLval}[1]{%
   \@ifundefined{JL@v@#1}%
     {\textbf{??}\PackageWarning{joblight-tables}{No value for key #1}}%
     {\@nameuse{JL@v@#1}}}
-\providecommand{\JLcell}[1]{%
-  \@ifundefined{JL@b@#1}{\JLval{#1}}{\best{\JLval{#1}}}}
+\providecommand{\JLboldcell}[1]{\@ifundefined{JL@b@#1}{\JLval{#1}}{\best{\JLval{#1}}}}
+\providecommand{\JLcell}[1]{\@ifundefined{JL@u@#1}{\JLboldcell{#1}}{\bestall{\JLboldcell{#1}}}}
 \makeatother
 \input{\JobLightTableDir/joblight_data}
