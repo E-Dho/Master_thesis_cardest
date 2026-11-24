@@ -64,6 +64,17 @@ def _strip(row: dict) -> dict:
                           "checkpoint_path", "best_checkpoint_path")}
 
 
+def _reset_global_random_state(seed: int) -> None:
+    import random
+
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
 def _identity(args, config_path: str) -> dict:
     import torch
 
@@ -75,6 +86,11 @@ def _identity(args, config_path: str) -> dict:
     for label, workers in (("serial", 0), ("prefetch", args.identity_workers)):
         config = load_simple_yaml(config_path)
         validate_config(config)
+        # Both runs start from the same global random state: building the source
+        # (NeuroCard's tables and sampler, rare-support discovery) may draw from
+        # it, and the second build would otherwise see the state the first run
+        # left behind.
+        _reset_global_random_state(int(config["training"].get("seed", 0)))
         source = sample_source_from_config(config)
         directory = args.output_directory / f"identity_{label}"
         config["training"].update({
