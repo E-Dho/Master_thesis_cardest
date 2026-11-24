@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -489,245 +489,314 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         metadata=metadata, predicate_vocabularies=vocabularies
     )
     phase_timing_history: list[dict[str, float]] = []
+    # training.prefetch_workers > 0: a sampler process draws the main batches in the
+    # training loop's order and worker processes prepare the CPU part of the coming
+    # steps (contexts, weights, rare batch, token IDs) while the GPU trains. Every
+    # other random stream of a step is seeded by its step number, so the training
+    # is the same as without workers (tests; see _StepPipeline).
+    prefetch_workers = int(training.get("prefetch_workers", 0) or 0)
+    worker_phase_timing_history: list[dict[str, float]] = []
+    pipeline: _StepPipeline | None = None
+    total_steps = int(training["epochs"]) * int(training["steps_per_epoch"])
+    if prefetch_workers > 0 and total_steps > 0:
+        if bool(config.get("importance_sampling", {}).get("enabled", False)):
+            raise ValueError(
+                "training.prefetch_workers needs importance_sampling.enabled: false "
+                "(its context statistics update the sample source during the step)"
+            )
+        if validation_enabled and _has_buffered_source(sample_source):
+            raise ValueError(
+                "training.prefetch_workers with a live sampler needs validation.enabled: false "
+                "(validation draws from the same sampler stream as training)"
+            )
+
+        def prepare(step_batch: FullJoinBatch, step: int) -> PreparedStepInputs:
+            return prepare_step_inputs(
+                step_batch,
+                metadata=metadata,
+                vocabularies=vocabularies,
+                config=config,
+                context_generator=context_generator,
+                sample_source=sample_source,
+                global_step=step,
+                compute_expensive_diagnostics=bool(
+                    metrics_interval and (step + 1) % metrics_interval == 0
+                ),
+            )
+
+        pipeline = _StepPipeline(
+            sample_source=sample_source,
+            prepare=prepare,
+            metadata=metadata,
+            batch_size=batch_size,
+            seed=seed,
+            total_steps=total_steps,
+            workers=prefetch_workers,
+            depth=int(training.get("prefetch_factor", 2) or 2),
+        )
     training_start = perf_counter()
     if device == "cuda" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    for epoch in range(int(training["epochs"])):
-        for step_in_epoch in range(int(training["steps_per_epoch"])):
-            batch_started = perf_counter()
-            batch = sample_source.batches(batch_size, seed=seed + global_step)
-            batch_sampling_seconds = perf_counter() - batch_started
-            fresh_sampler_rows += int(getattr(batch, "fresh_rows_drawn", 0))
-            fixture_rows_reused += int(getattr(batch, "fixture_rows_reused", 0))
-            diagnostic_step = bool(metrics_interval and (global_step + 1) % metrics_interval == 0)
-            step_result = _train_one_batch(
-                model,
-                optimizer,
-                batch,
-                metadata,
-                vocabularies,
-                config,
-                device,
-                sample_source=sample_source,
-                global_step=global_step,
-                context_generator=context_generator,
-                compute_expensive_diagnostics=diagnostic_step,
-                batch_sampling_seconds=batch_sampling_seconds,
-            )
-            phase_timing_history.append(step_result.phase_timings)
-            loss = step_result.loss
-            last_loss = loss
-            last_uniform_loss = step_result.uniform_loss
-            last_auxiliary_loss_unscaled = step_result.auxiliary_loss_unscaled
-            last_auxiliary_loss_scaled = step_result.auxiliary_loss_scaled
-            if first_loss is None:
-                first_loss = loss
-                first_uniform_loss = step_result.uniform_loss
-                first_auxiliary_loss_unscaled = step_result.auxiliary_loss_unscaled
-                first_auxiliary_loss_scaled = step_result.auxiliary_loss_scaled
-            global_step += 1
-            for fanout_name, fanout_ess in step_result.fanout_effective_sample_size.items():
-                fanout_ess_values[fanout_name].append(float(fanout_ess))
-            for fanout_name, fanout_ess in step_result.fanout_inv_only_effective_sample_size.items():
-                fanout_inv_only_ess_values[fanout_name].append(float(fanout_ess))
-            last_original_column_losses = step_result.original_column_losses
-            last_factor_losses = step_result.factor_losses
-            total_generated_contexts += step_result.generated_contexts
-            total_rejected_contexts += step_result.rejected_unsatisfied_contexts
-            total_indicator_contradictions += step_result.included_indicator_contradictions
-            _merge_coverage(aggregate_token_coverage, step_result.predicate_token_coverage)
-            _merge_literal_occurrences(aggregate_literal_occurrences, step_result.literal_token_occurrences)
-            if step_result.predicate_embedding_gradient_coverage:
-                last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
-            if step_result.predicate_context_diagnostics:
-                last_context_diagnostics = step_result.predicate_context_diagnostics
-            last_rare_auxiliary_stats = step_result.rare_auxiliary or {"enabled": False}
-            if last_rare_auxiliary_stats.get("enabled"):
-                total_rare_auxiliary_rows += int(
-                    last_rare_auxiliary_stats.get("rare_rows_sampled", 0)
-                )
-                total_rare_auxiliary_rejected_contexts += int(
-                    last_rare_auxiliary_stats.get("auxiliary_contexts_rejected", 0)
-                )
-                total_rare_auxiliary_indicator_contradictions += int(
-                    last_rare_auxiliary_stats.get("included_indicator_contradictions", 0)
-                )
-                _merge_flat_counts(
-                    aggregate_rare_auxiliary_selected_strata,
-                    last_rare_auxiliary_stats.get("selected_stratum_counts", {}),
-                )
-                _merge_flat_counts(
-                    aggregate_rare_auxiliary_forced_ops,
-                    last_rare_auxiliary_stats.get(
-                        "forced_auxiliary_predicate_operator_counts", {}
-                    ),
-                )
-                for stratum_id, stats in last_rare_auxiliary_stats.get("per_stratum", {}).items():
-                    aggregate_rare_auxiliary_contexts_by_stratum[stratum_id] = (
-                        int(aggregate_rare_auxiliary_contexts_by_stratum.get(stratum_id, 0))
-                        + int(stats.get("rare_context_count", 0))
-                    )
-                    aggregate_rare_auxiliary_exact_support_events[stratum_id] = (
-                        int(aggregate_rare_auxiliary_exact_support_events.get(stratum_id, 0))
-                        + int(stats.get("generated_exact_support_event_count", 0))
-                    )
-                    aggregate_rare_auxiliary_downstream_eligible[stratum_id] = (
-                        int(aggregate_rare_auxiliary_downstream_eligible.get(stratum_id, 0))
-                        + int(stats.get("downstream_eligible_head_context_count", 0))
-                    )
-                total_rare_auxiliary_contexts += int(
-                    last_rare_auxiliary_stats.get("rare_context_count", 0)
-                )
-                for column_name, diagnostics in last_rare_auxiliary_stats.get(
-                    "auxiliary_column_diagnostics", {}
-                ).items():
-                    aggregate_rare_auxiliary_column_stats.setdefault(
-                        column_name,
-                        _RunningAuxiliaryColumnStats(),
-                    ).update(diagnostics)
-                _merge_flat_counts(
-                    aggregate_rare_auxiliary_fanout_signatures,
-                    last_rare_auxiliary_stats.get(
-                        "common_auxiliary_fanout_token_signatures", {}
-                    ),
-                )
-            interval = int(training.get("checkpoint_interval_steps", 0) or 0)
-            if interval and global_step % interval == 0:
-                _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config,
-                                 static_payload=checkpoint_static_payload)
-            if metrics_interval and global_step % metrics_interval == 0:
-                metrics_payload = {
-                    "step": global_step,
-                    "epoch": epoch,
-                    "step_in_epoch": step_in_epoch,
-                    "nominal_rows_seen": global_step * batch_size,
-                    "total_sampled_tuples": global_step * batch_size,
-                    "generated_predicate_contexts": total_generated_contexts,
-                    "rejected_unsatisfied_contexts": total_rejected_contexts,
-                    "included_indicator_contradictions": total_indicator_contradictions,
-                    "fresh_sampler_rows": fresh_sampler_rows,
-                    "fixture_rows_reused": fixture_rows_reused,
-                    "loss": loss,
-                    "uniform_loss": step_result.uniform_loss,
-                    "auxiliary_loss_unscaled": step_result.auxiliary_loss_unscaled,
-                    "auxiliary_loss_scaled": step_result.auxiliary_loss_scaled,
-                    "fanout_effective_sample_size": step_result.fanout_effective_sample_size,
-                    "fanout_inv_only_effective_sample_size": (
-                        step_result.fanout_inv_only_effective_sample_size
-                    ),
-                    "importance_weight_stats": step_result.importance_weight_stats,
-                    "original_column_losses": step_result.original_column_losses,
-                    "factor_losses": step_result.factor_losses,
-                    "predicate_token_coverage": aggregate_token_coverage,
-                    "predicate_literal_token_stats": literal_token_stats(
-                        aggregate_literal_occurrences,
-                        metadata,
-                    ),
-                    "predicate_context_diagnostics": last_context_diagnostics,
-                    "predicate_embedding_gradient_coverage": last_gradient_coverage,
-                    "rare_auxiliary": last_rare_auxiliary_stats,
-                    "phase_timings": step_result.phase_timings,
-                    "phase_timing_summary": _phase_summary(phase_timing_history),
-                }
-                early_stopping_monitor_value: float | None = None
-                if validation_enabled and global_step % validation_interval == 0:
-                    validation_metrics = _run_validation(
+    try:
+        for epoch in range(int(training["epochs"])):
+            for step_in_epoch in range(int(training["steps_per_epoch"])):
+                diagnostic_step = bool(metrics_interval and (global_step + 1) % metrics_interval == 0)
+                if pipeline is not None:
+                    wait_started = perf_counter()
+                    prepared = pipeline.next(global_step)
+                    prefetch_wait_seconds = perf_counter() - wait_started
+                    _apply_source_counter_deltas(sample_source, prepared.source_counter_deltas)
+                    worker_phase_timing_history.append(prepared.phase_timings)
+                    prepared.phase_timings = {"prefetch_wait": prefetch_wait_seconds}
+                    fresh_sampler_rows += int(getattr(prepared.batch, "fresh_rows_drawn", 0))
+                    fixture_rows_reused += int(getattr(prepared.batch, "fixture_rows_reused", 0))
+                    step_result = _train_prepared_step(
                         model,
-                        sample_source,
+                        optimizer,
+                        prepared,
+                        metadata,
+                        config,
+                        device,
+                        compute_expensive_diagnostics=diagnostic_step,
+                    )
+                else:
+                    batch_started = perf_counter()
+                    batch = sample_source.batches(batch_size, seed=seed + global_step)
+                    batch_sampling_seconds = perf_counter() - batch_started
+                    fresh_sampler_rows += int(getattr(batch, "fresh_rows_drawn", 0))
+                    fixture_rows_reused += int(getattr(batch, "fixture_rows_reused", 0))
+                    step_result = _train_one_batch(
+                        model,
+                        optimizer,
+                        batch,
                         metadata,
                         vocabularies,
                         config,
                         device,
-                        batch_size=validation_batch_size,
-                        batches=validation_batches,
-                        seed=seed + 1_000_000 + global_step,
+                        sample_source=sample_source,
+                        global_step=global_step,
                         context_generator=context_generator,
+                        compute_expensive_diagnostics=diagnostic_step,
+                        batch_sampling_seconds=batch_sampling_seconds,
                     )
-                    validation_fresh_sampler_rows += int(
-                        validation_metrics["validation_fresh_sampler_rows"]
+                phase_timing_history.append(step_result.phase_timings)
+                loss = step_result.loss
+                last_loss = loss
+                last_uniform_loss = step_result.uniform_loss
+                last_auxiliary_loss_unscaled = step_result.auxiliary_loss_unscaled
+                last_auxiliary_loss_scaled = step_result.auxiliary_loss_scaled
+                if first_loss is None:
+                    first_loss = loss
+                    first_uniform_loss = step_result.uniform_loss
+                    first_auxiliary_loss_unscaled = step_result.auxiliary_loss_unscaled
+                    first_auxiliary_loss_scaled = step_result.auxiliary_loss_scaled
+                global_step += 1
+                for fanout_name, fanout_ess in step_result.fanout_effective_sample_size.items():
+                    fanout_ess_values[fanout_name].append(float(fanout_ess))
+                for fanout_name, fanout_ess in step_result.fanout_inv_only_effective_sample_size.items():
+                    fanout_inv_only_ess_values[fanout_name].append(float(fanout_ess))
+                last_original_column_losses = step_result.original_column_losses
+                last_factor_losses = step_result.factor_losses
+                total_generated_contexts += step_result.generated_contexts
+                total_rejected_contexts += step_result.rejected_unsatisfied_contexts
+                total_indicator_contradictions += step_result.included_indicator_contradictions
+                _merge_coverage(aggregate_token_coverage, step_result.predicate_token_coverage)
+                _merge_literal_occurrences(aggregate_literal_occurrences, step_result.literal_token_occurrences)
+                if step_result.predicate_embedding_gradient_coverage:
+                    last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
+                if step_result.predicate_context_diagnostics:
+                    last_context_diagnostics = step_result.predicate_context_diagnostics
+                last_rare_auxiliary_stats = step_result.rare_auxiliary or {"enabled": False}
+                if last_rare_auxiliary_stats.get("enabled"):
+                    total_rare_auxiliary_rows += int(
+                        last_rare_auxiliary_stats.get("rare_rows_sampled", 0)
                     )
-                    validation_fixture_rows_reused += int(
-                        validation_metrics["validation_fixture_rows_reused"]
+                    total_rare_auxiliary_rejected_contexts += int(
+                        last_rare_auxiliary_stats.get("auxiliary_contexts_rejected", 0)
                     )
-                    selected_value = float(validation_metrics[selection_metric])
-                    improved = (
-                        best_metric is None
-                        or (selected_value < best_metric if minimize_selection else selected_value > best_metric)
+                    total_rare_auxiliary_indicator_contradictions += int(
+                        last_rare_auxiliary_stats.get("included_indicator_contradictions", 0)
                     )
-                    validation_metrics.update(
-                        {
-                            "validation_selection_metric": selection_metric,
-                            "validation_selection_metric_value": selected_value,
-                            "validation_improved_best": improved,
-                        }
+                    _merge_flat_counts(
+                        aggregate_rare_auxiliary_selected_strata,
+                        last_rare_auxiliary_stats.get("selected_stratum_counts", {}),
                     )
-                    if improved:
-                        best_metric = selected_value
-                        best_step = global_step
-                        best_checkpoint_path = _save_checkpoint(
+                    _merge_flat_counts(
+                        aggregate_rare_auxiliary_forced_ops,
+                        last_rare_auxiliary_stats.get(
+                            "forced_auxiliary_predicate_operator_counts", {}
+                        ),
+                    )
+                    for stratum_id, stats in last_rare_auxiliary_stats.get("per_stratum", {}).items():
+                        aggregate_rare_auxiliary_contexts_by_stratum[stratum_id] = (
+                            int(aggregate_rare_auxiliary_contexts_by_stratum.get(stratum_id, 0))
+                            + int(stats.get("rare_context_count", 0))
+                        )
+                        aggregate_rare_auxiliary_exact_support_events[stratum_id] = (
+                            int(aggregate_rare_auxiliary_exact_support_events.get(stratum_id, 0))
+                            + int(stats.get("generated_exact_support_event_count", 0))
+                        )
+                        aggregate_rare_auxiliary_downstream_eligible[stratum_id] = (
+                            int(aggregate_rare_auxiliary_downstream_eligible.get(stratum_id, 0))
+                            + int(stats.get("downstream_eligible_head_context_count", 0))
+                        )
+                    total_rare_auxiliary_contexts += int(
+                        last_rare_auxiliary_stats.get("rare_context_count", 0)
+                    )
+                    for column_name, diagnostics in last_rare_auxiliary_stats.get(
+                        "auxiliary_column_diagnostics", {}
+                    ).items():
+                        aggregate_rare_auxiliary_column_stats.setdefault(
+                            column_name,
+                            _RunningAuxiliaryColumnStats(),
+                        ).update(diagnostics)
+                    _merge_flat_counts(
+                        aggregate_rare_auxiliary_fanout_signatures,
+                        last_rare_auxiliary_stats.get(
+                            "common_auxiliary_fanout_token_signatures", {}
+                        ),
+                    )
+                interval = int(training.get("checkpoint_interval_steps", 0) or 0)
+                if interval and global_step % interval == 0:
+                    _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config,
+                                     static_payload=checkpoint_static_payload)
+                if metrics_interval and global_step % metrics_interval == 0:
+                    metrics_payload = {
+                        "step": global_step,
+                        "epoch": epoch,
+                        "step_in_epoch": step_in_epoch,
+                        "nominal_rows_seen": global_step * batch_size,
+                        "total_sampled_tuples": global_step * batch_size,
+                        "generated_predicate_contexts": total_generated_contexts,
+                        "rejected_unsatisfied_contexts": total_rejected_contexts,
+                        "included_indicator_contradictions": total_indicator_contradictions,
+                        "fresh_sampler_rows": fresh_sampler_rows,
+                        "fixture_rows_reused": fixture_rows_reused,
+                        "loss": loss,
+                        "uniform_loss": step_result.uniform_loss,
+                        "auxiliary_loss_unscaled": step_result.auxiliary_loss_unscaled,
+                        "auxiliary_loss_scaled": step_result.auxiliary_loss_scaled,
+                        "fanout_effective_sample_size": step_result.fanout_effective_sample_size,
+                        "fanout_inv_only_effective_sample_size": (
+                            step_result.fanout_inv_only_effective_sample_size
+                        ),
+                        "importance_weight_stats": step_result.importance_weight_stats,
+                        "original_column_losses": step_result.original_column_losses,
+                        "factor_losses": step_result.factor_losses,
+                        "predicate_token_coverage": aggregate_token_coverage,
+                        "predicate_literal_token_stats": literal_token_stats(
+                            aggregate_literal_occurrences,
+                            metadata,
+                        ),
+                        "predicate_context_diagnostics": last_context_diagnostics,
+                        "predicate_embedding_gradient_coverage": last_gradient_coverage,
+                        "rare_auxiliary": last_rare_auxiliary_stats,
+                        "phase_timings": step_result.phase_timings,
+                        "phase_timing_summary": _phase_summary(phase_timing_history),
+                        **_prefetch_report(prefetch_workers, worker_phase_timing_history),
+                    }
+                    early_stopping_monitor_value: float | None = None
+                    if validation_enabled and global_step % validation_interval == 0:
+                        validation_metrics = _run_validation(
                             model,
-                            optimizer,
-                            epoch,
-                            global_step,
+                            sample_source,
                             metadata,
                             vocabularies,
                             config,
-                            filename="checkpoint_best.pt",
-                            static_payload=checkpoint_static_payload,
+                            device,
+                            batch_size=validation_batch_size,
+                            batches=validation_batches,
+                            seed=seed + 1_000_000 + global_step,
+                            context_generator=context_generator,
                         )
-                    validation_history.append({"step": global_step, **validation_metrics})
-                    metrics_payload.update(validation_metrics)
-                    early_stopping_monitor_value = selected_value
-                elif not validation_enabled:
-                    early_stopping_monitor_value = float(loss)
-                if early_stopping_enabled and early_stopping_monitor_value is not None:
-                    if early_stopping_best_metric is None:
-                        improved_for_stop = True
-                    elif minimize_selection:
-                        improved_for_stop = (
-                            early_stopping_monitor_value
-                            < early_stopping_best_metric - early_stopping_min_delta
+                        validation_fresh_sampler_rows += int(
+                            validation_metrics["validation_fresh_sampler_rows"]
                         )
-                    else:
-                        improved_for_stop = (
-                            early_stopping_monitor_value
-                            > early_stopping_best_metric + early_stopping_min_delta
+                        validation_fixture_rows_reused += int(
+                            validation_metrics["validation_fixture_rows_reused"]
                         )
-                    if improved_for_stop:
-                        early_stopping_best_metric = early_stopping_monitor_value
-                        early_stopping_best_step = global_step
-                    steps_since_best = (
-                        0
-                        if early_stopping_best_step is None
-                        else global_step - early_stopping_best_step
-                    )
-                    early_stopped = steps_since_best >= early_stopping_patience_steps
+                        selected_value = float(validation_metrics[selection_metric])
+                        improved = (
+                            best_metric is None
+                            or (selected_value < best_metric if minimize_selection else selected_value > best_metric)
+                        )
+                        validation_metrics.update(
+                            {
+                                "validation_selection_metric": selection_metric,
+                                "validation_selection_metric_value": selected_value,
+                                "validation_improved_best": improved,
+                            }
+                        )
+                        if improved:
+                            best_metric = selected_value
+                            best_step = global_step
+                            best_checkpoint_path = _save_checkpoint(
+                                model,
+                                optimizer,
+                                epoch,
+                                global_step,
+                                metadata,
+                                vocabularies,
+                                config,
+                                filename="checkpoint_best.pt",
+                                static_payload=checkpoint_static_payload,
+                            )
+                        validation_history.append({"step": global_step, **validation_metrics})
+                        metrics_payload.update(validation_metrics)
+                        early_stopping_monitor_value = selected_value
+                    elif not validation_enabled:
+                        early_stopping_monitor_value = float(loss)
+                    if early_stopping_enabled and early_stopping_monitor_value is not None:
+                        if early_stopping_best_metric is None:
+                            improved_for_stop = True
+                        elif minimize_selection:
+                            improved_for_stop = (
+                                early_stopping_monitor_value
+                                < early_stopping_best_metric - early_stopping_min_delta
+                            )
+                        else:
+                            improved_for_stop = (
+                                early_stopping_monitor_value
+                                > early_stopping_best_metric + early_stopping_min_delta
+                            )
+                        if improved_for_stop:
+                            early_stopping_best_metric = early_stopping_monitor_value
+                            early_stopping_best_step = global_step
+                        steps_since_best = (
+                            0
+                            if early_stopping_best_step is None
+                            else global_step - early_stopping_best_step
+                        )
+                        early_stopped = steps_since_best >= early_stopping_patience_steps
+                        if early_stopped:
+                            early_stopping_stop_step = global_step
+                            early_stopping_reason = (
+                                f"{early_stopping_monitor} did not improve for "
+                                f"{steps_since_best} optimizer steps"
+                            )
+                        metrics_payload.update(
+                            {
+                                "early_stopping_enabled": early_stopping_enabled,
+                                "early_stopping_monitor": early_stopping_monitor,
+                                "early_stopping_monitor_value": early_stopping_monitor_value,
+                                "early_stopping_best_metric": early_stopping_best_metric,
+                                "early_stopping_best_step": early_stopping_best_step,
+                                "early_stopping_steps_since_best": steps_since_best,
+                                "early_stopping_patience_steps": early_stopping_patience_steps,
+                                "early_stopping_min_delta": early_stopping_min_delta,
+                                "early_stopping_should_stop": early_stopped,
+                            }
+                        )
+                    _append_metrics(metrics_path, metrics_payload)
                     if early_stopped:
-                        early_stopping_stop_step = global_step
-                        early_stopping_reason = (
-                            f"{early_stopping_monitor} did not improve for "
-                            f"{steps_since_best} optimizer steps"
-                        )
-                    metrics_payload.update(
-                        {
-                            "early_stopping_enabled": early_stopping_enabled,
-                            "early_stopping_monitor": early_stopping_monitor,
-                            "early_stopping_monitor_value": early_stopping_monitor_value,
-                            "early_stopping_best_metric": early_stopping_best_metric,
-                            "early_stopping_best_step": early_stopping_best_step,
-                            "early_stopping_steps_since_best": steps_since_best,
-                            "early_stopping_patience_steps": early_stopping_patience_steps,
-                            "early_stopping_min_delta": early_stopping_min_delta,
-                            "early_stopping_should_stop": early_stopped,
-                        }
-                    )
-                _append_metrics(metrics_path, metrics_payload)
-                if early_stopped:
-                    break
-        if early_stopped:
-            break
-        if int(training["steps_per_epoch"]) == 0:
-            break
+                        break
+            if early_stopped:
+                break
+            if int(training["steps_per_epoch"]) == 0:
+                break
+    finally:
+        if pipeline is not None:
+            pipeline.close()
     checkpoint_path = _save_checkpoint(
         model, optimizer, int(training["epochs"]) - 1, global_step, metadata, vocabularies, config,
         static_payload=checkpoint_static_payload,
@@ -881,6 +950,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "columns_with_unseen_evaluation_token_types": [],
         "training_seconds": training_seconds,
         "phase_timing_summary": _phase_summary(phase_timing_history),
+        **_prefetch_report(prefetch_workers, worker_phase_timing_history),
         "fanout_effective_sample_size": fanout_ess_summary,
         "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
         "importance_sampling": importance_summary,
@@ -1036,15 +1106,84 @@ def _train_one_batch(
     compute_expensive_diagnostics: bool = True,
     batch_sampling_seconds: float = 0.0,
 ) -> TrainingStepResult:
-    import torch
+    """One training step: ``prepare_step_inputs`` (CPU) then ``_train_prepared_step``."""
+
+    if context_generator is None:
+        context_generator = PredicateTrainingContextGenerator(config.get("predicate_generation", {}))
+    prepared = prepare_step_inputs(
+        batch,
+        metadata=metadata,
+        vocabularies=vocabularies,
+        config=config,
+        context_generator=context_generator,
+        sample_source=sample_source,
+        global_step=global_step,
+        compute_expensive_diagnostics=compute_expensive_diagnostics,
+    )
+    prepared.phase_timings = {"batch_sampling": float(batch_sampling_seconds), **prepared.phase_timings}
+    return _train_prepared_step(
+        model,
+        optimizer,
+        prepared,
+        metadata,
+        config,
+        device,
+        compute_expensive_diagnostics=compute_expensive_diagnostics,
+    )
+
+
+@dataclass
+class PreparedStepInputs:
+    """Everything a training step computes before touching the model.
+
+    It depends on the step's batch, the configuration and the step number (the
+    predicate and rare-batch random streams are seeded by ``global_step``), so
+    worker processes can prepare future steps while the GPU trains on the current
+    one, with the same result as computing it in the step itself.
+    """
+
+    global_step: int
+    batch: FullJoinBatch
+    contexts: list
+    target_rows: np.ndarray
+    generation_stats: object
+    token_rows: list
+    token_ids: np.ndarray
+    coverage: dict
+    literal_occurrences: dict
+    context_diagnostics: dict
+    inv_only_weights: np.ndarray
+    weights: np.ndarray
+    importance_stats: dict
+    rare: dict[str, Any] | None
+    phase_timings: dict[str, float]
+    source_counter_deltas: dict[str, Any] = field(default_factory=dict)
+
+
+def prepare_step_inputs(
+    batch: FullJoinBatch,
+    *,
+    metadata: object,
+    vocabularies: PredicateVocabularies,
+    config: dict[str, Any],
+    context_generator: PredicateTrainingContextGenerator,
+    sample_source: object | None,
+    global_step: int,
+    compute_expensive_diagnostics: bool,
+) -> PreparedStepInputs:
+    """The CPU part of step ``global_step`` for its (already drawn) main batch.
+
+    Main contexts, coverage and diagnostics, inverse-fanout (and importance)
+    weights, the rare auxiliary batch with its forced contexts, and the token IDs
+    of both batches. Only numpy work: it runs in the training process or in a
+    prefetch worker.
+    """
 
     timer = _PhaseTimer()
-    timer.add("batch_sampling", batch_sampling_seconds)
+    before = _source_counters(sample_source)
     predicate_config = config.get("predicate_generation", {})
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
     rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
-    if context_generator is None:
-        context_generator = PredicateTrainingContextGenerator(predicate_config)
     contexts, target_rows, generation_stats = timer.run(
         "predicate_context_generation",
         context_generator.generate_batch,
@@ -1133,39 +1272,9 @@ def _train_one_batch(
             )
     timer.add("fanout_importance_weights", perf_counter() - weights_started)
     token_encode_started = perf_counter()
-    token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)
-    targets = torch.tensor(target_rows, dtype=torch.long, device=device)
-    head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
+    token_ids = _encode_token_ids(token_rows, vocabularies)
     timer.add("token_encoding", perf_counter() - token_encode_started)
-    optimizer.zero_grad(set_to_none=True)
-    forward_started = perf_counter()
-    logits = model(token_ids)
-    timer.add("main_forward", perf_counter() - forward_started)
-    main_loss_started = perf_counter()
-    split_head_outputs = model.split_head_outputs(logits)
-    output_embeddings = (
-        [embedding.weight for embedding in model.output_embeddings]
-        if getattr(model.config, "output_encoding", "one_hot") == "embed"
-        else None
-    )
-    breakdown = torch_weighted_per_head_cross_entropy(
-        logits,
-        targets,
-        head_weights,
-        metadata,
-        anpm_decoders=getattr(model, "anpm_decoders", None),
-        split_head_outputs=split_head_outputs,
-        output_embeddings=output_embeddings,
-        head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
-        mask_invalid_factor_combinations=bool(
-            config.get("anpm", {}).get("mask_invalid_combinations", True)
-        )
-    )
-    total_loss = breakdown.total_loss
-    timer.add("main_factorized_anpm_loss", perf_counter() - main_loss_started)
-    rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
-    rare_token_rows: list[list[PredicateToken]] = []
-    rare_token_ids = None
+    rare: dict[str, Any] | None = None
     rare_config = dict(config.get("rare_auxiliary", {}))
     rare_enabled = bool(rare_config.get("enabled", False))
     rare_beta = float(rare_config.get("beta", 0.0) or 0.0)
@@ -1216,10 +1325,107 @@ def _train_one_batch(
         )
         rare_weights = rare_inv_only_weights * eligibility.astype(float)
         timer.add("rare_sampling_context_generation", perf_counter() - rare_started)
+        rare_encode_started = perf_counter()
+        rare_token_ids = _encode_token_ids(rare_token_rows, vocabularies)
+        timer.add("token_encoding", perf_counter() - rare_encode_started)
+        rare = {
+            "beta": rare_beta,
+            "rare_batch": rare_batch,
+            "selected_strata": selected_strata,
+            "rare_contexts": rare_contexts,
+            "rare_target_rows": rare_target_rows,
+            "rare_generation_stats": rare_generation_stats,
+            "rare_token_rows": rare_token_rows,
+            "rare_token_ids": rare_token_ids,
+            "rare_inv_only_weights": rare_inv_only_weights,
+            "rare_selected_column_indices": rare_selected_column_indices,
+            "eligibility": eligibility,
+            "rare_weights": rare_weights,
+        }
+    return PreparedStepInputs(
+        global_step=int(global_step),
+        batch=batch,
+        contexts=contexts,
+        target_rows=target_rows,
+        generation_stats=generation_stats,
+        token_rows=token_rows,
+        token_ids=token_ids,
+        coverage=coverage,
+        literal_occurrences=literal_occurrences,
+        context_diagnostics=context_diagnostics,
+        inv_only_weights=inv_only_weights,
+        weights=weights,
+        importance_stats=importance_stats,
+        rare=rare,
+        phase_timings=timer.timings,
+        source_counter_deltas=_source_counter_deltas(before, _source_counters(sample_source)),
+    )
+
+
+def _encode_token_ids(token_rows: list, vocabularies: PredicateVocabularies) -> np.ndarray:
+    """Token IDs as int64 (``encode_tokens_tensor`` builds the same values as a tensor)."""
+
+    return np.asarray(vocabularies.encode_rows(token_rows), dtype=np.int64)
+
+
+def _train_prepared_step(
+    model: PredicateResMADE,
+    optimizer: object,
+    prepared: PreparedStepInputs,
+    metadata: object,
+    config: dict[str, Any],
+    device: str,
+    *,
+    compute_expensive_diagnostics: bool,
+) -> TrainingStepResult:
+    """The model part of a step: forward passes, losses, backward, optimizer step."""
+
+    import torch
+
+    timer = _PhaseTimer()
+    for name, seconds in prepared.phase_timings.items():
+        timer.add(name, seconds)
+    token_encode_started = perf_counter()
+    token_ids = torch.as_tensor(prepared.token_ids, dtype=torch.long, device=device)
+    targets = torch.tensor(prepared.target_rows, dtype=torch.long, device=device)
+    head_weights = torch.tensor(prepared.weights, dtype=torch.float32, device=device)
+    timer.add("token_encoding", perf_counter() - token_encode_started)
+    optimizer.zero_grad(set_to_none=True)
+    forward_started = perf_counter()
+    logits = model(token_ids)
+    timer.add("main_forward", perf_counter() - forward_started)
+    main_loss_started = perf_counter()
+    split_head_outputs = model.split_head_outputs(logits)
+    output_embeddings = (
+        [embedding.weight for embedding in model.output_embeddings]
+        if getattr(model.config, "output_encoding", "one_hot") == "embed"
+        else None
+    )
+    breakdown = torch_weighted_per_head_cross_entropy(
+        logits,
+        targets,
+        head_weights,
+        metadata,
+        anpm_decoders=getattr(model, "anpm_decoders", None),
+        split_head_outputs=split_head_outputs,
+        output_embeddings=output_embeddings,
+        head_loss_reduction=str(config["training"].get("head_loss_reduction", "mean")),
+        mask_invalid_factor_combinations=bool(
+            config.get("anpm", {}).get("mask_invalid_combinations", True)
+        )
+    )
+    total_loss = breakdown.total_loss
+    timer.add("main_factorized_anpm_loss", perf_counter() - main_loss_started)
+    rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
+    rare_token_rows: list[list[PredicateToken]] = []
+    rare_token_ids = None
+    rare = prepared.rare
+    if rare is not None:
         rare_loss_started = perf_counter()
-        rare_token_ids = encode_tokens_tensor(rare_token_rows, vocabularies, device=device)
-        rare_targets = torch.tensor(rare_target_rows, dtype=torch.long, device=device)
-        rare_head_weights = torch.tensor(rare_weights, dtype=torch.float32, device=device)
+        rare_token_rows = rare["rare_token_rows"]
+        rare_token_ids = torch.as_tensor(rare["rare_token_ids"], dtype=torch.long, device=device)
+        rare_targets = torch.tensor(rare["rare_target_rows"], dtype=torch.long, device=device)
+        rare_head_weights = torch.tensor(rare["rare_weights"], dtype=torch.float32, device=device)
         rare_logits = model(rare_token_ids)
         rare_split_head_outputs = model.split_head_outputs(rare_logits)
         rare_breakdown = torch_weighted_per_head_cross_entropy(
@@ -1235,19 +1441,19 @@ def _train_one_batch(
                 config.get("anpm", {}).get("mask_invalid_combinations", True)
             )
         )
-        total_loss = total_loss + rare_beta * rare_breakdown.total_loss
+        total_loss = total_loss + rare["beta"] * rare_breakdown.total_loss
         timer.add("rare_forward_loss", perf_counter() - rare_loss_started)
         rare_diagnostics_started = perf_counter()
         rare_auxiliary_stats = rare_auxiliary_diagnostics(
             metadata=metadata,
-            beta=rare_beta,
-            rare_batch=rare_batch,
-            contexts=rare_contexts,
-            generation_stats=rare_generation_stats,
-            selected_strata=selected_strata,
-            selected_column_indices=rare_selected_column_indices,
-            eligibility=eligibility,
-            inv_only_weights=rare_inv_only_weights,
+            beta=rare["beta"],
+            rare_batch=rare["rare_batch"],
+            contexts=rare["rare_contexts"],
+            generation_stats=rare["rare_generation_stats"],
+            selected_strata=rare["selected_strata"],
+            selected_column_indices=rare["rare_selected_column_indices"],
+            eligibility=rare["eligibility"],
+            inv_only_weights=rare["rare_inv_only_weights"],
             rare_breakdown=rare_breakdown,
         )
         timer.add("rare_diagnostics", perf_counter() - rare_diagnostics_started)
@@ -1257,7 +1463,7 @@ def _train_one_batch(
     gradient_coverage: dict[str, Any] = {}
     if compute_expensive_diagnostics:
         gradient_coverage_started = perf_counter()
-        all_token_rows = token_rows + rare_token_rows
+        all_token_rows = prepared.token_rows + rare_token_rows
         all_token_ids = (
             torch.cat([token_ids, rare_token_ids], dim=0)
             if rare_token_ids is not None
@@ -1278,6 +1484,8 @@ def _train_one_batch(
     timer.add("optimizer_step", perf_counter() - optimizer_started)
     if not torch.isfinite(total_loss):
         raise ValueError("training loss became non-finite")
+    weights = prepared.weights
+    inv_only_weights = prepared.inv_only_weights
     fanout_effective_sample_sizes = {}
     fanout_inv_only_effective_sample_sizes = {}
     for fanout_index in metadata.fanout_indices():
@@ -1288,6 +1496,7 @@ def _train_one_batch(
         fanout_inv_only_effective_sample_sizes[metadata.columns[fanout_index].name] = float(
             effective_sample_size(inv_only_weights[:, fanout_index])
         )
+    generation_stats = prepared.generation_stats
     return TrainingStepResult(
         loss=float(total_loss.detach().cpu()),
         uniform_loss=float(breakdown.total_loss.detach().cpu()),
@@ -1299,19 +1508,276 @@ def _train_one_batch(
         ),
         fanout_effective_sample_size=fanout_effective_sample_sizes,
         fanout_inv_only_effective_sample_size=fanout_inv_only_effective_sample_sizes,
-        importance_weight_stats=importance_stats,
+        importance_weight_stats=prepared.importance_stats,
         original_column_losses=breakdown.original_column_losses,
         factor_losses=breakdown.factor_losses,
         generated_contexts=generation_stats.generated_contexts,
         rejected_unsatisfied_contexts=generation_stats.rejected_unsatisfied_contexts,
         included_indicator_contradictions=generation_stats.included_indicator_contradictions,
-        predicate_token_coverage=coverage,
-        literal_token_occurrences=literal_occurrences,
-        predicate_context_diagnostics=context_diagnostics,
+        predicate_token_coverage=prepared.coverage,
+        literal_token_occurrences=prepared.literal_occurrences,
+        predicate_context_diagnostics=prepared.context_diagnostics,
         predicate_embedding_gradient_coverage=gradient_coverage,
         rare_auxiliary=rare_auxiliary_stats,
         phase_timings=timer.timings,
     )
+
+
+_SOURCE_INT_COUNTERS = (
+    "sample_batches_generated",
+    "fixture_rows_reused",
+    "fresh_rows_drawn",
+    "rare_rows_drawn",
+    "sampler_run_calls",
+    "conditional_sampler_batch_calls",
+    "conditional_rows_drawn",
+    "_batch_calls",
+)
+_SOURCE_COUNTER_MAPS = ("selected_stratum_sample_count",)
+
+
+def _source_chain(sample_source: object | None) -> list[object]:
+    chain: list[object] = []
+    current = sample_source
+    while current is not None and all(current is not seen for seen in chain):
+        chain.append(current)
+        current = getattr(current, "base_source", None)
+    return chain
+
+
+def _source_counters(sample_source: object | None) -> dict[str, Any]:
+    """Bookkeeping counters of the sample-source chain (reported in the summary)."""
+
+    counters: dict[str, Any] = {}
+    for depth, source in enumerate(_source_chain(sample_source)):
+        for name in _SOURCE_INT_COUNTERS:
+            value = getattr(source, name, None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                counters[f"{depth}:{name}"] = int(value)
+        for name in _SOURCE_COUNTER_MAPS:
+            value = getattr(source, name, None)
+            if value is not None:
+                counters[f"{depth}:{name}"] = dict(value)
+    return counters
+
+
+def _source_counter_deltas(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    deltas: dict[str, Any] = {}
+    for key, value in after.items():
+        old = before.get(key)
+        if isinstance(value, dict):
+            old = old or {}
+            change = {k: v - old.get(k, 0) for k, v in value.items() if v != old.get(k, 0)}
+            if change:
+                deltas[key] = change
+        elif value != old:
+            deltas[key] = value - int(old or 0)
+    return deltas
+
+
+def _merge_source_counter_deltas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = {key: (dict(value) if isinstance(value, dict) else value) for key, value in left.items()}
+    for key, value in right.items():
+        if isinstance(value, dict):
+            target = merged.setdefault(key, {})
+            for name, change in value.items():
+                target[name] = target.get(name, 0) + change
+        else:
+            merged[key] = merged.get(key, 0) + value
+    return merged
+
+
+def _apply_source_counter_deltas(sample_source: object | None, deltas: dict[str, Any]) -> None:
+    """Apply a prefetch process's counter changes to the training process's source."""
+
+    chain = _source_chain(sample_source)
+    for key, change in deltas.items():
+        depth, name = key.split(":", 1)
+        source = chain[int(depth)]
+        if isinstance(change, dict):
+            counter = getattr(source, name)
+            for item, amount in change.items():
+                counter[item] = counter.get(item, 0) + amount
+        else:
+            setattr(source, name, getattr(source, name) + int(change))
+
+
+def _without_column_metadata(batch: FullJoinBatch, metadata: object) -> FullJoinBatch:
+    """The batch without its column metadata (every value domain) for a process hop."""
+
+    if batch.column_metadata is not metadata.columns:  # type: ignore[attr-defined]
+        raise ValueError("batch column metadata is not the training metadata")
+    return replace(batch, column_metadata=())
+
+
+def _with_column_metadata(batch: FullJoinBatch, metadata: object) -> FullJoinBatch:
+    return replace(batch, column_metadata=metadata.columns)  # type: ignore[attr-defined]
+
+
+def _strip_prepared(prepared: PreparedStepInputs, metadata: object) -> PreparedStepInputs:
+    prepared.batch = _without_column_metadata(prepared.batch, metadata)
+    if prepared.rare is not None:
+        prepared.rare = {
+            **prepared.rare,
+            "rare_batch": _without_column_metadata(prepared.rare["rare_batch"], metadata),
+        }
+    return prepared
+
+
+def _restore_prepared(prepared: PreparedStepInputs, metadata: object) -> PreparedStepInputs:
+    prepared.batch = _with_column_metadata(prepared.batch, metadata)
+    if prepared.rare is not None:
+        prepared.rare = {
+            **prepared.rare,
+            "rare_batch": _with_column_metadata(prepared.rare["rare_batch"], metadata),
+        }
+    return prepared
+
+
+def _has_buffered_source(sample_source: object | None) -> bool:
+    return any(hasattr(source, "discard_buffer") for source in _source_chain(sample_source))
+
+
+def _prefetch_report(workers: int, history: list[dict[str, float]]) -> dict[str, Any]:
+    if workers <= 0:
+        return {}
+    return {
+        "prefetch_workers": int(workers),
+        "worker_phase_timing_summary": _phase_summary(history),
+    }
+
+
+class _StepPipeline:
+    """Training steps 0, 1, ... prepared ahead by forked processes, in order.
+
+    One producer process draws the main batches from the sample source exactly as
+    the training loop would (same calls, same order, so a live sampler yields the
+    same row stream); ``workers`` processes run ``prepare(batch, step)`` for steps
+    ``w, w + workers, ...``. Counter changes made in the processes are returned
+    with each step and applied to the training process's source.
+    """
+
+    def __init__(
+        self,
+        *,
+        sample_source: object,
+        prepare: object,
+        metadata: object,
+        batch_size: int,
+        seed: int,
+        total_steps: int,
+        workers: int,
+        depth: int,
+    ) -> None:
+        import gc
+        import multiprocessing
+
+        context = multiprocessing.get_context("fork")
+        self._metadata = metadata
+        self._workers = int(workers)
+        self._next_step = 0
+        self._inputs = [context.Queue(maxsize=max(1, depth)) for _ in range(self._workers)]
+        self._outputs = [context.Queue(maxsize=max(1, depth)) for _ in range(self._workers)]
+        # Forked processes share the training process's memory copy-on-write; keep
+        # the garbage collector from touching (and so copying) long-lived objects.
+        gc.collect()
+        gc.freeze()
+        self._processes = [
+            context.Process(
+                target=_produce_step_batches,
+                args=(sample_source, metadata, batch_size, seed, total_steps, self._inputs),
+                daemon=True,
+                name="prefetch-sampler",
+            )
+        ]
+        for worker in range(self._workers):
+            steps = len(range(worker, total_steps, self._workers))
+            self._processes.append(
+                context.Process(
+                    target=_prepare_step_worker,
+                    args=(prepare, metadata, steps, self._inputs[worker], self._outputs[worker]),
+                    daemon=True,
+                    name=f"prefetch-worker-{worker}",
+                )
+            )
+        for process in self._processes:
+            process.start()
+
+    def next(self, expected_step: int) -> PreparedStepInputs:
+        import queue
+
+        if expected_step != self._next_step:
+            raise RuntimeError(f"prefetch is at step {self._next_step}, training at {expected_step}")
+        output = self._outputs[expected_step % self._workers]
+        while True:
+            try:
+                kind, step, payload = output.get(timeout=5.0)
+                break
+            except queue.Empty:
+                for process in self._processes:
+                    if process.exitcode not in (None, 0):
+                        raise RuntimeError(
+                            f"prefetch process {process.name} died with exit code {process.exitcode}"
+                        ) from None
+        if kind == "error":
+            raise RuntimeError(f"prefetch failed at step {step}:\n{payload}")
+        if step != expected_step:
+            raise RuntimeError(f"prefetched step {step} arrived for step {expected_step}")
+        self._next_step += 1
+        return _restore_prepared(payload, self._metadata)
+
+    def close(self) -> None:
+        for process in self._processes:
+            if process.is_alive():
+                process.terminate()
+        for process in self._processes:
+            process.join(timeout=10)
+
+
+def _produce_step_batches(
+    sample_source: object,
+    metadata: object,
+    batch_size: int,
+    seed: int,
+    total_steps: int,
+    inputs: list,
+) -> None:
+    import traceback
+
+    try:
+        for step in range(int(total_steps)):
+            before = _source_counters(sample_source)
+            started = perf_counter()
+            batch = sample_source.batches(batch_size, seed=seed + step)  # type: ignore[attr-defined]
+            seconds = perf_counter() - started
+            deltas = _source_counter_deltas(before, _source_counters(sample_source))
+            inputs[step % len(inputs)].put(
+                ("batch", step, _without_column_metadata(batch, metadata), seconds, deltas)
+            )
+    except BaseException:
+        message = traceback.format_exc()
+        for queue in inputs:
+            queue.put(("error", None, message, 0.0, {}))
+
+
+def _prepare_step_worker(prepare: object, metadata: object, steps: int, inputs: object, outputs: object) -> None:
+    import traceback
+
+    for _ in range(int(steps)):
+        kind, step, batch, seconds, deltas = inputs.get()  # type: ignore[attr-defined]
+        if kind == "error":
+            outputs.put(("error", step, batch))  # type: ignore[attr-defined]
+            return
+        try:
+            prepared = prepare(_with_column_metadata(batch, metadata), step)  # type: ignore[operator]
+            prepared.phase_timings = {"batch_sampling": float(seconds), **prepared.phase_timings}
+            prepared.source_counter_deltas = _merge_source_counter_deltas(
+                deltas, prepared.source_counter_deltas
+            )
+            outputs.put(("ok", step, _strip_prepared(prepared, metadata)))  # type: ignore[attr-defined]
+        except BaseException:
+            outputs.put(("error", step, traceback.format_exc()))  # type: ignore[attr-defined]
+            return
 
 
 def auxiliary_eligibility_mask(
