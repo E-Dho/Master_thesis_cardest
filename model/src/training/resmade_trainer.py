@@ -12,7 +12,7 @@ import numpy as np
 from model.src.config import resolve_device
 from model.src.data.full_join_sampler import FullJoinBatch
 from model.src.model.anpm import ANPMConfig
-from model.src.model.checkpoint import save_resmade_checkpoint
+from model.src.model.checkpoint import checkpoint_static_fields, save_resmade_checkpoint
 from model.src.model.factorization import factorization_plan_hash
 from model.src.model.resmade import PredicateResMADE, PredicateResMADEConfig
 from model.src.predicates.generation import (
@@ -93,6 +93,52 @@ class TrainingStepResult:
     predicate_embedding_gradient_coverage: dict[str, Any]
     predicate_context_diagnostics: dict[str, Any]
     rare_auxiliary: dict[str, Any] | None = None
+    phase_timings: dict[str, float] = field(default_factory=dict)
+
+
+class _PhaseTimer:
+    def __init__(self) -> None:
+        self.timings: dict[str, float] = {}
+
+    def add(self, name: str, seconds: float) -> None:
+        self.timings[name] = float(self.timings.get(name, 0.0) + seconds)
+
+    def run(self, name: str, fn: object, *args: object, **kwargs: object) -> object:
+        started = perf_counter()
+        try:
+            return fn(*args, **kwargs)  # type: ignore[misc]
+        finally:
+            self.add(name, perf_counter() - started)
+
+
+def _phase_summary(values: list[dict[str, float]]) -> dict[str, dict[str, float]]:
+    """Per-phase seconds per step (same report as the trajectory trainer)."""
+
+    keys = sorted({key for timings in values for key in timings})
+    summary: dict[str, dict[str, float]] = {}
+    for key in keys:
+        series = [float(timing.get(key, 0.0)) for timing in values]
+        summary[key] = {
+            "last": float(series[-1]),
+            "mean": float(np.mean(series)),
+            "p50": float(np.percentile(series, 50)),
+            "p95": float(np.percentile(series, 95)),
+            "min": float(np.min(series)),
+            "max": float(np.max(series)),
+            "sum": float(np.sum(series)),
+        }
+    if values:
+        total_series = [float(sum(timing.values())) for timing in values]
+        summary["total_optimizer_step"] = {
+            "last": float(total_series[-1]),
+            "mean": float(np.mean(total_series)),
+            "p50": float(np.percentile(total_series, 50)),
+            "p95": float(np.percentile(total_series, 95)),
+            "min": float(np.min(total_series)),
+            "max": float(np.max(total_series)),
+            "sum": float(np.sum(total_series)),
+        }
+    return summary
 
 
 @dataclass
@@ -500,14 +546,27 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             raise ValueError("validation.enabled=true requires validation.interval_steps > 0")
         if validation_batches <= 0:
             raise ValueError("validation.enabled=true requires validation.fresh_sampler_batches > 0")
+    # One context generator for the run: it holds only its configuration and caches
+    # derived from the metadata, so building one per step (as before) changed nothing
+    # but the time. Expensive diagnostics (literal occurrences, context diagnostics,
+    # embedding-gradient coverage) are computed on the steps that write metrics, as in
+    # the trajectory trainer; the model's inputs, losses and updates are unchanged.
+    context_generator = PredicateTrainingContextGenerator(config.get("predicate_generation", {}))
+    checkpoint_static_payload = checkpoint_static_fields(
+        metadata=metadata, predicate_vocabularies=vocabularies
+    )
+    phase_timing_history: list[dict[str, float]] = []
     training_start = perf_counter()
     if device == "cuda" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     for epoch in range(int(training["epochs"])):
         for step_in_epoch in range(int(training["steps_per_epoch"])):
+            batch_started = perf_counter()
             batch = sample_source.batches(batch_size, seed=seed + global_step)
+            batch_sampling_seconds = perf_counter() - batch_started
             fresh_sampler_rows += int(getattr(batch, "fresh_rows_drawn", 0))
             fixture_rows_reused += int(getattr(batch, "fixture_rows_reused", 0))
+            diagnostic_step = bool(metrics_interval and (global_step + 1) % metrics_interval == 0)
             step_result = _train_one_batch(
                 model,
                 optimizer,
@@ -518,7 +577,11 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 device,
                 sample_source=sample_source,
                 global_step=global_step,
+                context_generator=context_generator,
+                compute_expensive_diagnostics=diagnostic_step,
+                batch_sampling_seconds=batch_sampling_seconds,
             )
+            phase_timing_history.append(step_result.phase_timings)
             loss = step_result.loss
             last_loss = loss
             last_uniform_loss = step_result.uniform_loss
@@ -541,8 +604,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             total_indicator_contradictions += step_result.included_indicator_contradictions
             _merge_coverage(aggregate_token_coverage, step_result.predicate_token_coverage)
             _merge_literal_occurrences(aggregate_literal_occurrences, step_result.literal_token_occurrences)
-            last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
-            last_context_diagnostics = step_result.predicate_context_diagnostics
+            if step_result.predicate_embedding_gradient_coverage:
+                last_gradient_coverage = step_result.predicate_embedding_gradient_coverage
+            if step_result.predicate_context_diagnostics:
+                last_context_diagnostics = step_result.predicate_context_diagnostics
             last_rare_auxiliary_stats = step_result.rare_auxiliary or {"enabled": False}
             if last_rare_auxiliary_stats.get("enabled"):
                 total_rare_auxiliary_rows += int(
@@ -595,7 +660,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 )
             interval = int(training.get("checkpoint_interval_steps", 0) or 0)
             if interval and global_step % interval == 0:
-                _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config)
+                _save_checkpoint(model, optimizer, epoch, global_step, metadata, vocabularies, config,
+                                 static_payload=checkpoint_static_payload)
             if metrics_interval and global_step % metrics_interval == 0:
                 metrics_payload = {
                     "step": global_step,
@@ -627,6 +693,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     "predicate_context_diagnostics": last_context_diagnostics,
                     "predicate_embedding_gradient_coverage": last_gradient_coverage,
                     "rare_auxiliary": last_rare_auxiliary_stats,
+                    "phase_timings": step_result.phase_timings,
+                    "phase_timing_summary": _phase_summary(phase_timing_history),
                 }
                 early_stopping_monitor_value: float | None = None
                 if validation_enabled and global_step % validation_interval == 0:
@@ -640,6 +708,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         batch_size=validation_batch_size,
                         batches=validation_batches,
                         seed=seed + 1_000_000 + global_step,
+                        context_generator=context_generator,
                     )
                     validation_fresh_sampler_rows += int(
                         validation_metrics["validation_fresh_sampler_rows"]
@@ -671,6 +740,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                             vocabularies,
                             config,
                             filename="checkpoint_best.pt",
+                            static_payload=checkpoint_static_payload,
                         )
                     validation_history.append({"step": global_step, **validation_metrics})
                     metrics_payload.update(validation_metrics)
@@ -726,7 +796,8 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         if int(training["steps_per_epoch"]) == 0:
             break
     checkpoint_path = _save_checkpoint(
-        model, optimizer, int(training["epochs"]) - 1, global_step, metadata, vocabularies, config
+        model, optimizer, int(training["epochs"]) - 1, global_step, metadata, vocabularies, config,
+        static_payload=checkpoint_static_payload,
     )
     training_seconds = perf_counter() - training_start
     parameter_size_bytes = int(sum(parameter.numel() * parameter.element_size() for parameter in model.parameters()))
@@ -877,6 +948,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "last_predicate_embedding_gradient_coverage": last_gradient_coverage,
         "columns_with_unseen_evaluation_token_types": [],
         "training_seconds": training_seconds,
+        "phase_timing_summary": _phase_summary(phase_timing_history),
         "fanout_effective_sample_size": fanout_ess_summary,
         "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
         "importance_sampling": importance_summary,
@@ -1028,42 +1100,58 @@ def _train_one_batch(
     *,
     sample_source: object | None = None,
     global_step: int,
+    context_generator: PredicateTrainingContextGenerator | None = None,
+    compute_expensive_diagnostics: bool = True,
+    batch_sampling_seconds: float = 0.0,
 ) -> TrainingStepResult:
     import torch
 
+    timer = _PhaseTimer()
+    timer.add("batch_sampling", batch_sampling_seconds)
     predicate_config = config.get("predicate_generation", {})
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
     rng = np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step))
-    context_generator = PredicateTrainingContextGenerator(predicate_config)
-    contexts, target_rows, generation_stats = context_generator.generate_batch(
+    if context_generator is None:
+        context_generator = PredicateTrainingContextGenerator(predicate_config)
+    contexts, target_rows, generation_stats = timer.run(
+        "predicate_context_generation",
+        context_generator.generate_batch,
         encoded_rows=batch.encoded_values,
         metadata=metadata,
         rng=rng,
     )
     token_rows = [list(context.tokens) for context in contexts]
+    coverage_started = perf_counter()
     coverage = token_coverage(
         [context.tokens for context in contexts],
         metadata,
     )
-    literal_occurrences = literal_token_occurrences(
-        [context.tokens for context in contexts],
-        metadata,
-    )
-    context_diagnostics = predicate_context_diagnostics(contexts, metadata)
-    context_diagnostics["predicate_probability_configuration"] = (
-        context_generator.probability_diagnostics()
-    )
-    context_diagnostics["table_subset_sampling_mode"] = (
-        context_generator.table_subset_sampling
-    )
-    context_diagnostics["upstream_neurocard_table_dropout_probability_law"] = (
-        "num_dropped_tables ~ Uniform{1,...,num_tables-1}; "
-        "P(drop table | num_dropped_tables)=num_dropped_tables/num_tables; "
-        "primary/root table forced included"
-    )
-    context_diagnostics["rooted_adjustment_applied"] = (
-        context_generator.table_subset_sampling == "neurocard_table_dropout_rooted"
-    )
+    timer.add("token_coverage", perf_counter() - coverage_started)
+    literal_occurrences: dict[str, dict[str, dict[str, int]]] = {}
+    context_diagnostics: dict[str, Any] = {}
+    if compute_expensive_diagnostics:
+        diagnostics_started = perf_counter()
+        literal_occurrences = literal_token_occurrences(
+            [context.tokens for context in contexts],
+            metadata,
+        )
+        context_diagnostics = predicate_context_diagnostics(contexts, metadata)
+        context_diagnostics["predicate_probability_configuration"] = (
+            context_generator.probability_diagnostics()
+        )
+        context_diagnostics["table_subset_sampling_mode"] = (
+            context_generator.table_subset_sampling
+        )
+        context_diagnostics["upstream_neurocard_table_dropout_probability_law"] = (
+            "num_dropped_tables ~ Uniform{1,...,num_tables-1}; "
+            "P(drop table | num_dropped_tables)=num_dropped_tables/num_tables; "
+            "primary/root table forced included"
+        )
+        context_diagnostics["rooted_adjustment_applied"] = (
+            context_generator.table_subset_sampling == "neurocard_table_dropout_rooted"
+        )
+        timer.add("diagnostics", perf_counter() - diagnostics_started)
+    weights_started = perf_counter()
     inv_only_weights = cumulative_inverse_fanout_weights(
         target_rows,
         token_rows,
@@ -1111,11 +1199,17 @@ def _train_one_batch(
                 rho=rho,
                 batch_metadata=batch.importance_metadata,
             )
+    timer.add("fanout_importance_weights", perf_counter() - weights_started)
+    token_encode_started = perf_counter()
     token_ids = encode_tokens_tensor(token_rows, vocabularies, device=device)
     targets = torch.tensor(target_rows, dtype=torch.long, device=device)
     head_weights = torch.tensor(weights, dtype=torch.float32, device=device)
+    timer.add("token_encoding", perf_counter() - token_encode_started)
     optimizer.zero_grad(set_to_none=True)
+    forward_started = perf_counter()
     logits = model(token_ids)
+    timer.add("main_forward", perf_counter() - forward_started)
+    main_loss_started = perf_counter()
     split_head_outputs = model.split_head_outputs(logits)
     output_embeddings = (
         [embedding.weight for embedding in model.output_embeddings]
@@ -1136,6 +1230,7 @@ def _train_one_batch(
         )
     )
     total_loss = breakdown.total_loss
+    timer.add("main_factorized_anpm_loss", perf_counter() - main_loss_started)
     rare_auxiliary_stats: dict[str, Any] = {"enabled": False}
     rare_token_rows: list[list[PredicateToken]] = []
     rare_token_ids = None
@@ -1149,6 +1244,7 @@ def _train_one_batch(
         rare_batches = getattr(sample_source, "rare_batches", None)
         if rare_batches is None:
             raise ValueError("rare_auxiliary.enabled requires a rare_support sample source")
+        rare_started = perf_counter()
         rare_batch = rare_batches(
             rare_batch_size,
             seed=rare_row_rng_seed(int(config["training"].get("seed", 0)), global_step),
@@ -1187,6 +1283,8 @@ def _train_one_batch(
             row_count=rare_target_rows.shape[0],
         )
         rare_weights = rare_inv_only_weights * eligibility.astype(float)
+        timer.add("rare_sampling_context_generation", perf_counter() - rare_started)
+        rare_loss_started = perf_counter()
         rare_token_ids = encode_tokens_tensor(rare_token_rows, vocabularies, device=device)
         rare_targets = torch.tensor(rare_target_rows, dtype=torch.long, device=device)
         rare_head_weights = torch.tensor(rare_weights, dtype=torch.float32, device=device)
@@ -1206,6 +1304,8 @@ def _train_one_batch(
             )
         )
         total_loss = total_loss + rare_beta * rare_breakdown.total_loss
+        timer.add("rare_forward_loss", perf_counter() - rare_loss_started)
+        rare_diagnostics_started = perf_counter()
         rare_auxiliary_stats = rare_auxiliary_diagnostics(
             metadata=metadata,
             beta=rare_beta,
@@ -1218,23 +1318,32 @@ def _train_one_batch(
             inv_only_weights=rare_inv_only_weights,
             rare_breakdown=rare_breakdown,
         )
+        timer.add("rare_diagnostics", perf_counter() - rare_diagnostics_started)
+    backward_started = perf_counter()
     total_loss.backward()
-    all_token_rows = token_rows + rare_token_rows
-    all_token_ids = (
-        torch.cat([token_ids, rare_token_ids], dim=0)
-        if rare_token_ids is not None
-        else token_ids
-    )
-    gradient_coverage = _predicate_embedding_gradient_coverage(
-        model,
-        all_token_rows,
-        all_token_ids,
-        metadata,
-    )
+    timer.add("backward", perf_counter() - backward_started)
+    gradient_coverage: dict[str, Any] = {}
+    if compute_expensive_diagnostics:
+        gradient_coverage_started = perf_counter()
+        all_token_rows = token_rows + rare_token_rows
+        all_token_ids = (
+            torch.cat([token_ids, rare_token_ids], dim=0)
+            if rare_token_ids is not None
+            else token_ids
+        )
+        gradient_coverage = _predicate_embedding_gradient_coverage(
+            model,
+            all_token_rows,
+            all_token_ids,
+            metadata,
+        )
+        timer.add("diagnostics", perf_counter() - gradient_coverage_started)
+    optimizer_started = perf_counter()
     clip_norm = config["training"].get("gradient_clip_norm")
     if clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_norm))
     optimizer.step()
+    timer.add("optimizer_step", perf_counter() - optimizer_started)
     if not torch.isfinite(total_loss):
         raise ValueError("training loss became non-finite")
     fanout_effective_sample_sizes = {}
@@ -1269,6 +1378,7 @@ def _train_one_batch(
         predicate_context_diagnostics=context_diagnostics,
         predicate_embedding_gradient_coverage=gradient_coverage,
         rare_auxiliary=rare_auxiliary_stats,
+        phase_timings=timer.timings,
     )
 
 
@@ -1413,6 +1523,7 @@ def _run_validation(
     batch_size: int,
     batches: int,
     seed: int,
+    context_generator: PredicateTrainingContextGenerator | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -1432,7 +1543,10 @@ def _run_validation(
     fixture_rows = 0
     predicate_config = config.get("predicate_generation", {})
     generator_seed = int(predicate_config.get("seed", config["training"].get("seed", 0)))
-    context_generator = PredicateTrainingContextGenerator(predicate_config)
+    if context_generator is None:
+        # The training loop passes its own generator: it holds only its
+        # configuration and caches derived from the metadata.
+        context_generator = PredicateTrainingContextGenerator(predicate_config)
     discard_buffer = getattr(sample_source, "discard_buffer", None)
     if discard_buffer is not None:
         discard_buffer()
@@ -1857,6 +1971,7 @@ def _save_checkpoint(
     config: dict[str, Any],
     *,
     filename: str | None = None,
+    static_payload: dict[str, Any] | None = None,
 ) -> Path:
     output_directory = Path(config.get("logging", {}).get("output_directory", "model/runs/resmade"))
     checkpoint_path = output_directory / (filename or f"checkpoint_step_{step}.pt")
@@ -1870,5 +1985,6 @@ def _save_checkpoint(
         predicate_vocabularies=vocabularies,
         config=config,
         preparation_manifest_id=config.get("dataset", {}).get("name"),
+        static_payload=static_payload,
     )
     return checkpoint_path
