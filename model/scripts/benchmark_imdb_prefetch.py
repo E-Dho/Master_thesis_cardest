@@ -1,11 +1,12 @@
 """IMDB step prefetch on the real live sampler: identical training, supply rate, memory.
 
-1. Identity: trains ``--identity-steps`` steps twice on the CPU from fresh sample
-   sources, without workers and with ``--identity-workers``, and compares losses,
-   metrics (timings aside), source counters and the final checkpoint (model and
-   optimizer state). This checks on the real NeuroCard sampler that the main row
-   stream and the rare conditional draws are independent, which the prefetch
-   pipeline relies on.
+1. Identity: trains ``--identity-steps`` steps on the CPU three times, each in a
+   fresh Python process (as a training job starts): twice without workers and
+   once with ``--identity-workers``, and compares losses, metrics (timings aside),
+   source counters and the final checkpoint (model and optimizer state). The two
+   serial runs are the control for run-to-run reproducibility of the sampler.
+   Exit code 0: identical; 1: the prefetch run differs; 2: inconclusive (the
+   serial runs already differ).
 2. Supply rate and memory: for each worker count, prepares ``--steps`` steps (main
    batch, contexts, weights, rare batch, token IDs) exactly as
    ``training.prefetch_workers`` does, without the model, and reports seconds per
@@ -64,72 +65,106 @@ def _strip(row: dict) -> dict:
                           "checkpoint_path", "best_checkpoint_path")}
 
 
-def _reset_global_random_state(seed: int) -> None:
-    import random
-
-    import numpy as np
-    import torch
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def _identity(args, config_path: str) -> dict:
-    import torch
+def _identity_run(args) -> int:
+    """One identity training in this (fresh) process; writes ``identity_result.json``."""
 
     from model.src.config import load_simple_yaml, validate_config
     from model.src.data.sample_sources import sample_source_from_config
     from model.src.training import resmade_trainer as trainer
 
-    runs = {}
-    for label, workers in (("serial", 0), ("prefetch", args.identity_workers)):
-        config = load_simple_yaml(config_path)
-        validate_config(config)
-        # Both runs start from the same global random state: building the source
-        # (NeuroCard's tables and sampler, rare-support discovery) may draw from
-        # it, and the second build would otherwise see the state the first run
-        # left behind.
-        _reset_global_random_state(int(config["training"].get("seed", 0)))
-        source = sample_source_from_config(config)
-        directory = args.output_directory / f"identity_{label}"
-        config["training"].update({
-            "steps_per_epoch": int(args.identity_steps), "epochs": 1, "device": "cpu",
-            "checkpoint_interval_steps": 0, "early_stopping_patience_steps": 0,
-            "prefetch_workers": int(workers),
-        })
-        config.setdefault("logging", {})["output_directory"] = str(directory)
-        started = time.perf_counter()
-        result = trainer.train_resmade_sample_source(source, config)
-        runs[label] = {
-            "directory": directory, "result": result, "seconds": time.perf_counter() - started,
-            "counters": trainer._source_counters(source),
-        }
-    serial, prefetch = runs["serial"], runs["prefetch"]
+    config = load_simple_yaml(args.config)
+    validate_config(config)
+    source = sample_source_from_config(config)
+    directory = args.output_directory
+    config["training"].update({
+        "steps_per_epoch": int(args.identity_steps), "epochs": 1, "device": "cpu",
+        "checkpoint_interval_steps": 0, "early_stopping_patience_steps": 0,
+        "prefetch_workers": int(args.identity_run_workers),
+    })
+    config.setdefault("logging", {})["output_directory"] = str(directory)
+    started = time.perf_counter()
+    result = trainer.train_resmade_sample_source(source, config)
+    (directory / "identity_result.json").write_text(json.dumps({
+        "workers": int(args.identity_run_workers),
+        "pid": os.getpid(),
+        "first_loss": result.first_loss, "last_loss": result.last_loss,
+        "checkpoint_path": str(result.checkpoint_path),
+        "counters": trainer._source_counters(source),
+        "seconds": time.perf_counter() - started,
+    }, indent=2) + "\n")
+    return 0
+
+
+def _compare_runs(left: Path, right: Path) -> list[str]:
+    import torch
+
+    a_info = json.loads((left / "identity_result.json").read_text())
+    b_info = json.loads((right / "identity_result.json").read_text())
     mismatches = []
-    if (serial["result"].first_loss, serial["result"].last_loss) != (prefetch["result"].first_loss,
-                                                                     prefetch["result"].last_loss):
+    if (a_info["first_loss"], a_info["last_loss"]) != (b_info["first_loss"], b_info["last_loss"]):
         mismatches.append("first/last loss")
-    rows = [[_strip(json.loads(line)) for line in (run["directory"] / "training_metrics.jsonl").read_text().splitlines()]
-            for run in (serial, prefetch)]
+    rows = [[_strip(json.loads(line)) for line in (d / "training_metrics.jsonl").read_text().splitlines()]
+            for d in (left, right)]
     if rows[0] != rows[1]:
         mismatches.append("training_metrics.jsonl")
-    if serial["counters"] != prefetch["counters"]:
-        mismatches.append(f"source counters {serial['counters']} vs {prefetch['counters']}")
-    a = torch.load(serial["result"].checkpoint_path, weights_only=False)
-    b = torch.load(prefetch["result"].checkpoint_path, weights_only=False)
+    if a_info["counters"] != b_info["counters"]:
+        mismatches.append(f"source counters {a_info['counters']} vs {b_info['counters']}")
+    a = torch.load(a_info["checkpoint_path"], weights_only=False)
+    b = torch.load(b_info["checkpoint_path"], weights_only=False)
     if not all(torch.equal(a["model_state_dict"][k], b["model_state_dict"][k]) for k in a["model_state_dict"]):
         mismatches.append("checkpoint model_state_dict")
     for index, state in a["optimizer_state_dict"]["state"].items():
         for key, value in state.items():
             if isinstance(value, torch.Tensor) and not torch.equal(value, b["optimizer_state_dict"]["state"][index][key]):
                 mismatches.append(f"optimizer state {index}.{key}")
+    return mismatches
+
+
+def _identity_verdict(serial_mismatches: list[str], prefetch_mismatches: list[str]) -> str:
+    """identical / different / inconclusive (two serial runs already differ)."""
+
+    if serial_mismatches:
+        return "inconclusive"
+    return "different" if prefetch_mismatches else "identical"
+
+
+def _identity(args, config_path: str) -> dict:
+    """Two serial runs and one prefetch run, each in a fresh Python process.
+
+    A fresh process per run starts every random state the way a training job
+    does, including state that lives inside NeuroCard's modules and objects
+    (which resetting Python's, numpy's and torch's global generators would not
+    reach). The second serial run is the control: if it already differs from the
+    first, the sampler is not reproducible run to run and the comparison with the
+    prefetch run says nothing (``inconclusive``).
+    """
+
+    import subprocess
+    import sys
+
+    runs = {}
+    for label, workers in (("serial_a", 0), ("serial_b", 0), ("prefetch", int(args.identity_workers))):
+        directory = args.output_directory / f"identity_{label}"
+        directory.mkdir(parents=True)
+        command = [sys.executable, "-m", "model.scripts.benchmark_imdb_prefetch", "--config", config_path,
+                   "--identity-steps", str(int(args.identity_steps)), "--identity-run-workers", str(workers),
+                   "--output-directory", str(directory)]
+        started = time.perf_counter()
+        completed = subprocess.run(command, capture_output=True, text=True)
+        (directory / "run.log").write_text(completed.stdout + completed.stderr)
+        if completed.returncode != 0:
+            raise SystemExit(f"identity run {label} failed (exit {completed.returncode}); see {directory}/run.log")
+        runs[label] = {"directory": directory, "seconds": time.perf_counter() - started}
+    serial_mismatches = _compare_runs(runs["serial_a"]["directory"], runs["serial_b"]["directory"])
+    prefetch_mismatches = _compare_runs(runs["serial_a"]["directory"], runs["prefetch"]["directory"])
+    losses = {label: [json.loads((run["directory"] / "identity_result.json").read_text())[key]
+                      for key in ("first_loss", "last_loss")] for label, run in runs.items()}
+    verdict = _identity_verdict(serial_mismatches, prefetch_mismatches)
     return {
         "steps": int(args.identity_steps), "workers": int(args.identity_workers),
-        "identical": not mismatches, "mismatches": mismatches,
-        "losses": [serial["result"].first_loss, serial["result"].last_loss,
-                   prefetch["result"].first_loss, prefetch["result"].last_loss],
-        "train_seconds": {"serial": serial["seconds"], "prefetch": prefetch["seconds"]},
+        "verdict": verdict, "identical": verdict == "identical",
+        "serial_control_mismatches": serial_mismatches, "mismatches": prefetch_mismatches,
+        "losses": losses, "wall_seconds": {label: run["seconds"] for label, run in runs.items()},
     }
 
 
@@ -205,8 +240,11 @@ def main() -> int:
     parser.add_argument("--identity-steps", type=int, default=40)
     parser.add_argument("--identity-workers", type=int, default=2)
     parser.add_argument("--skip-identity", action="store_true")
+    parser.add_argument("--identity-run-workers", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--output-directory", required=True, type=Path)
     args = parser.parse_args()
+    if args.identity_run_workers is not None:
+        return _identity_run(args)
     if args.output_directory.exists() and any(args.output_directory.iterdir()):
         raise SystemExit(f"{args.output_directory} is not empty; refusing")
     args.output_directory.mkdir(parents=True, exist_ok=True)
@@ -216,7 +254,8 @@ def main() -> int:
         print(json.dumps({"identity": report["identity"]}), flush=True)
     report["supply"] = _supply(args, args.config)
     (args.output_directory / "prefetch_benchmark.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
-    return 0 if report.get("identity", {}).get("identical", True) else 1
+    verdict = report.get("identity", {}).get("verdict", "identical")
+    return {"identical": 0, "different": 1, "inconclusive": 2}[verdict]
 
 
 if __name__ == "__main__":

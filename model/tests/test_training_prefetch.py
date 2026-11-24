@@ -232,31 +232,36 @@ class PrefetchEquivalenceTest(unittest.TestCase):
                 train_resmade_sample_source(BufferedSource(), config)
 
 
-class BenchmarkIdentityStateTest(unittest.TestCase):
+class BenchmarkIdentityTest(unittest.TestCase):
+    """benchmark_imdb_prefetch's identity check: fresh processes and a serial control."""
+
+    def test_verdict_needs_reproducible_serial_runs(self) -> None:
+        from model.scripts.benchmark_imdb_prefetch import _identity_verdict
+
+        self.assertEqual(_identity_verdict([], []), "identical")
+        self.assertEqual(_identity_verdict([], ["first/last loss"]), "different")
+        self.assertEqual(_identity_verdict(["first/last loss"], []), "inconclusive")
+        self.assertEqual(_identity_verdict(["first/last loss"], ["first/last loss"]), "inconclusive")
+
     @unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
-    def test_both_identity_runs_build_their_source_from_the_same_global_state(self) -> None:
-        import random
+    def test_runs_in_fresh_processes_and_compares_all_three(self) -> None:
+        import os
         from types import SimpleNamespace
-        from unittest import mock
 
         from model.scripts import benchmark_imdb_prefetch as benchmark
-        from model.src.data import sample_sources
 
-        seen = []
-        original = sample_sources.sample_source_from_config
-
-        def recording(config):
-            # a source whose construction draws from the global generators
-            seen.append((random.random(), float(np.random.random()), float(torch.rand(1))))
-            return original(config)
-
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(sample_sources, "sample_source_from_config", recording):
+        with tempfile.TemporaryDirectory() as directory:
             args = SimpleNamespace(identity_steps=3, identity_workers=2, output_directory=Path(directory))
             report = benchmark._identity(args, "model/configs/resmade_smoke.yaml")
-        self.assertEqual(len(seen), 2)
-        self.assertEqual(seen[0], seen[1])
-        self.assertTrue(report["identical"], report["mismatches"])
+            pids = set()
+            for label in ("serial_a", "serial_b", "prefetch"):
+                run = Path(directory) / f"identity_{label}"
+                self.assertTrue((run / "identity_result.json").exists(), label)
+                pids.add(json.loads((run / "identity_result.json").read_text()).get("pid"))
+        self.assertEqual(report["verdict"], "identical", report)
+        self.assertEqual(report["serial_control_mismatches"], [])
+        self.assertEqual(len(pids), 3)
+        self.assertNotIn(os.getpid(), pids)
 
 
 if __name__ == "__main__":
