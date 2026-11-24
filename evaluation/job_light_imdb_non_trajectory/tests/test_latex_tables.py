@@ -311,6 +311,17 @@ class LatexTablesTest(unittest.TestCase):
         rows = [{"method_id": "own_model", "_eligible": True, "v": 1.0}]
         self.assertEqual(MODULE["marked_rows"](rows, column, MODULE["DATA_DRIVEN_METHODS"]), set())
 
+    def test_marking_normalizes_printed_duration_units(self) -> None:
+        column = MODULE["Column"](
+            "Training", lambda row: row["seconds"],
+            lambda row: MODULE["fmt_duration"](row["seconds"], None),
+        )
+        rows = [
+            {"method_id": "own_model", "_eligible": True, "seconds": 121.0},
+            {"method_id": "deepdb", "_eligible": True, "seconds": 119.0},
+        ]
+        self.assertEqual(MODULE["marked_rows"](rows, column, MODULE["DATA_DRIVEN_METHODS"]), {1})
+
     def test_sampling_rows_are_never_marked(self) -> None:
         column = MODULE["Column"]("Metric", lambda row: row["v"], lambda row: MODULE["fmt_cell"](row["v"]))
         rows = [

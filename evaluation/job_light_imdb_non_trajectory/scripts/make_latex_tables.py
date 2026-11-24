@@ -426,7 +426,20 @@ def _printed_cell_value(column: Column, row: dict) -> float | None:
     if text == DASH:
         return None
     numbers = parse_printed_numbers(text)
-    return numbers[0][0] if numbers else None
+    if not numbers:
+        return None
+    value = numbers[0][0]
+    # ``fmt_duration`` and ``fmt_int`` choose a compact unit per cell.  Rank
+    # the rounded displayed values after returning them to the source unit.
+    if r"\,h" in text:
+        return value * 3600.0
+    if r"\,min" in text:
+        return value * 60.0
+    if r"\,M" in text:
+        return value * 1e6
+    if r"\,k" in text:
+        return value * 1e3
+    return value
 
 
 def marked_rows(rows: list[dict], column: Column,
