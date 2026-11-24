@@ -105,6 +105,24 @@ class LatexTablesTest(unittest.TestCase):
         )
         self.assertEqual(MODULE["best_rows"]([{"_eligible": True}], column), set())
 
+    def test_qerror_notes_use_math_mode_for_estimates_below_one(self) -> None:
+        row = {
+            "workload": "job_light", "method_id": "own_model", "variant_id": "v",
+            "seed_count": 3, "coverage_complete_all_seeds": True,
+            "estimate_lt_1_count.mean": 1.0, "estimate_lt_1_count.std": 0.0,
+        }
+        for family in ("raw_q_error", "smoothed_q_error"):
+            for metric in ("p50", "p90", "p95", "p99", "max"):
+                row[f"{family}.{metric}.mean"] = 1.0
+                row[f"{family}.{metric}.std"] = 0.0
+        table = MODULE["qerror_table"](
+            MODULE["prepare_rows"]([row], "job_light"), "job_light",
+            "raw_q_error", False, MODULE["DataStore"](),
+        )
+        self.assertIn(r"Bold: best per column (Est.\,$<1$ not marked).", table)
+        self.assertIn(r"Est.\,$<1$ counts them before rounding.", table)
+        self.assertNotIn("Est. < 1", table)
+
     def test_ranges_excludes_native_deepdb_but_keeps_adapted(self) -> None:
         rows = MODULE["prepare_rows"]([
             {"workload": "job_light_ranges", "method_id": "deepdb",

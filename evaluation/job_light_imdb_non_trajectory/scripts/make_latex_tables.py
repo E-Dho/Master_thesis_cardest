@@ -612,6 +612,7 @@ def own_model_single_run_note(rows: list[dict]) -> str:
 # Q-error tables
 # --------------------------------------------------------------------------- #
 BEST_NOTE = r"Bold: best per column."
+QERROR_BEST_NOTE = r"Bold: best per column (Est.\,$<1$ not marked)."
 
 
 def _sub_one_value(row: dict[str, Any]) -> Any:
@@ -664,13 +665,13 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
     notes = [
         description,
         seeds_note(rows),
-        BEST_NOTE,
+        QERROR_BEST_NOTE,
         own_model_single_run_note(rows),
         (r"Est.\,$<1$: estimates below one."
          if has_sub1 else ""),
         (
             "NeuroCard and DistJoin round estimates up to whole rows; "
-            "Est. < 1 counts them before rounding. PostgreSQL clamps internally "
+            r"Est.\,$<1$ counts them before rounding. PostgreSQL clamps internally "
             "to at least one row."
         ),
         coverage_note(rows, data),
