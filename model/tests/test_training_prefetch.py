@@ -232,5 +232,32 @@ class PrefetchEquivalenceTest(unittest.TestCase):
                 train_resmade_sample_source(BufferedSource(), config)
 
 
+class BenchmarkIdentityStateTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
+    def test_both_identity_runs_build_their_source_from_the_same_global_state(self) -> None:
+        import random
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from model.scripts import benchmark_imdb_prefetch as benchmark
+        from model.src.data import sample_sources
+
+        seen = []
+        original = sample_sources.sample_source_from_config
+
+        def recording(config):
+            # a source whose construction draws from the global generators
+            seen.append((random.random(), float(np.random.random()), float(torch.rand(1))))
+            return original(config)
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(sample_sources, "sample_source_from_config", recording):
+            args = SimpleNamespace(identity_steps=3, identity_workers=2, output_directory=Path(directory))
+            report = benchmark._identity(args, "model/configs/resmade_smoke.yaml")
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0], seen[1])
+        self.assertTrue(report["identical"], report["mismatches"])
+
+
 if __name__ == "__main__":
     unittest.main()
