@@ -11,12 +11,29 @@ CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 EVALUATED = CONFIGS / "porto_traj_dedup_single_anchor_mbr_segments_first_20k.yaml"
 
 
+LEARNED_GPU = "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python"
+
+
 def _without_comments(path: Path) -> list[str]:
     # training.prefetch_workers only sets how many processes prepare steps ahead;
     # the training is the same with any value (test_training_prefetch), so it is
-    # not part of the ablation's switch.
-    return [line for line in path.read_text().splitlines()
-            if not line.lstrip().startswith("#") and not line.startswith("  prefetch_workers:")]
+    # not part of the ablation's switch. Neither is the runtime section: it selects
+    # the interpreter the evaluated model was trained with (learned-gpu, PYTHON
+    # override at its submission), see model.src.runtime_interpreter.
+    lines, in_runtime = [], False
+    for line in path.read_text().splitlines():
+        if line == "runtime:":
+            in_runtime = True
+            continue
+        if in_runtime and line.startswith("  "):
+            continue
+        in_runtime = False
+        if line.lstrip().startswith("#") or line.startswith("  prefetch_workers:"):
+            continue
+        lines.append(line)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
 
 
 class PortoAblationConfigTest(unittest.TestCase):
@@ -38,6 +55,7 @@ class PortoAblationConfigTest(unittest.TestCase):
         self.assertFalse(config["rare_auxiliary"]["enabled"])
         self.assertTrue(evaluated["rare_support"]["enabled"] and evaluated["rare_auxiliary"]["enabled"])
         self.assertEqual(config["training"].pop("prefetch_workers"), 3)
+        self.assertEqual(config.pop("runtime"), {"python": LEARNED_GPU, "require_cuda": True})
         for key in ("dataset", "model", "training", "predicate_generation", "trajectory_distinct"):
             self.assertEqual(config.get(key), evaluated.get(key), key)
 
