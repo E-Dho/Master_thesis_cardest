@@ -19,6 +19,7 @@ class ExternalCommandAdapter(Adapter):
     The configured evaluation command writes one CSV per workload to the
     exchange directory. Required columns are ``query_id`` and
     ``estimated_cardinality``. Optional columns are ``status``, ``diagnostic``,
+    ``unrounded_estimated_cardinality``,
     ``repetition``, and ``latency_ms``.
     """
 
@@ -128,6 +129,7 @@ class ExternalCommandAdapter(Adapter):
                 query_id = int(row["query_id"])
                 seen.add(query_id)
                 estimate_text = row.get("estimated_cardinality", "")
+                unrounded_text = row.get("unrounded_estimated_cardinality", "")
                 status = row.get("status") or ("ok" if estimate_text != "" else "failed")
                 predictions.append(
                     PredictionRecord(
@@ -137,6 +139,11 @@ class ExternalCommandAdapter(Adapter):
                         true_cardinality=truth[query_id],
                         estimated_cardinality=(
                             float(estimate_text) if status == "ok" and estimate_text != "" else None
+                        ),
+                        unrounded_estimated_cardinality=(
+                            float(unrounded_text)
+                            if status == "ok" and unrounded_text != ""
+                            else None
                         ),
                         diagnostic=row.get("diagnostic", ""),
                     )
@@ -349,6 +356,7 @@ def _prediction_records(path: Path, workload: WorkloadConfig) -> list[Prediction
         query_id = int(row["query_id"])
         seen.add(query_id)
         estimate_text = row.get("estimated_cardinality", "")
+        unrounded_text = row.get("unrounded_estimated_cardinality", "")
         status = row.get("status") or ("ok" if estimate_text != "" else "failed")
         records.append(
             PredictionRecord(
@@ -358,6 +366,11 @@ def _prediction_records(path: Path, workload: WorkloadConfig) -> list[Prediction
                 true_cardinality=truth[query_id],
                 estimated_cardinality=(
                     float(estimate_text) if status == "ok" and estimate_text != "" else None
+                ),
+                unrounded_estimated_cardinality=(
+                    float(unrounded_text)
+                    if status == "ok" and unrounded_text != ""
+                    else None
                 ),
                 diagnostic=row.get("diagnostic", ""),
             )

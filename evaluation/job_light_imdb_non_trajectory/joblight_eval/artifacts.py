@@ -63,6 +63,9 @@ def read_predictions(path: Path) -> tuple[PredictionRecord, ...]:
             status=row["status"],
             true_cardinality=int(row["true_cardinality"]),
             estimated_cardinality=_optional_float(row["estimated_cardinality"]),
+            unrounded_estimated_cardinality=_optional_float(
+                row.get("unrounded_estimated_cardinality")
+            ),
             raw_q_error=_optional_float(row["raw_q_error"]),
             smoothed_q_error=_optional_float(row["smoothed_q_error"]),
             diagnostic=row.get("diagnostic", ""),

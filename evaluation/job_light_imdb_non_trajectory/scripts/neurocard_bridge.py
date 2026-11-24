@@ -178,6 +178,35 @@ def _timing():
     return _timing
 
 
+def _query_with_unrounded_estimate(
+    runtime: "_NativeRuntime", estimator: Any, query: Any
+) -> tuple[float, float]:
+    """Run native ``Query`` while recording its final pre-ceil cardinality.
+
+    NeuroCard's upstream ``Query`` returns ``ceil(selectivity * cardinality)``.
+    Temporarily wrapping the module-local NumPy ceiling lets the bridge record
+    that pre-rounding product while returning the untouched native result.
+    """
+    numpy = runtime.modules["np"]
+    original_ceil = numpy.ceil
+    captured: list[float] = []
+
+    def capture_ceil(value: Any, *args: Any, **kwargs: Any) -> Any:
+        array = numpy.asarray(value)
+        if array.size == 1:
+            captured.append(float(array.reshape(-1)[0]))
+        return original_ceil(value, *args, **kwargs)
+
+    numpy.ceil = capture_ceil
+    try:
+        rounded = float(estimator.Query(*query))
+    finally:
+        numpy.ceil = original_ceil
+    if not captured:
+        raise RuntimeError("native NeuroCard Query did not invoke numpy.ceil")
+    return rounded, captured[-1]
+
+
 def _evaluate(args: argparse.Namespace) -> None:
     timing = _timing()
     session = timing.session_from_environment("neurocard_bridge", device=args.device)
@@ -237,6 +266,7 @@ def _evaluate(args: argparse.Namespace) -> None:
                 failures[query_id] = f"{type(exc).__name__}: {exc}"
 
     estimates: dict[int, float] = {}
+    unrounded_estimates: dict[int, float] = {}
     latency_rows: list[dict[str, Any]] = []
     for repetition in range(repetitions):
         for query_id, query in enumerate(queries):
@@ -245,13 +275,16 @@ def _evaluate(args: argparse.Namespace) -> None:
             try:
                 runtime.synchronize()
                 started = time.perf_counter()
-                estimate = float(estimator.Query(*query))
+                estimate, unrounded_estimate = _query_with_unrounded_estimate(
+                    runtime, estimator, query
+                )
                 runtime.synchronize()
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 if not math.isfinite(estimate) or estimate < 0:
                     raise ValueError(f"invalid estimate {estimate}")
                 if repetition == 0:
                     estimates[query_id] = estimate
+                    unrounded_estimates[query_id] = unrounded_estimate
                 latency_rows.append(
                     {
                         "query_id": query_id,
@@ -280,6 +313,7 @@ def _evaluate(args: argparse.Namespace) -> None:
                 {
                     "query_id": query_id,
                     "estimated_cardinality": "",
+                    "unrounded_estimated_cardinality": "",
                     "status": "failed",
                     "diagnostic": failures[query_id],
                 }
@@ -289,6 +323,7 @@ def _evaluate(args: argparse.Namespace) -> None:
                 {
                     "query_id": query_id,
                     "estimated_cardinality": estimates[query_id],
+                    "unrounded_estimated_cardinality": unrounded_estimates[query_id],
                     "status": "ok",
                     "diagnostic": "",
                 }
@@ -296,7 +331,7 @@ def _evaluate(args: argparse.Namespace) -> None:
     _write_csv(
         Path(args.predictions),
         prediction_rows,
-        ("query_id", "estimated_cardinality", "status", "diagnostic"),
+        ("query_id", "estimated_cardinality", "unrounded_estimated_cardinality", "status", "diagnostic"),
     )
     _write_csv(
         Path(args.latency),

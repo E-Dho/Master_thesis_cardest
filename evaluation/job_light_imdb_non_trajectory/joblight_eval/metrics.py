@@ -64,6 +64,7 @@ def attach_q_errors(record: PredictionRecord) -> PredictionRecord:
         status=record.status,
         true_cardinality=record.true_cardinality,
         estimated_cardinality=estimate,
+        unrounded_estimated_cardinality=record.unrounded_estimated_cardinality,
         raw_q_error=raw_q_error(estimate, record.true_cardinality),
         smoothed_q_error=smoothed_q_error(estimate, record.true_cardinality),
         diagnostic=record.diagnostic,
@@ -92,7 +93,20 @@ def summarize_predictions(records: list[PredictionRecord]) -> dict[str, Any]:
     true_positive = [r for r in scored if r.true_cardinality > 0]
     true_zero = [r for r in scored if r.true_cardinality == 0]
 
+    # Baselines that expose their native pre-rounding estimates retain their
+    # reported cardinality for q-error, but use the diagnostic value for the
+    # sub-one counters.  This makes the counts meaningful for ceil-based
+    # estimators without changing their published accuracy result.
     estimates = [float(record.estimated_cardinality) for record in scored]
+    diagnostic_estimates = [
+        float(record.unrounded_estimated_cardinality)
+        if record.unrounded_estimated_cardinality is not None
+        else float(record.estimated_cardinality)
+        for record in scored
+    ]
+    unrounded_estimate_count = sum(
+        record.unrounded_estimated_cardinality is not None for record in scored
+    )
     statuses: dict[str, int] = defaultdict(int)
     for record in completed:
         statuses[record.status] += 1
@@ -123,12 +137,13 @@ def summarize_predictions(records: list[PredictionRecord]) -> dict[str, Any]:
             if record.smoothed_q_error is not None
         ),
         # --- estimate sanity counters ---
-        "estimate_lt_1_count": sum(value < 1.0 for value in estimates),
-        "estimate_lt_1_fraction": sum(value < 1.0 for value in estimates) / denominator,
-        "estimate_lt_0_1_count": sum(value < 0.1 for value in estimates),
-        "estimate_lt_0_1_fraction": sum(value < 0.1 for value in estimates) / denominator,
-        "estimate_lt_0_01_count": sum(value < 0.01 for value in estimates),
-        "estimate_lt_0_01_fraction": sum(value < 0.01 for value in estimates) / denominator,
+        "unrounded_estimate_count": unrounded_estimate_count,
+        "estimate_lt_1_count": sum(value < 1.0 for value in diagnostic_estimates),
+        "estimate_lt_1_fraction": sum(value < 1.0 for value in diagnostic_estimates) / denominator,
+        "estimate_lt_0_1_count": sum(value < 0.1 for value in diagnostic_estimates),
+        "estimate_lt_0_1_fraction": sum(value < 0.1 for value in diagnostic_estimates) / denominator,
+        "estimate_lt_0_01_count": sum(value < 0.01 for value in diagnostic_estimates),
+        "estimate_lt_0_01_fraction": sum(value < 0.01 for value in diagnostic_estimates) / denominator,
         "zero_estimate_count": sum(value == 0.0 for value in estimates),
     }
 

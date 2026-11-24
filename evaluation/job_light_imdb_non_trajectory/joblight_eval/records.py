@@ -42,6 +42,8 @@ class PredictionRecord:
     status: str
     true_cardinality: int
     estimated_cardinality: float | None
+    # Optional diagnostic before a baseline's native integer rounding.
+    unrounded_estimated_cardinality: float | None = None
     raw_q_error: float | None = None
     smoothed_q_error: float | None = None
     diagnostic: str = ""

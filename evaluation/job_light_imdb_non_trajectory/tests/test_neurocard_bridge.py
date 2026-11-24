@@ -3,6 +3,9 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
 
 
 _BRIDGE_PATH = (
@@ -33,6 +36,18 @@ class NeuroCardBridgeTest(unittest.TestCase):
         self.assertEqual(
             _BRIDGE.MODEL_CONFIGS["job_light"]["experiment"], "job-light"
         )
+
+    def test_records_native_pre_ceil_value_without_changing_result(self) -> None:
+        class Estimator:
+            def Query(self, *_query):
+                return np.ceil(0.25)
+
+        runtime = SimpleNamespace(modules={"np": np})
+        rounded, unrounded = _BRIDGE._query_with_unrounded_estimate(
+            runtime, Estimator(), ("query",)
+        )
+        self.assertEqual(rounded, 1.0)
+        self.assertEqual(unrounded, 0.25)
         self.assertEqual(
             _BRIDGE.MODEL_CONFIGS["job_light_ranges"]["experiment"],
             "job-light-ranges",

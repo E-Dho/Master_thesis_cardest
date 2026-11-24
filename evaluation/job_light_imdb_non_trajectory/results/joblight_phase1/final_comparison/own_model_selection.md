@@ -6,6 +6,17 @@ A candidate is eligible only when it proves the canonical full workload **and co
 
 A minimizes smoothed p50; B minimizes smoothed p99. Smoothed q-error floors estimate and truth independently at one. Neither workload has a different raw-median winner.
 
+## Rounded-baseline sub-one diagnostics
+
+Until the diagnostic reruns complete, the NeuroCard and DistJoin `Est. < 1`
+cells are shown as `--`. The only recovered NeuroCard pre-rounding source is
+the CPU-only raw-noceil audit `neurocard_raw_noceil_ranges_22306446`
+(2026-10-21), for the three JOB-light-ranges checkpoints at 8,000 progressive
+samples. The final accuracy rows used CUDA, so it does not match the required
+checkpoint/psamples/seed/device tuple and is not substituted into the tables.
+No matching JOB-light raw audit was found. The reruns write
+`unrounded_estimated_cardinality` beside the unchanged native rounded estimate.
+
 ## Interim Rule-Row Assembly
 
 Until the queued three-seed rule evaluations and timing jobs complete, the

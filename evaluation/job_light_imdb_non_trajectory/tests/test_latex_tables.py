@@ -84,6 +84,27 @@ class LatexTablesTest(unittest.TestCase):
         )
         self.assertNotIn("step-11,000", table)
 
+    def test_rounded_baselines_hide_sub_one_until_raw_diagnostic_exists(self) -> None:
+        missing = {
+            "method_id": "neurocard", "estimate_lt_1_count.mean": 0.0,
+        }
+        complete = dict(
+            missing,
+            **{
+                "unrounded_estimate_count.mean": 70.0,
+                "query_count.mean": 70.0,
+                "estimate_lt_1_count.mean": 9.0,
+            },
+        )
+        self.assertIsNone(MODULE["_sub_one_value"](missing))
+        self.assertEqual(MODULE["_sub_one_value"](complete), 9.0)
+
+    def test_estimates_below_one_column_is_never_bold(self) -> None:
+        column = MODULE["Column"](
+            "Est.", lambda _: 0.0, lambda _: "$0$", mark_best=False,
+        )
+        self.assertEqual(MODULE["best_rows"]([{"_eligible": True}], column), set())
+
     def test_ranges_excludes_native_deepdb_but_keeps_adapted(self) -> None:
         rows = MODULE["prepare_rows"]([
             {"workload": "job_light_ranges", "method_id": "deepdb",

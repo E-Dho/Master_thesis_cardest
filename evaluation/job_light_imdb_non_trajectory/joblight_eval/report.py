@@ -144,7 +144,10 @@ def aggregate_runs(
             ]
             workload_result["metrics"][path] = _mean_std(values)
         for name in (
+            "query_count",
+            "scored_query_count",
             "true_zero_matching_count",
+            "unrounded_estimate_count",
             "estimate_lt_1_count",
             "estimate_lt_0_1_count",
             "estimate_lt_0_01_count",
@@ -152,7 +155,7 @@ def aggregate_runs(
             "coverage_fraction",
         ):
             values = [
-                summary["workloads"][workload_id]["accuracy"][name]
+                summary["workloads"][workload_id]["accuracy"].get(name)
                 for summary in summaries
             ]
             workload_result["metrics"][name] = _mean_std(values)

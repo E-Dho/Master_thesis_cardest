@@ -49,6 +49,17 @@ class MetricsTest(unittest.TestCase):
         # raw_q_error_true_positive should match raw_q_error since all truth > 0
         self.assertEqual(summary["raw_q_error_true_positive"]["max"], summary["raw_q_error"]["max"])
 
+    def test_unrounded_diagnostic_controls_sub_one_counts_not_q_error(self) -> None:
+        summary = summarize_predictions([
+            PredictionRecord(
+                "w", 0, "ok", 10, 1.0,
+                unrounded_estimated_cardinality=0.25,
+            ),
+        ])
+        self.assertEqual(summary["unrounded_estimate_count"], 1)
+        self.assertEqual(summary["estimate_lt_1_count"], 1)
+        self.assertEqual(summary["raw_q_error"]["p50"], 10.0)
+
     def test_latency_and_throughput(self) -> None:
         records = [LatencyRecord("w", index, 0, 100.0) for index in range(10)]
         summary = summarize_latency(records)

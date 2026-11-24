@@ -614,6 +614,16 @@ def own_model_single_run_note(rows: list[dict]) -> str:
 BEST_NOTE = r"Bold: best per column."
 
 
+def _sub_one_value(row: dict[str, Any]) -> Any:
+    """Return a count only when a rounded estimator supplied raw estimates."""
+    if row.get("method_id") in {"neurocard", "distjoin"}:
+        available = row.get("unrounded_estimate_count.mean")
+        query_count = row.get("query_count.mean")
+        if _is_missing(available) or _is_missing(query_count) or available != query_count:
+            return None
+    return row.get("estimate_lt_1_count.mean")
+
+
 def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
                  data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only") or row.get("method_id") == "own_model"]
@@ -630,14 +640,15 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
                 show_std=show_std),
             key=key,
         ))
-    has_sub1 = any(not _is_missing(r.get("estimate_lt_1_count.mean")) for r in rows)
+    has_sub1 = any(not _is_missing(_sub_one_value(row)) for row in rows)
     if has_sub1:
         columns.append(Column(
             r"Est.\,$<1$",
-            value=lambda r: r.get("estimate_lt_1_count.mean"),
+            value=_sub_one_value,
             render=lambda r: fmt_count(
-                r.get("estimate_lt_1_count.mean"), r.get("estimate_lt_1_count.std"),
+                _sub_one_value(r), r.get("estimate_lt_1_count.std"),
                 show_std=show_std),
+            mark_best=False,
             key="estimates_below_one",
         ))
     header_prefix = (
@@ -657,6 +668,11 @@ def qerror_table(rows: list[dict], workload: str, family: str, show_std: bool,
         own_model_single_run_note(rows),
         (r"Est.\,$<1$: estimates below one."
          if has_sub1 else ""),
+        (
+            "NeuroCard and DistJoin round estimates up to whole rows; "
+            "Est. < 1 counts them before rounding. PostgreSQL clamps internally "
+            "to at least one row."
+        ),
         coverage_note(rows, data),
     ]
     workload_slug = workload.replace("_", "-")

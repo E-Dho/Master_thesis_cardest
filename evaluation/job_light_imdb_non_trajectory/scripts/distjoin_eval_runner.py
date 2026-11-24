@@ -82,25 +82,28 @@ def main() -> int:
 
     predictions: list[dict[str, Any]] = []
     latencies: list[dict[str, Any]] = []
-    reference: dict[int, float] = {}
+    reference: dict[int, tuple[float, float]] = {}
     for repetition in range(args.repetitions):
         for query_id, query in enumerate(loaded):
             _synchronize(device)
             started = time.perf_counter()
-            estimate = _estimate(module, estimator, tables, query, base_cards)
+            estimate, unrounded_estimate = _estimate(
+                module, estimator, tables, query, base_cards
+            )
             _synchronize(device)
             latency_ms = (time.perf_counter() - started) * 1000.0
             if repetition == 0:
-                reference[query_id] = estimate
+                reference[query_id] = (estimate, unrounded_estimate)
                 predictions.append(
                     {
                         "query_id": query_id,
                         "estimated_cardinality": estimate,
+                        "unrounded_estimated_cardinality": unrounded_estimate,
                         "status": "ok",
                         "diagnostic": "native DistJoin DirectEstimator",
                     }
                 )
-            elif not np.isclose(reference[query_id], estimate, rtol=1e-6, atol=1e-6):
+            elif not np.isclose(reference[query_id][0], estimate, rtol=1e-6, atol=1e-6):
                 raise RuntimeError(f"non-deterministic estimate for query {query_id}")
             latencies.append(
                 {
@@ -207,7 +210,7 @@ def _initialize_checkpoints(module: Any, estimator: Any, overlay: Path, mark: st
 
 
 def _estimate(module: Any, estimator: Any, tables: dict[str, Any], query: Any,
-              base_cards: dict[str, int]) -> float:
+              base_cards: dict[str, int]) -> tuple[float, float]:
     join_tables, _join_keys, predicates_by_table, _truth = query
     predicates = []
     for table_name, predicate in predicates_by_table.items():
@@ -251,7 +254,8 @@ def _estimate(module: Any, estimator: Any, tables: dict[str, Any], query: Any,
     key = ",".join(sorted(join_tables))
     if key not in base_cards:
         raise KeyError(f"missing exact base cardinality for {key}")
-    return float(np.ceil(float(condition) * int(base_cards[key])))
+    unrounded_estimate = float(condition) * int(base_cards[key])
+    return float(np.ceil(unrounded_estimate)), unrounded_estimate
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
