@@ -128,3 +128,9 @@ inference:
 
 logging:
   output_directory: model/runs/job_light_ranges_duet_binary_native_anpm_40k_rare_auxiliary_seed_0
+
+# Interpreter and device (model.src.runtime_interpreter): the learned-gpu environment
+# (PyTorch 2.5.1 + CUDA 12.1) that trained the evaluated models; no CPU fallback.
+runtime:
+  python: /work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/envs/learned-gpu/bin/python
+  require_cuda: true
