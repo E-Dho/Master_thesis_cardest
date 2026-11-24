@@ -510,9 +510,12 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 "(validation draws from the same sampler stream as training)"
             )
 
-        def prepare(step_batch: FullJoinBatch, step: int) -> PreparedStepInputs:
+        def prepare(
+            step_batch: FullJoinBatch, step: int, step_rare_batch: FullJoinBatch | None
+        ) -> PreparedStepInputs:
             return prepare_step_inputs(
                 step_batch,
+                rare_batch=step_rare_batch,
                 metadata=metadata,
                 vocabularies=vocabularies,
                 config=config,
@@ -533,6 +536,11 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
             total_steps=total_steps,
             workers=prefetch_workers,
             depth=int(training.get("prefetch_factor", 2) or 2),
+            draw_rare=(
+                (lambda step: _draw_rare_batch(sample_source, config, step))
+                if _rare_auxiliary_enabled(config)
+                else None
+            ),
         )
     training_start = perf_counter()
     if device == "cuda" and torch.cuda.is_available():
@@ -1170,8 +1178,13 @@ def prepare_step_inputs(
     sample_source: object | None,
     global_step: int,
     compute_expensive_diagnostics: bool,
+    rare_batch: FullJoinBatch | None = None,
 ) -> PreparedStepInputs:
     """The CPU part of step ``global_step`` for its (already drawn) main batch.
+
+    ``rare_batch``: the step's rare auxiliary rows when the caller drew them
+    (the prefetch sampler process, see ``_StepPipeline``); otherwise they are
+    drawn here, after the main batch, as the training loop always did.
 
     Main contexts, coverage and diagnostics, inverse-fanout (and importance)
     weights, the rare auxiliary batch with its forced contexts, and the token IDs
@@ -1276,20 +1289,11 @@ def prepare_step_inputs(
     timer.add("token_encoding", perf_counter() - token_encode_started)
     rare: dict[str, Any] | None = None
     rare_config = dict(config.get("rare_auxiliary", {}))
-    rare_enabled = bool(rare_config.get("enabled", False))
     rare_beta = float(rare_config.get("beta", 0.0) or 0.0)
-    if rare_enabled and rare_beta > 0.0:
-        rare_batch_size = int(rare_config.get("batch_size", 0) or 0)
-        if rare_batch_size <= 0:
-            raise ValueError("rare_auxiliary.batch_size must be positive when enabled")
-        rare_batches = getattr(sample_source, "rare_batches", None)
-        if rare_batches is None:
-            raise ValueError("rare_auxiliary.enabled requires a rare_support sample source")
+    if _rare_auxiliary_enabled(config):
         rare_started = perf_counter()
-        rare_batch = rare_batches(
-            rare_batch_size,
-            seed=rare_row_rng_seed(int(config["training"].get("seed", 0)), global_step),
-        )
+        if rare_batch is None:
+            rare_batch = _draw_rare_batch(sample_source, config, global_step)
         selected_strata = tuple(rare_batch.importance_metadata["selected_strata"])  # type: ignore[index]
         rare_rng = np.random.default_rng(rare_predicate_rng_seed(generator_seed, global_step))
         rare_contexts, rare_target_rows, rare_generation_stats = (
@@ -1359,6 +1363,26 @@ def prepare_step_inputs(
         rare=rare,
         phase_timings=timer.timings,
         source_counter_deltas=_source_counter_deltas(before, _source_counters(sample_source)),
+    )
+
+
+def _rare_auxiliary_enabled(config: dict[str, Any]) -> bool:
+    rare_config = dict(config.get("rare_auxiliary", {}))
+    return bool(rare_config.get("enabled", False)) and float(rare_config.get("beta", 0.0) or 0.0) > 0.0
+
+
+def _draw_rare_batch(sample_source: object | None, config: dict[str, Any], global_step: int) -> FullJoinBatch:
+    """The rare auxiliary rows of step ``global_step`` (a call on the sample source)."""
+
+    rare_batch_size = int(dict(config.get("rare_auxiliary", {})).get("batch_size", 0) or 0)
+    if rare_batch_size <= 0:
+        raise ValueError("rare_auxiliary.batch_size must be positive when enabled")
+    rare_batches = getattr(sample_source, "rare_batches", None)
+    if rare_batches is None:
+        raise ValueError("rare_auxiliary.enabled requires a rare_support sample source")
+    return rare_batches(
+        rare_batch_size,
+        seed=rare_row_rng_seed(int(config["training"].get("seed", 0)), global_step),
     )
 
 
@@ -1546,16 +1570,22 @@ def _source_chain(sample_source: object | None) -> list[object]:
 
 
 def _source_counters(sample_source: object | None) -> dict[str, Any]:
-    """Bookkeeping counters of the sample-source chain (reported in the summary)."""
+    """Bookkeeping counters of the sample-source chain (reported in the summary).
+
+    Only counters a source stores itself: wrappers expose some of their base's
+    counters as read-only properties (``sampler_run_calls``), which are counted
+    and replayed once, on the source that owns them.
+    """
 
     counters: dict[str, Any] = {}
     for depth, source in enumerate(_source_chain(sample_source)):
+        own = getattr(source, "__dict__", {})
         for name in _SOURCE_INT_COUNTERS:
-            value = getattr(source, name, None)
+            value = own.get(name)
             if isinstance(value, int) and not isinstance(value, bool):
                 counters[f"{depth}:{name}"] = int(value)
         for name in _SOURCE_COUNTER_MAPS:
-            value = getattr(source, name, None)
+            value = own.get(name)
             if value is not None:
                 counters[f"{depth}:{name}"] = dict(value)
     return counters
@@ -1650,10 +1680,11 @@ def _prefetch_report(workers: int, history: list[dict[str, float]]) -> dict[str,
 class _StepPipeline:
     """Training steps 0, 1, ... prepared ahead by forked processes, in order.
 
-    One producer process draws the main batches from the sample source exactly as
-    the training loop would (same calls, same order, so a live sampler yields the
-    same row stream); ``workers`` processes run ``prepare(batch, step)`` for steps
-    ``w, w + workers, ...``. Counter changes made in the processes are returned
+    One producer process makes every sample-source call of the training loop in
+    the same order (main batch of step k, then its rare batch via ``draw_rare``,
+    then step k + 1, ...), so a live sampler whose main and conditional draws
+    share random state yields the same rows; ``workers`` processes run
+    ``prepare(batch, step, rare_batch)`` for steps ``w, w + workers, ...``. Counter changes made in the processes are returned
     with each step and applied to the training process's source.
     """
 
@@ -1668,6 +1699,7 @@ class _StepPipeline:
         total_steps: int,
         workers: int,
         depth: int,
+        draw_rare: object | None = None,
     ) -> None:
         import gc
         import multiprocessing
@@ -1685,7 +1717,7 @@ class _StepPipeline:
         self._processes = [
             context.Process(
                 target=_produce_step_batches,
-                args=(sample_source, metadata, batch_size, seed, total_steps, self._inputs),
+                args=(sample_source, metadata, batch_size, seed, total_steps, self._inputs, draw_rare),
                 daemon=True,
                 name="prefetch-sampler",
             )
@@ -1741,6 +1773,7 @@ def _produce_step_batches(
     seed: int,
     total_steps: int,
     inputs: list,
+    draw_rare: object | None,
 ) -> None:
     import traceback
 
@@ -1749,28 +1782,38 @@ def _produce_step_batches(
             before = _source_counters(sample_source)
             started = perf_counter()
             batch = sample_source.batches(batch_size, seed=seed + step)  # type: ignore[attr-defined]
-            seconds = perf_counter() - started
+            timings = {"batch_sampling": perf_counter() - started}
+            rare_batch = None
+            if draw_rare is not None:
+                started = perf_counter()
+                rare_batch = _without_column_metadata(draw_rare(step), metadata)  # type: ignore[operator]
+                timings["rare_batch_sampling"] = perf_counter() - started
             deltas = _source_counter_deltas(before, _source_counters(sample_source))
             inputs[step % len(inputs)].put(
-                ("batch", step, _without_column_metadata(batch, metadata), seconds, deltas)
+                ("batch", step, (_without_column_metadata(batch, metadata), rare_batch), timings, deltas)
             )
     except BaseException:
         message = traceback.format_exc()
         for queue in inputs:
-            queue.put(("error", None, message, 0.0, {}))
+            queue.put(("error", None, message, {}, {}))
 
 
 def _prepare_step_worker(prepare: object, metadata: object, steps: int, inputs: object, outputs: object) -> None:
     import traceback
 
     for _ in range(int(steps)):
-        kind, step, batch, seconds, deltas = inputs.get()  # type: ignore[attr-defined]
+        kind, step, payload, timings, deltas = inputs.get()  # type: ignore[attr-defined]
         if kind == "error":
-            outputs.put(("error", step, batch))  # type: ignore[attr-defined]
+            outputs.put(("error", step, payload))  # type: ignore[attr-defined]
             return
         try:
-            prepared = prepare(_with_column_metadata(batch, metadata), step)  # type: ignore[operator]
-            prepared.phase_timings = {"batch_sampling": float(seconds), **prepared.phase_timings}
+            batch, rare_batch = payload
+            prepared = prepare(  # type: ignore[operator]
+                _with_column_metadata(batch, metadata),
+                step,
+                None if rare_batch is None else _with_column_metadata(rare_batch, metadata),
+            )
+            prepared.phase_timings = {**timings, **prepared.phase_timings}
             prepared.source_counter_deltas = _merge_source_counter_deltas(
                 deltas, prepared.source_counter_deltas
             )

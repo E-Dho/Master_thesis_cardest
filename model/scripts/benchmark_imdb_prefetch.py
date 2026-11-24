@@ -133,10 +133,13 @@ def _supply(args, config_path: str) -> dict:
     batch_size = int(config["training"]["batch_size"])
     seed = int(config["training"].get("seed", 0))
 
-    def prepare(batch, step: int):
+    def prepare(batch, step: int, rare_batch=None):
         return trainer.prepare_step_inputs(batch, metadata=metadata, vocabularies=vocabularies, config=config,
                                            context_generator=generator, sample_source=source, global_step=step,
-                                           compute_expensive_diagnostics=False)
+                                           compute_expensive_diagnostics=False, rare_batch=rare_batch)
+
+    draw_rare = ((lambda step: trainer._draw_rare_batch(source, config, step))
+                 if trainer._rare_auxiliary_enabled(config) else None)
 
     report = {"batch_size": batch_size, "setup_seconds": setup_seconds, "memory_after_setup": _memory(), "runs": []}
     print(json.dumps({"setup_seconds": setup_seconds, **_memory()}), flush=True)
@@ -154,7 +157,7 @@ def _supply(args, config_path: str) -> dict:
         else:
             pipeline = trainer._StepPipeline(sample_source=source, prepare=prepare, metadata=metadata,
                                              batch_size=batch_size, seed=seed, total_steps=steps, workers=workers,
-                                             depth=int(args.prefetch_factor))
+                                             depth=int(args.prefetch_factor), draw_rare=draw_rare)
             begin = None
             try:
                 for step in range(steps):
