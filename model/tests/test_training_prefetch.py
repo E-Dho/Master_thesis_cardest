@@ -1,8 +1,9 @@
 """training.prefetch_workers: the same training with the CPU part in other processes.
 
-A sampler process draws the main batches in the training loop's order (so a
-buffered live sampler yields the same row stream) and workers prepare each step's
-contexts, weights, rare batch and token IDs. Runs with 0 and with 2-3 workers are
+A sampler process makes the training loop's sample-source calls in its order
+(main batch, then rare batch, of each step), so a buffered live sampler whose main
+and conditional draws share random state yields the same rows, and workers
+prepare each step's contexts, weights, forced rare contexts and token IDs. Runs with 0 and with 2-3 workers are
 compared: losses, metrics apart from timings, the summary's sampler counters and
 all checkpoints (model and optimizer state) are identical, with residual dropout
 on so that a shifted torch random stream would show.
@@ -71,6 +72,74 @@ class BufferedSource:
         self.fresh_rows_drawn += fresh
         return FullJoinBatch(encoded_values=np.concatenate(pieces), column_metadata=self.metadata.columns,
                              fresh_rows_drawn=fresh, fixture_rows_reused=0)
+
+
+class DelegatingWrapper:
+    """A wrapper like FactorizedMetadataSampleSource: its base's counter as a read-only property."""
+
+    def __init__(self, base) -> None:
+        self.base_source = base
+
+    @property
+    def metadata(self):
+        return self.base_source.metadata
+
+    @property
+    def join_cardinality(self) -> int:
+        return self.base_source.join_cardinality
+
+    @property
+    def sampler_run_calls(self) -> int:
+        return self.base_source.sampler_run_calls
+
+    def discard_buffer(self) -> None:
+        self.base_source.discard_buffer()
+
+    def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
+        return self.base_source.batches(batch_size, seed=seed)
+
+
+class SharedStateRareSource:
+    """Main and rare draws share one random state, as in NeuroCard's sampler.
+
+    Main rows come from ``_rng``; each rare draw first consumes ``_rng`` and its
+    rows depend on that draw, so the main stream depends on when rare draws happen.
+    """
+
+    def __init__(self, rare_source) -> None:
+        self.base_source = rare_source
+        self._rows = _synthetic_rows(rare_source)
+        self._rng = np.random.default_rng(11)
+        self.sampler_run_calls = 0
+
+    @property
+    def metadata(self):
+        return self.base_source.metadata
+
+    @property
+    def join_cardinality(self) -> int:
+        return self.base_source.join_cardinality
+
+    def discard_buffer(self) -> None:
+        pass
+
+    def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
+        del seed
+        self.sampler_run_calls += 1
+        rows = self._rows[self._rng.integers(0, len(self._rows), size=batch_size)]
+        return FullJoinBatch(encoded_values=rows, column_metadata=self.metadata.columns,
+                             fresh_rows_drawn=batch_size, fixture_rows_reused=0)
+
+    def rare_batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
+        shift = int(self._rng.integers(0, 1000))
+        return self.base_source.rare_batches(batch_size, seed=seed + shift)
+
+
+def _synthetic_rows(source) -> np.ndarray:
+    current = source
+    while not hasattr(current, "dataset"):
+        current = current.base_source
+    return current.dataset.encoded_rows
 
 
 class FailingSource(BufferedSource):
@@ -142,6 +211,12 @@ class PrefetchEquivalenceTest(unittest.TestCase):
 
     def test_rare_auxiliary_batch(self) -> None:
         self._compare(sample_source_from_config, rare=True, workers=3)
+
+    def test_counters_behind_read_only_wrapper_properties(self) -> None:
+        self._compare(lambda config: DelegatingWrapper(BufferedSource()), rare=False, workers=2)
+
+    def test_main_and_rare_draws_sharing_random_state(self) -> None:
+        self._compare(lambda config: SharedStateRareSource(sample_source_from_config(config)), rare=True, workers=3)
 
     def test_sampler_errors_reach_the_training_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
