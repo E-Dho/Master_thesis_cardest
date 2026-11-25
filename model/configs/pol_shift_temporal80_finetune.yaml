@@ -3,6 +3,8 @@
 # data (pol_50m_traj_dedup_single_anchor_mbr_segments_first_20k.yaml's preparation): training.init_checkpoint, 2,000 steps (10 % of the
 # training) at a tenth of the learning rate (1e-5), rare-support planning over those steps.
 # Everything else as the evaluated model. The stale run must have finished first.
+# Since 2026-11-25 also with predicate_generation.log_width_gate; the retrain
+# reference is pol_main_log_width_gate_seed0.yaml (model/pol-ablations), trained with the same gate.
 dataset:
   type: pol_trajectory_full_join
   name: pol_shift_temporal80_finetune
@@ -83,6 +85,33 @@ predicate_generation:
   trajectory_temporal_probability: 0.35
   trajectory_spatial_probability: 0.35
   trajectory_srid: 26916
+  # Log-width gate (model.src.predicates.generation, 2026-11-25): per context and
+  # dimension, with probability 0.5 the bounds on the time / coordinate columns lie
+  # at a log-uniform distance from the row's own value (min_width up to the
+  # column's domain span) instead of uniformly over the domain ranks. 0.5 mixes
+  # the two; the minimum widths are the data's resolution (1 s, 1 m), not taken
+  # from the benchmark. probability 0 is the generator of the earlier models.
+  log_width_gate:
+    probability: 0.5
+    dimensions:
+      space:
+        min_width: 1.0
+        columns:
+          - segments:s_x
+          - segments:s_y
+          - segments:e_x
+          - segments:e_y
+          - segments:seg_min_x
+          - segments:seg_max_x
+          - segments:seg_min_y
+          - segments:seg_max_y
+      time:
+        min_width: 1.0
+        columns:
+          - trips:start_time
+          - trips:end_time
+          - segments:t_s
+          - segments:t_e
 
 predicate_encoding:
   mode: two_slot_binary_duet
