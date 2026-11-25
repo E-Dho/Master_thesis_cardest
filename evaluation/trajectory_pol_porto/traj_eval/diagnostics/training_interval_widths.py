@@ -427,15 +427,26 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "",
         "## Training contexts",
         "",
-        "| Interval kind | Two-sided contexts | Share of all contexts | One-sided | Median width | Width bins |",
-        "| --- | ---: | ---: | ---: | ---: | --- |",
+        "| Interval kind | Two-sided contexts | Share of all contexts | Projected two-sided (20k steps) | One-sided | Median width | Width bins |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for key, stats in training["intervals"].items():
         median = "--" if stats["median_width_seconds"] is None else f"{stats['median_width_seconds']:.3g} s"
         lines.append(
             f"| {key} | {stats['two_sided_context_count']} | {_percent(stats['share_of_all_contexts'])} | "
-            f"{stats['one_sided_context_count']} | {median} | {_width_summary(stats)} |"
+            f"{stats['projected_two_sided_context_count']:.0f} | {stats['one_sided_context_count']} | "
+            f"{median} | {_width_summary(stats)} |"
         )
+    lines += [
+        "",
+        "### Equality predicates in training contexts",
+        "",
+        "| Column | Count | Share of all contexts |",
+        "| --- | ---: | ---: |",
+    ]
+    sampled_contexts = training["sampling"]["sampled_contexts"]
+    for column, count in training["equality_predicates"].items():
+        lines.append(f"| {column} | {count} | {_percent(count / sampled_contexts)} |")
     lines += [
         "",
         "## POL v3 benchmark core predicates",
