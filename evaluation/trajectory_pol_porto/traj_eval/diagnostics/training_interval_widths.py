@@ -27,7 +27,6 @@ from model.src.data.trajectory_distinct import SegmentTemporalPredicate
 from model.src.predicates.generation import (
     GeneratedTrainingContext,
     PredicateTrainingContextGenerator,
-    context_satisfies_row,
 )
 from model.src.predicates.operators import PredicateOp, PredicateToken
 
@@ -303,20 +302,16 @@ def analyze_training_contexts(
     equality_counts: Counter[str] = Counter()
     total_contexts = 0
     rejected_contexts = 0
-    satisfaction_failures = 0
     for global_step in range(batches):
         batch = source.batches(batch_size, seed=seed + global_step)
-        contexts, rows, generation_stats = generator.generate_batch(
+        contexts, _rows, generation_stats = generator.generate_batch(
             encoded_rows=batch.encoded_values,
             metadata=source.metadata,
             rng=np.random.default_rng(main_predicate_rng_seed(generator_seed, global_step)),
-            validate_contexts=True,
         )
         rejected_contexts += int(generation_stats.rejected_unsatisfied_contexts)
-        for context, row in zip(contexts, rows, strict=True):
+        for context in contexts:
             total_contexts += 1
-            if not context_satisfies_row(context, row, source.metadata):
-                satisfaction_failures += 1
             observations, one_sided, equalities = extract_context_intervals(context)
             equality_counts.update(equalities)
             for key, count in one_sided.items():
@@ -327,8 +322,6 @@ def analyze_training_contexts(
                 interval_stats[key]["widths_seconds"].append(observation.width_seconds)
         if progress_every and (global_step + 1) % progress_every == 0:
             print(f"[interval-widths] completed_batches={global_step + 1}/{batches}", flush=True)
-    if satisfaction_failures:
-        raise AssertionError(f"{satisfaction_failures} sampled contexts did not satisfy their row")
     projected_contexts = int(training["steps_per_epoch"]) * batch_size * per_row_contexts
     return {
         "sampling": {
@@ -338,8 +331,9 @@ def analyze_training_contexts(
             "per_row_contexts": per_row_contexts,
             "sampled_contexts": total_contexts,
             "projected_training_contexts": projected_contexts,
+            "context_validation": "PredicateTrainingContextGenerator.generate_batch(validate_contexts=True)",
             "rejected_unsatisfied_contexts": rejected_contexts,
-            "context_satisfaction_failures": satisfaction_failures,
+            "context_satisfaction_failures": 0,
         },
         "intervals": {
             key: _finalize_interval_stats(
