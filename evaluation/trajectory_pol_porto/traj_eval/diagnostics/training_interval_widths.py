@@ -365,14 +365,33 @@ def analyze_benchmark(path: Path) -> dict[str, Any]:
             if dimension not in {"temporal", "spatio_temporal"}:
                 continue
             for predicate in record.get("predicates", ()):
-                if predicate.get("role") != "core" or predicate.get("kind") != "temporal":
+                if predicate.get("role") != "core":
                     continue
                 if predicate.get("lower") is None or predicate.get("upper") is None:
                     continue
-                attribute = str(predicate.get("attribute"))
+                if dimension == "temporal" and predicate.get("kind") == "temporal":
+                    attribute = str(predicate.get("attribute"))
+                    width_key = "width_seconds"
+                elif (
+                    dimension == "spatio_temporal"
+                    and predicate.get("kind") == "spatio_temporal"
+                    and predicate.get("attribute") == "segment_geom"
+                ):
+                    # The benchmark combines spatial and temporal conditions in
+                    # one segment geometry predicate. Its lower/upper fields are
+                    # still the segment overlap interval.
+                    attribute = "segment_time"
+                    width_key = "temporal_width_seconds"
+                else:
+                    continue
                 if attribute not in {"segment_time", "trip_time"}:
                     continue
-                width = float(predicate.get("width_seconds", _seconds(predicate["upper"]) - _seconds(predicate["lower"])))
+                width = float(
+                    predicate.get(
+                        width_key,
+                        _seconds(predicate["upper"]) - _seconds(predicate["lower"]),
+                    )
+                )
                 grouped[f"{attribute}/{dimension}"].append(width)
                 total_intervals += 1
     return {

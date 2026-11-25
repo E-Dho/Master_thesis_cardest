@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from model.src.data.trajectory_distinct import SegmentTemporalPredicate, TrajectoryQuerySemantics
 from model.src.predicates.generation import GeneratedTrainingContext
 from model.src.predicates.operators import PredicateOp, PredicateToken
 
 from evaluation.trajectory_pol_porto.traj_eval.diagnostics.training_interval_widths import (
+    analyze_benchmark,
     extract_context_intervals,
     interval_report_key,
     one_sided_report_key,
@@ -15,6 +19,26 @@ from evaluation.trajectory_pol_porto.traj_eval.diagnostics.training_interval_wid
 
 
 class TrainingIntervalWidthsTest(unittest.TestCase):
+    def test_benchmark_reads_spatio_temporal_segment_interval(self) -> None:
+        record = {
+            "category": {"dimension": "spatio_temporal"},
+            "predicates": [{
+                "role": "core",
+                "kind": "spatio_temporal",
+                "attribute": "segment_geom",
+                "lower": "2020-01-01 00:00:00",
+                "upper": "2020-01-01 00:30:00",
+                "temporal_width_seconds": 1800.0,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "benchmark.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            report = analyze_benchmark(path)
+        stats = report["intervals"]["segment_time/spatio_temporal"]
+        self.assertEqual(stats["two_sided_context_count"], 1)
+        self.assertEqual(stats["bins"]["1_min_to_1_h"]["count"], 1)
+
     def test_maps_extractor_labels_to_report_groups(self) -> None:
         self.assertEqual(
             interval_report_key("segment_time", "trajectory_temporal"),
