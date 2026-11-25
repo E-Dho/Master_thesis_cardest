@@ -44,12 +44,13 @@ Without per-run build metrics those tables are still written, with "--" cells.
 from __future__ import annotations
 
 import argparse
+import io
+import pickle
 import json
 import math
 import os
 import re
 import statistics
-import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -1163,30 +1164,81 @@ def _selected_own_model_training_seconds(row: dict[str, Any]) -> tuple[float, fl
     return _mean_std(values)
 
 
-def _inference_state_dict_metadata(checkpoint_path: Path) -> dict[str, float | int | str]:
-    """Measure the deployable model state without optimizer or training metadata."""
+def _torch_save_bytes(value: Any) -> int:
+    import torch
+
+    with io.BytesIO() as buffer:
+        torch.save(value, buffer)
+        return buffer.getbuffer().nbytes
+
+
+def _checkpoint_breakdown(payload: dict[str, Any], top: int = 25) -> dict[str, Any]:
+    """Match trajectory_pol_porto/scripts/own_model_size.py::breakdown.
+
+    Field sizes are independent serializations, not additive archive offsets:
+    torch.save for the state dict, pickle protocol 2 for other fields.
+    """
+    def pickled_bytes(value: Any) -> int:
+        return len(pickle.dumps(value, protocol=2))
+
+    fields = {
+        key: _torch_save_bytes(value) if key == "model_state_dict" else pickled_bytes(value)
+        for key, value in payload.items() if key != "optimizer_state_dict"
+    }
+    columns = []
+    for column in (payload.get("metadata") or {}).get("columns") or []:
+        columns.append({
+            "name": column.get("name"), "kind": column.get("kind"), "table": column.get("table"),
+            "domain_size": len(column["domain"]) if isinstance(column.get("domain"), (list, tuple)) else 0,
+            "predicate_domain_size": (len(column["predicate_domain"])
+                                      if isinstance(column.get("predicate_domain"), (list, tuple)) else 0),
+            "bytes": pickled_bytes(column),
+        })
+    columns.sort(key=lambda column: column["bytes"], reverse=True)
+    vocabularies = {}
+    for key, value in (payload.get("predicate_vocabularies") or {}).items():
+        record: dict[str, Any] = {"bytes": pickled_bytes(value)}
+        if isinstance(value, dict):
+            parts = sorted(((str(k), pickled_bytes(v)) for k, v in value.items()),
+                           key=lambda part: part[1], reverse=True)
+            record["largest"] = dict(parts[:top])
+        vocabularies[key] = record
+    return {
+        "fields_bytes": dict(sorted(fields.items(), key=lambda part: part[1], reverse=True)),
+        "columns": len(columns), "largest_columns": columns[:top],
+        "metadata_column_bytes_total": sum(column["bytes"] for column in columns),
+        "predicate_vocabularies": vocabularies,
+    }
+
+
+def _inference_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any]:
+    """Measure the full inference payload, retaining domains, schemas and buffers.
+
+    Identical to the POL size definition: only optimizer_state_dict is replaced
+    by None. All serializations stay in memory; the source file is read-only.
+    Parameter counts continue to come from the bridge's module.parameters().
+    """
     import torch
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = checkpoint.get("model_state_dict")
-    if not isinstance(state_dict, dict):
+    if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("model_state_dict"), dict):
         raise ValueError(f"{checkpoint_path} has no model_state_dict")
+    state_dict = checkpoint["model_state_dict"]
     tensors = [value for value in state_dict.values() if isinstance(value, torch.Tensor)]
     raw_bytes = sum(value.numel() * value.element_size() for value in tensors)
-    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as handle:
-        temporary_path = Path(handle.name)
-    try:
-        torch.save(state_dict, temporary_path)
-        serialized_bytes = temporary_path.stat().st_size
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    reduced = dict(checkpoint)
+    reduced["optimizer_state_dict"] = None
     return {
-        "inference_state_dict_mb": serialized_bytes / 1_000_000,
+        "checkpoint": str(checkpoint_path),
+        "inference_checkpoint_mb": _torch_save_bytes(reduced) / 1_000_000,
+        "state_dict_mb": _torch_save_bytes(state_dict) / 1_000_000,
         "inference_state_dict_raw_mb": raw_bytes / 1_000_000,
         "inference_state_dict_tensor_count": sum(value.numel() for value in tensors),
         "inference_state_dict_tensor_bytes": raw_bytes,
         "full_checkpoint_mb": checkpoint_path.stat().st_size / 1_000_000,
-        "model_size_source": "torch.save(model_state_dict)",
+        "optimizer_state_mb": _torch_save_bytes(checkpoint.get("optimizer_state_dict")) / 1_000_000,
+        "breakdown": _checkpoint_breakdown(reduced),
+        "model_size_source": "torch.save(checkpoint without optimizer_state_dict)",
     }
 
 
@@ -1196,7 +1248,7 @@ def _selected_own_model_metadata(row: dict[str, Any]) -> list[dict[str, Any]] | 
     if not checkpoints:
         return None
     try:
-        return [_inference_state_dict_metadata(Path(path)) for path in checkpoints]
+        return [_inference_checkpoint_metadata(Path(path)) for path in checkpoints]
     except (ImportError, OSError, ValueError):
         return None
 
@@ -1240,6 +1292,7 @@ def refresh_selected_own_model_build_records(rows: list[dict], results_root: Pat
                 artifact["selected_checkpoint_metadata_aggregation"] = "three-seed interim mean"
             else:
                 artifact.update(metadata[index if len(metadata) > 1 else 0])
+            artifact["selected_checkpoint_metadata"] = metadata
             if training is not None:
                 artifact["selected_checkpoint_training_seconds"] = training[0]
                 artifact["selected_checkpoint_training_seconds_std"] = training[1]
@@ -1330,17 +1383,17 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
             row["_build.total_s.mean"], row["_build.total_s.std"] = selected_training
             row["_build.training_record_is_selected_checkpoint"] = True
         selected_size = _mean_std(collect(
-            lambda m: artifacts(m).get("inference_state_dict_mb")
+            lambda m: artifacts(m).get("inference_checkpoint_mb")
         ))
         if len(metrics) == 1 and selected_size[0] is not None:
             selected_size = (
                 selected_size[0],
-                float(artifacts(metrics[0]).get("inference_state_dict_mb_std") or 0.0),
+                float(artifacts(metrics[0]).get("inference_checkpoint_mb_std") or 0.0),
             )
         if selected_size[0] is not None:
             row["_build.size_mb.mean"], row["_build.size_mb.std"] = selected_size
-            row["_build.size_is_inference_state_dict"] = True
-        row["_build.has_inference_state_dict_mb"] = selected_size[0] is not None
+            row["_build.size_is_inference_checkpoint"] = True
+        row["_build.has_inference_checkpoint_mb"] = selected_size[0] is not None
         if checkpoint_load_only and not has_selected_training:
             # A bridge load is not training/statistics construction when no
             # selected-checkpoint record supplies the real training duration.
@@ -1357,8 +1410,8 @@ def validate_selected_own_model_build_metrics(rows: list[dict]) -> None:
         if row.get("method_id") != "own_model" or not variant or variant.get("qerror_only"):
             continue
         fields = []
-        if not row.get("_build.has_inference_state_dict_mb"):
-            fields.append("inference_state_dict_mb")
+        if not row.get("_build.has_inference_checkpoint_mb"):
+            fields.append("inference_checkpoint_mb")
         if not row.get("_build.has_selected_checkpoint_training_seconds"):
             fields.append("selected_checkpoint_training_seconds")
         if fields:
@@ -1468,8 +1521,8 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool, data: Data
     marks = column_marks(rows, columns)
     notes = [
         r"MB = $10^6$ bytes.",
-        (r"\OwnModelName{}: inference-only state dict."
-         if any(r.get("_build.size_is_inference_state_dict") for r in rows) else ""),
+        (r"\OwnModelName{}: checkpoint without optimizer state, including the value domains."
+         if any(r.get("_build.size_is_inference_checkpoint") for r in rows) else ""),
         marks_note("For parameters and size", marks, rows),
         own_model_single_run_note(rows),
         coverage_note(rows, data),

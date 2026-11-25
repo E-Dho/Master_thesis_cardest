@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import io
+import importlib.util
 import runpy
 import tempfile
 import unittest
@@ -359,6 +361,48 @@ class LatexTablesTest(unittest.TestCase):
         ]
         self.assertEqual(MODULE["marked_rows"](partial, column, MODULE["DATA_DRIVEN_METHODS"]), {1})
 
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is required for checkpoint measurement")
+    def test_inference_checkpoint_retains_domains_and_never_changes_source(self) -> None:
+        import torch
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.pt"
+            payload = {
+                "model_state_dict": {"weight": torch.arange(6).reshape(2, 3),
+                                     "mask": torch.ones(2, 3, dtype=torch.bool)},
+                "metadata": {"columns": [{"name": "x", "kind": "data", "domain": [1, 2, 3]}]},
+                "predicate_vocabularies": {"x": {"equal": [1, 2, 3]}},
+                "optimizer_state_dict": {"state": {0: {"exp_avg": torch.ones(2, 3)}}},
+                "step": 11000,
+            }
+            torch.save(payload, path)
+            before, stat = path.read_bytes(), path.stat()
+            expected = dict(payload, optimizer_state_dict=None)
+            buffer = io.BytesIO()
+            torch.save(expected, buffer)
+            measured = MODULE["_inference_checkpoint_metadata"](path)
+            self.assertEqual(measured["inference_checkpoint_mb"], buffer.getbuffer().nbytes / 1_000_000)
+            self.assertGreater(measured["inference_checkpoint_mb"], measured["state_dict_mb"])
+            self.assertEqual(measured["full_checkpoint_mb"], len(before) / 1_000_000)
+            self.assertNotIn("parameter_count", measured)
+            self.assertNotIn("optimizer_state_dict", measured["breakdown"]["fields_bytes"])
+            self.assertEqual(measured["breakdown"]["largest_columns"][0]["domain_size"], 3)
+            self.assertIn("metadata", measured["breakdown"]["fields_bytes"])
+            self.assertIn("predicate_vocabularies", measured["breakdown"]["fields_bytes"])
+            self.assertEqual(measured["model_size_source"],
+                             "torch.save(checkpoint without optimizer_state_dict)")
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(path.stat().st_mtime_ns, stat.st_mtime_ns)
+            self.assertEqual(path.stat().st_mode, stat.st_mode)
+
+    def test_model_size_note_uses_full_inference_checkpoint_definition(self) -> None:
+        for workload in ("job_light", "job_light_ranges"):
+            row = {"method_id": "own_model", "variant_id": "test", "_eligible": True,
+                   "_build_runs": 1, "_build.size_is_inference_checkpoint": True, "_label": "Own model"}
+            table = MODULE["model_size_table"]([row], workload, True, MODULE["DataStore"]())
+            self.assertIn(r"\OwnModelName{}: checkpoint without optimizer state, including the value domains.", table)
+            self.assertIn(r"MB = $10^6$ bytes.", table)
+
     def test_missing_size_does_not_clear_selected_training_time(self) -> None:
         attach = MODULE["attach_build_metrics"]
         runtime = attach.__globals__
@@ -394,10 +438,10 @@ class LatexTablesTest(unittest.TestCase):
         row = {"workload": "job_light", "method_id": "own_model", "variant_id": variant}
         try:
             with self.assertRaisesRegex(
-                ValueError, "inference_state_dict_mb.*selected_checkpoint_training_seconds"
+                ValueError, "inference_checkpoint_mb.*selected_checkpoint_training_seconds"
             ):
                 validate([row])
-            row["_build.has_inference_state_dict_mb"] = True
+            row["_build.has_inference_checkpoint_mb"] = True
             with self.assertRaisesRegex(ValueError, "selected_checkpoint_training_seconds"):
                 validate([row])
             row["_build.has_selected_checkpoint_training_seconds"] = True
@@ -424,9 +468,9 @@ class LatexTablesTest(unittest.TestCase):
                 runtime["_run_dirs_from_timing"] = lambda _row, _root: [run]
                 runtime["_run_dirs_from_scan"] = lambda _row, _root: [run]
                 runtime["_selected_own_model_metadata"] = lambda _row: [
-                    {"inference_state_dict_mb": 10.0},
-                    {"inference_state_dict_mb": 20.0},
-                    {"inference_state_dict_mb": 30.0},
+                    {"inference_checkpoint_mb": 10.0},
+                    {"inference_checkpoint_mb": 20.0},
+                    {"inference_checkpoint_mb": 30.0},
                 ]
                 runtime["_selected_own_model_training_seconds"] = lambda _row: (90.0, 9.0)
                 row = {"workload": "job_light_ranges", "method_id": "own_model",
@@ -434,8 +478,9 @@ class LatexTablesTest(unittest.TestCase):
                 self.assertEqual(refresh([row], run), 1)
                 document = json.loads((run / "build_metrics.json").read_text())
                 artifact = document["artifacts"]
-                self.assertEqual(artifact["inference_state_dict_mb"], 20.0)
-                self.assertEqual(artifact["inference_state_dict_mb_std"], 10.0)
+                self.assertEqual(artifact["inference_checkpoint_mb"], 20.0)
+                self.assertEqual(artifact["inference_checkpoint_mb_std"], 10.0)
+                self.assertEqual(len(artifact["selected_checkpoint_metadata"]), 3)
                 self.assertEqual(artifact["selected_checkpoint_training_seconds"], 90.0)
                 self.assertEqual(artifact["selected_checkpoint_training_seconds_std"], 9.0)
                 attach([row], run)
