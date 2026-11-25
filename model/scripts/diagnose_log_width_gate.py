@@ -1,8 +1,10 @@
 """Widths of training intervals and windows with predicate_generation.log_width_gate.
 
 Draws main batches from the configured sample source (as training does), generates
-their contexts with the config's predicate generator at each gate probability
-(the config's log_width_gate with only the probability replaced), and reports per
+their contexts with the trainer's predicate generator configuration (training's
+_predicate_generation_config, which adds the top-level trajectory_spatial section,
+i.e. the segment-MBR windows) at each gate probability (the config's log_width_gate
+with only the probability replaced), validating every context, and reports per
 probability: generation seconds per batch, rejected contexts, and the width
 distribution of
   - segment temporal contexts (t_s < U, t_e >= L): U - L,
@@ -73,6 +75,7 @@ def main() -> int:
     from model.src.config import load_simple_yaml, validate_config
     from model.src.data.sample_sources import sample_source_from_config
     from model.src.predicates.generation import PredicateTrainingContextGenerator
+    from model.src.training.resmade_trainer import _predicate_generation_config
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", required=True)
@@ -95,9 +98,11 @@ def main() -> int:
     batch_size = int(config["training"]["batch_size"])
     batches = [source.batches(batch_size, seed=args.seed + index).encoded_values for index in range(args.batches)]
     report = {"config": args.config, "batches": args.batches, "batch_size": batch_size,
-              "setup_seconds": time.perf_counter() - started, "gate": gate, "probabilities": {}}
+              "setup_seconds": time.perf_counter() - started, "gate": gate,
+              "trajectory_spatial": _predicate_generation_config(config).get("trajectory_spatial"),
+              "probabilities": {}}
     for probability in [float(value) for value in args.probabilities.split(",")]:
-        predicate_config = dict(config["predicate_generation"])
+        predicate_config = _predicate_generation_config(config)
         predicate_config["log_width_gate"] = {**gate, "probability": probability}
         generator = PredicateTrainingContextGenerator(predicate_config)
         warm = time.perf_counter()

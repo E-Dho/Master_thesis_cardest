@@ -80,9 +80,17 @@ class _PolFixture:
         return cls
 
 
+def _training_predicate_config(config: dict) -> dict:
+    """The generator configuration training uses (adds the top-level trajectory_spatial)."""
+
+    from model.src.training.resmade_trainer import _predicate_generation_config
+
+    return _predicate_generation_config(config)
+
+
 def _generator(probability: float | None) -> PredicateTrainingContextGenerator:
     fixture = _PolFixture.load()
-    config = dict(fixture.config["predicate_generation"])
+    config = _training_predicate_config(fixture.config)
     if probability is not None:
         config["log_width_gate"] = {**GATE, "probability": probability}
     return PredicateTrainingContextGenerator(config)
@@ -112,6 +120,14 @@ def _widths(contexts) -> dict[str, list[float]]:
 
 
 class LogWidthGateTest(unittest.TestCase):
+    def test_fixture_uses_the_training_mbr_path(self) -> None:
+        generator = _generator(0.5)
+        self.assertTrue(generator.trajectory_spatial_enabled)
+        contexts, _, _ = _contexts(0.5)
+        kinds = {type(spatial).__name__ for context in contexts if context.trajectory_query is not None
+                 for spatial in getattr(context.trajectory_query, "spatial_predicates", ())}
+        self.assertEqual(kinds, {"SegmentMbrSpatialPredicate"})
+
     def test_probability_zero_is_the_uniform_generator(self) -> None:
         absent, absent_targets, _ = _contexts(None)
         zero, zero_targets, _ = _contexts(0.0)
@@ -138,8 +154,13 @@ class LogWidthGateTest(unittest.TestCase):
             self.assertLess(np.median(gated[key]), factor * np.median(uniform[key]), key)
             self.assertLess(np.median(gated[key]), np.median(mixed[key]), key)
             self.assertLess(np.median(mixed[key]), np.median(uniform[key]), key)
-        self.assertEqual(sum(width < 100.0 for width in uniform["window_x"]), 0)
-        self.assertGreater(np.mean(np.asarray(gated["window_x"]) < 100.0), 0.1)
+        # Segment-MBR windows: when both drawn bounds fall inside the row's own MBR the
+        # window is the part between them, so a few narrow windows exist even uniformly.
+        uniform_narrow = np.mean(np.asarray(uniform["window_x"]) < 100.0)
+        gated_narrow = np.mean(np.asarray(gated["window_x"]) < 100.0)
+        self.assertLess(uniform_narrow, 0.05)
+        self.assertGreater(gated_narrow, 0.1)
+        self.assertGreater(gated_narrow, 5 * uniform_narrow)
         self.assertEqual(sum(width < 3600.0 for width in uniform["segment_interval"]), 0)
         self.assertGreater(sum(width < 3600.0 for width in gated["segment_interval"]), 0)
 
@@ -148,7 +169,7 @@ class LogWidthGateTest(unittest.TestCase):
         fixture = _PolFixture.load()
         widths = {}
         for probability in (0.0, 1.0):
-            config = dict(fixture.config["predicate_generation"])
+            config = _training_predicate_config(fixture.config)
             config["trajectory_spatial"] = {"enabled": False}
             config["log_width_gate"] = {**GATE, "probability": probability}
             contexts, _, stats = PredicateTrainingContextGenerator(config).generate_batch(
@@ -247,7 +268,7 @@ class DenseTimestampGateTest(unittest.TestCase):
         source = sample_source_from_config(config)
         cls.metadata = source.metadata
         cls.rows = np.concatenate([source.batches(512, seed=seed).encoded_values for seed in range(6)])
-        cls.predicate_config = dict(config["predicate_generation"])
+        cls.predicate_config = _training_predicate_config(config)
 
     @classmethod
     def tearDownClass(cls) -> None:
