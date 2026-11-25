@@ -181,6 +181,11 @@ class PostgresAdapter(Adapter):
                     manifest.get("statistics_storage_bytes", 0) / 1_000_000.0
                 )
                 metadata["database_manifest"] = manifest
+        from ..inference_size import postgres_size
+        size = postgres_size(metadata)
+        metadata["serialized_model_mb"] = size["inference_artifact_mb"]
+        metadata["model_size_source"] = size["model_size_source"]
+        metadata["statistics_storage_scope"] = size["statistics_storage_scope"]
         return metadata
 
     def _optional_command(self, stage: str) -> StageMetrics:

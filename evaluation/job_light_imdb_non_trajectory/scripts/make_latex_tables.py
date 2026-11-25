@@ -51,6 +51,9 @@ import math
 import os
 import re
 import statistics
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -1253,12 +1256,12 @@ def _selected_own_model_metadata(row: dict[str, Any]) -> list[dict[str, Any]] | 
         return None
 
 
-def refresh_selected_own_model_build_records(rows: list[dict], results_root: Path) -> int:
-    """Persist selected-checkpoint deployment and elapsed-training metadata.
+def refresh_selected_own_model_build_records(rows: list[dict], results_root: Path,
+                                            build_overrides: dict[str, Any] | None = None) -> int:
+    """Collect selected-checkpoint metadata without rewriting existing artifacts.
 
-    The evaluation bridge only knows checkpoint loading time.  This refresh is
-    deliberately run where the original checkpoints are mounted, then the
-    portable build records remain sufficient for later table generation.
+    The legacy refresh flag supplies an override mapping for table generation;
+    only that in-memory mapping is updated, never the build records on disk.
     """
     updated = 0
     for row in rows:
@@ -1301,12 +1304,14 @@ def refresh_selected_own_model_build_records(rows: list[dict], results_root: Pat
                     if OWN_MODEL_VARIANTS[row["variant_id"]].get("training_time_mode") == "checkpoint"
                     else "training_summary.training_seconds (selected final checkpoint)"
                 )
-            path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            if build_overrides is not None:
+                build_overrides[str(run)] = document
             updated += 1
     return updated
 
 
-def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
+def attach_build_metrics(rows: list[dict], results_root: Path | None,
+                         build_overrides: dict[str, Any] | None = None) -> int:
     found = 0
     for row in rows:
         runs: list[Path] = []
@@ -1316,7 +1321,8 @@ def attach_build_metrics(rows: list[dict], results_root: Path | None) -> int:
         metrics = []
         for run in runs:
             try:
-                metrics.append(json.loads((run / "build_metrics.json").read_text(encoding="utf-8")))
+                metrics.append((build_overrides or {}).get(str(run)) or
+                               json.loads((run / "build_metrics.json").read_text(encoding="utf-8")))
             except (OSError, json.JSONDecodeError):
                 continue
         row["_build_runs"] = len(metrics)
@@ -1505,6 +1511,88 @@ def training_table(rows: list[dict], workload: str, show_std: bool, data: DataSt
     )
 
 
+def collect_inference_size_records(rows: list[dict], results_root: Path, cache_path: Path) -> dict[str, Any]:
+    """Reuse bound size reports or measure changed inputs in isolated CPU processes.
+
+    The cache is a generated report, never a model/build/evaluation artifact.
+    Missing or changed model inputs cannot silently reuse an unrelated size.
+    """
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import measurement_version
+    cache_path = cache_path.resolve()
+    try:
+        records = json.loads(cache_path.read_text(encoding="utf-8"))["records"]
+    except FileNotFoundError:
+        records = {}
+    changed = False
+    for row in rows:
+        if row["method_id"] == "own_model":
+            continue
+        runs = _run_dirs_from_timing(row, results_root) or _run_dirs_from_scan(row, results_root)
+        for run in runs:
+            seed = next(p for p in run.parts if p.startswith("seed_"))
+            key = "/".join((row["method_id"], row["variant_id"], seed))
+            artifact = json.loads((run / "build_metrics.json").read_text(encoding="utf-8")).get("artifacts") or {}
+            identity = {k: artifact[k] for k in ("checkpoint", "metadata", "checkpoint_directory",
+                        "reservoir_path", "sample_size", "database_manifest") if k in artifact}
+            record = records.get(key) or {}
+            valid = record.get("measurement_version") == measurement_version(row["method_id"]) and record.get("artifact_identity") == identity
+            for binding in record.get("inference_files", []) + record.get("inference_metadata_sources", []):
+                p = Path(binding["path"])
+                valid = valid and p.is_file() and p.stat().st_size == binding["bytes"] and p.stat().st_mtime_ns == binding["mtime_ns"]
+            if valid:
+                continue
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="size_measurement_", dir=cache_path.parent) as directory:
+                tmp = Path(directory)
+                request = {"key": key, "method": row["method_id"], "variant": row["variant_id"],
+                           "seed": int(seed[5:]), "artifacts": artifact}
+                (tmp / "request.json").write_text(json.dumps(request))
+                environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", CUDA_VISIBLE_DEVICES="", TMPDIR=str(tmp),
+                                   XDG_CACHE_HOME=str(tmp / "cache"), MPLCONFIGDIR=str(tmp / "matplotlib"),
+                                   TORCH_HOME=str(tmp / "torch"), WANDB_CONFIG_DIR=str(tmp / "wandb"),
+                                   WANDB_MODE="disabled")
+                completed = subprocess.run([sys.executable, str(Path(__file__).with_name("measure_inference_size.py")),
+                                            "--request", str(tmp / "request.json"), "--output", str(tmp / "result.json")],
+                                           env=environment, capture_output=True, text=True)
+                if completed.returncode:
+                    raise RuntimeError(f"inference-size measurement failed for {key}:\n{completed.stderr}")
+                records[key] = json.loads((tmp / "result.json").read_text())
+                changed = True
+    if changed:
+        cache_path.write_text(json.dumps({"version": 1, "records": records}, indent=2) + "\n", encoding="utf-8")
+    return records
+
+
+def apply_inference_size_records(rows: list[dict], records: dict[str, Any], results_root: Path) -> None:
+    """Override only model-size cells; immutable build/evaluation records stay untouched."""
+    for row in rows:
+        method = row["method_id"]
+        if method == "own_model":
+            continue  # already the full checkpoint without optimizer state
+        runs = _run_dirs_from_timing(row, results_root) or _run_dirs_from_scan(row, results_root)
+        measurements = []
+        for run in runs:
+            seed = next(part for part in run.parts if part.startswith("seed_"))
+            key = "/".join((method, row["variant_id"], seed))
+            if key not in records:
+                raise ValueError(f"missing inference-size measurement: {key}")
+            record = records[key]
+            for binding in record.get("inference_files", []) + record.get("inference_metadata_sources", []):
+                path = _remap(binding["path"], results_root)
+                stat = path.stat()
+                if stat.st_size != binding["bytes"] or stat.st_mtime_ns != binding["mtime_ns"]:
+                    raise ValueError(f"stale inference-size measurement: {path}")
+            measurements.append(record)
+        if not measurements:
+            raise ValueError(f"no size measurements for {method}/{row['variant_id']}")
+        mean, std = _mean_std([m["inference_artifact_mb"] for m in measurements
+                               if m.get("inference_artifact_mb") is not None])
+        row["_build.size_mb.mean"], row["_build.size_mb.std"] = mean, std
+        if method == "distjoin":
+            mean, std = _mean_std([m["parameter_count"] for m in measurements])
+            row["_build.params.mean"], row["_build.params.std"] = mean, std
+
+
 def model_size_table(rows: list[dict], workload: str, show_std: bool, data: DataStore) -> str:
     rows = [row for row in rows if not row.get("_qerror_only")]
     columns = [
@@ -1521,8 +1609,9 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool, data: Data
     marks = column_marks(rows, columns)
     notes = [
         r"MB = $10^6$ bytes.",
-        (r"\OwnModelName{}: checkpoint without optimizer state, including the value domains."
-         if any(r.get("_build.size_is_inference_checkpoint") for r in rows) else ""),
+        r"Size: everything needed at inference except the base data (\OwnModelName{}: checkpoint without optimizer state, including the value domains).",
+        ("MSCN (published): precomputed bitmaps of the JOB-light workload."
+         if any(r["method_id"] == "mscn" and r["variant_id"] == "published_job_light" for r in rows) else ""),
         marks_note("For parameters and size", marks, rows),
         own_model_single_run_note(rows),
         coverage_note(rows, data),
@@ -1618,8 +1707,10 @@ def main() -> None:
     parser.add_argument(
         "--refresh-own-model-build-records",
         action="store_true",
-        help="measure selected checkpoints and persist deployable-size/training-time metadata",
+        help="measure selected checkpoints into in-memory build overrides; preserve artifacts",
     )
+    parser.add_argument("--inference-size-metadata", type=Path,
+                        help="read-only measurements of the actual inference artifacts")
     args = parser.parse_args()
 
     data = json.loads(args.comparison.read_text(encoding="utf-8"))
@@ -1628,15 +1719,20 @@ def main() -> None:
     interim_ranges_accuracy = _interim_ranges_accuracy(args.results_root)
     show_std = not args.no_std
     args.output.mkdir(parents=True, exist_ok=True)
+    repo_root = str(Path(__file__).resolve().parents[3])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    build_overrides: dict[str, Any] = {}
     if args.refresh_own_model_build_records:
-        refreshed = 0
         for workload in WORKLOADS:
-            refreshed += refresh_selected_own_model_build_records(
-                prepare_rows(
-                    results, workload, interim_ranges_accuracy=interim_ranges_accuracy,
-                ), args.results_root
-            )
-        print(f"refreshed {refreshed} selected own-model build records")
+            refresh_selected_own_model_build_records(
+                prepare_rows(results, workload, interim_ranges_accuracy=interim_ranges_accuracy),
+                args.results_root, build_overrides=build_overrides)
+        print("read-only size refresh: existing build records are preserved")
+    size_path = args.inference_size_metadata or args.results_root / "final_comparison/inference_size_metadata.json"
+    all_rows = [row for workload in WORKLOADS for row in
+                prepare_rows(results, workload, interim_ranges_accuracy=interim_ranges_accuracy)]
+    size_records = collect_inference_size_records(all_rows, args.results_root, size_path)
 
     written = []
     store = DataStore()
@@ -1656,8 +1752,10 @@ def main() -> None:
                 results, workload, interim_ranges_accuracy=interim_ranges_accuracy,
             )  # fresh copy: labels get markers
             if name in ("training", "model_size"):
-                found = attach_build_metrics(rows, args.results_root)
+                found = attach_build_metrics(rows, args.results_root, build_overrides)
                 validate_selected_own_model_build_metrics(rows)
+                if name == "model_size":
+                    apply_inference_size_records(rows, size_records, args.results_root)
                 build_found = found if build_found is None else build_found
             path = args.output / f"{workload}_{name}.tex"
             path.write_text(builder(rows), encoding="utf-8")

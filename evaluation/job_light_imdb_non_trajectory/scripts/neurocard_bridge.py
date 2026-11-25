@@ -17,6 +17,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Standalone bridge interpreters may start outside the repository.
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[3])
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.append(_REPOSITORY_ROOT)
+
 
 MODEL_CONFIGS = {
     "job_light": {
@@ -461,7 +466,7 @@ def _train(args: argparse.Namespace) -> None:
     artifact = {
         "parameter_count": runtime.parameter_count,
         "trainable_parameter_count": runtime.trainable_parameter_count,
-        "serialized_model_mb": checkpoint.stat().st_size / 1_000_000.0,
+        "serialized_model_mb": inference_artifact_metadata(runtime, checkpoint)["inference_artifact_mb"],
         "full_checkpoint_mb": checkpoint.stat().st_size / 1_000_000.0,
         "checkpoint_format": "PyTorch state_dict",
         "checkpoint_includes_optimizer": False,
@@ -475,6 +480,19 @@ def _train(args: argparse.Namespace) -> None:
     _write_json(Path(args.training_metrics), metrics)
     _write_json(Path(args.artifact_manifest), artifact)
     print(json.dumps(metrics, indent=2, sort_keys=True))
+
+
+def inference_artifact_metadata(runtime: Any, checkpoint: Path) -> dict[str, Any]:
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import files_size, schema_payload
+    # No source tables or sampled relation rows are part of the inference bundle.
+    payload = schema_payload({"table": runtime.table,
+                              "factorized_columns": runtime.train_data.columns,
+                              "table_num_columns": runtime.train_data.table_num_columns,
+                              "column_types": runtime.train_data.combined_columns_types,
+                              "table_indexes": runtime.train_data.table_indexes,
+                              "join_spec": runtime.join_spec,
+                              "config": runtime.config})
+    return files_size([checkpoint], payload)
 
 
 class _NativeRuntime:

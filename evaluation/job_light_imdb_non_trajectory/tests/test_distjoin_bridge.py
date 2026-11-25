@@ -69,6 +69,8 @@ class DistJoinBridgeTests(unittest.TestCase):
             "net.0.bias": types.SimpleNamespace(numel=lambda: 3),
             "net.0.mask": types.SimpleNamespace(numel=lambda: 12),
             "direct_io_layer.mask": types.SimpleNamespace(numel=lambda: 9),
+            "multi_pred_embed_nn.weight": types.SimpleNamespace(numel=lambda: 100),
+            "net.0.block_gradient_mask": types.SimpleNamespace(numel=lambda: 12),
         }
         self.assertEqual(BRIDGE._parameter_count_from_state_dict(state), 15)
 

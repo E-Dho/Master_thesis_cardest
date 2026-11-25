@@ -14,6 +14,11 @@ import types
 from pathlib import Path
 from typing import Any
 
+# Standalone bridge interpreters may start outside the repository.
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[3])
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.append(_REPOSITORY_ROOT)
+
 import numpy as np
 import torch
 
@@ -180,9 +185,10 @@ def _build_estimator_cpu_compatible(module: Any, experiment_mark: str):
 def _load_checkpoints(module: Any, estimator: Any, overlay: Path, mark: str) -> None:
     from model import made
 
-    for dataset, model in estimator.models.items():
-        filename = module.config["glob"].format(dataset, mark)
-        checkpoint = overlay / "Configs" / "IMDB" / "model" / mark / filename
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import distjoin_checkpoints
+    paths = distjoin_checkpoints(overlay / "Configs/IMDB/model" / mark,
+                                module.config["glob"], estimator.models, mark)
+    for (dataset, model), checkpoint in zip(estimator.models.items(), paths):
         if not checkpoint.exists():
             raise FileNotFoundError(checkpoint)
         state = torch.load(checkpoint, map_location=module.util.get_device())

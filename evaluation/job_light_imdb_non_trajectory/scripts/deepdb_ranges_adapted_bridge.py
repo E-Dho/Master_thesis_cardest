@@ -1535,6 +1535,11 @@ def _real_workload_smoke(runtime, shared: Path, queries_path: Path) -> List[Dict
     return results
 
 
+def inference_artifact_metadata(checkpoint: Path, rank_domains: Path | None = None) -> dict:
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import files_size, deepdb_files
+    return files_size(deepdb_files(checkpoint, rank_domains))
+
+
 def build(
     source: Path,
     shared: Path,
@@ -1599,7 +1604,7 @@ def build(
     }
     artifact = {
         "parameter_count": None,
-        "serialized_model_mb": checkpoint.stat().st_size / 1_000_000,
+        "serialized_model_mb": inference_artifact_metadata(checkpoint, shared / "rank_domains.json")["inference_artifact_mb"],
         "full_checkpoint_mb": sum(path.stat().st_size for path in ensemble.glob("*")) / 1_000_000,
         "rank_domain_mb": manifest["domains"]["bytes"] / 1_000_000,
         "inference_artifact_mb": (checkpoint.stat().st_size + (ensemble / "pairwise_rdc.pkl").stat().st_size
@@ -1695,7 +1700,8 @@ def evaluate_workload(
             "rank_predicates": json.dumps([item.to_dict() for item in rewrite.predicates], sort_keys=True),
         })
 
-    pairwise = checkpoint.parent / "pairwise_rdc.pkl"
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import deepdb_files
+    pairwise = deepdb_files(checkpoint)[1]
 
     def estimate(record: QueryRecord) -> Tuple[float, Optional[float]]:
         rewrite = adapted.rewrite_query(record, domains)

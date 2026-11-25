@@ -400,7 +400,7 @@ class LatexTablesTest(unittest.TestCase):
             row = {"method_id": "own_model", "variant_id": "test", "_eligible": True,
                    "_build_runs": 1, "_build.size_is_inference_checkpoint": True, "_label": "Own model"}
             table = MODULE["model_size_table"]([row], workload, True, MODULE["DataStore"]())
-            self.assertIn(r"\OwnModelName{}: checkpoint without optimizer state, including the value domains.", table)
+            self.assertIn(r"Size: everything needed at inference except the base data (\OwnModelName{}: checkpoint without optimizer state, including the value domains).", table)
             self.assertIn(r"MB = $10^6$ bytes.", table)
 
     def test_missing_size_does_not_clear_selected_training_time(self) -> None:
@@ -449,6 +449,48 @@ class LatexTablesTest(unittest.TestCase):
         finally:
             del runtime["OWN_MODEL_VARIANTS"][variant]
 
+    def test_refresh_overrides_are_in_memory_and_preserve_existing_build_record(self) -> None:
+        refresh = MODULE["refresh_selected_own_model_build_records"]
+        runtime = refresh.__globals__
+        variant = "test_readonly_size_refresh"
+        originals = {k: runtime[k] for k in ["_run_dirs_from_timing", "_selected_own_model_metadata", "_selected_own_model_training_seconds"]}
+        runtime["OWN_MODEL_VARIANTS"][variant] = {"training_time_mode": "checkpoint"}
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                run = Path(directory); path = run / "build_metrics.json"
+                path.write_text('{}\n');before = path.read_bytes();mtime = path.stat().st_mtime_ns
+                runtime["_run_dirs_from_timing"] = lambda _r, _root: [run]
+                runtime["_selected_own_model_metadata"] = lambda _r: [{"inference_checkpoint_mb": 32.0}]
+                runtime["_selected_own_model_training_seconds"] = lambda _r: (90.0, 0.0)
+                overrides = {}
+                row = {"workload": "job_light", "method_id": "own_model", "variant_id": variant}
+                self.assertEqual(refresh([row], run, overrides), 1)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(path.stat().st_mtime_ns, mtime)
+                self.assertEqual(overrides[str(run)]["artifacts"]["inference_checkpoint_mb"], 32.0)
+                MODULE["attach_build_metrics"]([row], run, overrides)
+                self.assertEqual(row["_build.size_mb.mean"], 32.0)
+        finally:
+            runtime.update(originals)
+            del runtime["OWN_MODEL_VARIANTS"][variant]
+
+    def test_size_override_changes_only_size_and_distjoin_parameter_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            run = root / "distjoin/v/seed_0/run";run.mkdir(parents=True)
+            (run / "build_metrics.json").write_text('{}')
+            row = {"method_id": "distjoin", "variant_id": "v", "workload": "job_light",
+                   "_build.params.mean": 221.0, "_build.size_mb.mean": 1200.0,
+                   "_build.training_s.mean": 17.0, "smoothed_q_error.p50.mean": 1.23}
+            record = {"inference_artifact_mb": 60.0, "parameter_count": 10.0,
+                      "inference_files": [], "inference_metadata_sources": []}
+            MODULE["apply_inference_size_records"]([row], {"distjoin/v/seed_0": record}, root)
+            self.assertEqual(row["_build.size_mb.mean"], 60.0)
+            self.assertEqual(row["_build.params.mean"], 10.0)
+            self.assertEqual(row["_build.training_s.mean"], 17.0)
+            self.assertEqual(row["smoothed_q_error.p50.mean"], 1.23)
+            self.assertEqual((run / "build_metrics.json").read_text(), '{}')
+
     def test_interim_build_record_aggregates_three_checkpoints_into_one_cpu_run(self) -> None:
         refresh = MODULE["refresh_selected_own_model_build_records"]
         attach = MODULE["attach_build_metrics"]
@@ -475,15 +517,17 @@ class LatexTablesTest(unittest.TestCase):
                 runtime["_selected_own_model_training_seconds"] = lambda _row: (90.0, 9.0)
                 row = {"workload": "job_light_ranges", "method_id": "own_model",
                        "variant_id": variant}
-                self.assertEqual(refresh([row], run), 1)
-                document = json.loads((run / "build_metrics.json").read_text())
+                overrides = {}
+                self.assertEqual(refresh([row], run, overrides), 1)
+                document = overrides[str(run)]
+                self.assertEqual((run / "build_metrics.json").read_text(), "{}")
                 artifact = document["artifacts"]
                 self.assertEqual(artifact["inference_checkpoint_mb"], 20.0)
                 self.assertEqual(artifact["inference_checkpoint_mb_std"], 10.0)
                 self.assertEqual(len(artifact["selected_checkpoint_metadata"]), 3)
                 self.assertEqual(artifact["selected_checkpoint_training_seconds"], 90.0)
                 self.assertEqual(artifact["selected_checkpoint_training_seconds_std"], 9.0)
-                attach([row], run)
+                attach([row], run, overrides)
                 self.assertEqual(row["_build.size_mb.std"], 10.0)
                 self.assertEqual(row["_build.training_s.std"], 9.0)
         finally:

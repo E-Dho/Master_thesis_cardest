@@ -15,6 +15,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Standalone bridge interpreters may start outside the repository.
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[3])
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.append(_REPOSITORY_ROOT)
+
 JOB_LIGHT_TABLES = (
     "title",
     "cast_info",
@@ -191,7 +196,9 @@ def _train(args: argparse.Namespace) -> None:
             f"DistJoin training failed\nstdout:\n{completed.stdout[-12000:]}\n"
             f"stderr:\n{completed.stderr[-12000:]}"
         )
-    checkpoints = sorted((overlay / "Configs" / "IMDB" / "model" / "production").glob("*.pt"))
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import distjoin_checkpoints
+    checkpoints = distjoin_checkpoints(overlay / "Configs/IMDB/model/production",
+                                      config["test"]["glob"], JOB_LIGHT_TABLES)
     if not checkpoints:
         raise RuntimeError("DistJoin training produced no checkpoints")
     metrics = {
@@ -216,7 +223,8 @@ def _train(args: argparse.Namespace) -> None:
         parameter_count = None
     artifact = {
         "parameter_count": parameter_count,
-        "serialized_model_mb": metrics["full_checkpoint_mb"],
+        "serialized_model_mb": inference_artifact_metadata(source, overlay,
+            source.parents[1] / "joblight_evaluation/distjoin_base_cardinalities.json")["inference_artifact_mb"],
         "full_checkpoint_mb": metrics["full_checkpoint_mb"],
         "checkpoint_directory": str(checkpoints[0].parent),
         "training": metrics,
@@ -226,13 +234,101 @@ def _train(args: argparse.Namespace) -> None:
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
 
+def inference_artifact_metadata(source: Path, overlay: Path, base_cardinalities: Path) -> dict[str, Any]:
+    """Read only the six loaded checkpoints and the actual cached inference schemas.
+
+    Cached relation rows are excluded from the in-memory serialization. Global
+    key-discretization masks are rebuilt exactly as eval-IMDB.build_estimator.
+    Neither cache misses nor writes to upstream artifacts are permitted here.
+    """
+    import gc
+    import importlib
+    import pickle
+    import io
+    import numpy as np
+    import torch
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import (
+        distjoin_checkpoints, distjoin_cardinality_files, files_size, schema_payload,
+    )
+    import types
+    # GPU monitoring is not part of schema loading or inference-size accounting.
+    # The upstream utility module imports NVML even when no monitor is created.
+    try:
+        importlib.import_module("pynvml")
+    except ModuleNotFoundError:
+        sys.modules.setdefault("pynvml", types.ModuleType("pynvml"))
+    for entry in [str(_compat_directory()), str(source.resolve()), str(source / "MySampler")]:
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+    common = importlib.import_module("common")
+    datasets = importlib.import_module("datasets")
+    util = importlib.import_module("utils.util")
+    util.get_device = lambda: torch.device("cpu")
+    if hasattr(common, "get_device"):
+        common.get_device = util.get_device
+    config_path = overlay / "Configs/IMDB/IMDB.yaml"
+    config = _yaml_module().safe_load(config_path.read_text())
+    names = list(datasets.JoinOrderBenchmark.GetJobLightJoinKeys())
+    paths = distjoin_checkpoints(overlay / "Configs/IMDB/model/production",
+                                config["test"]["glob"], names)
+    cache = overlay / "Configs/IMDB/cache"
+    table_cache = cache / ("tables_dict_" + str(names) + "_" + config["train"]["use_cols"] + ".pkl")
+    sources = [table_cache] + [cache / ("train_data_" + name + "_" + str(config["factorize"]) + ".pkl")
+                               for name in names]
+    for path in sources:
+        if not path.is_file():
+            raise FileNotFoundError(f"inference schema cache is missing: {path}")
+    # Pickled CUDA domains are materialized on the CPU, preserving their values.
+    original = torch.storage._load_from_bytes
+    torch.storage._load_from_bytes = lambda b: torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+    try:
+        with table_cache.open("rb") as handle:
+            tables = pickle.load(handle)
+        join_keys = datasets.JoinOrderBenchmark.GetJobLightJoinKeys()
+        values = set()
+        for name in names:
+            col = tables[name].columns_dict[join_keys[name]]
+            domain = col.all_distinct_values
+            values.update(np.delete(domain, 0) if col.has_none else domain)
+        global_values = np.sort(np.array(list(values)))
+        if np.issubdtype(global_values.dtype, np.datetime64):
+            global_values = np.insert(global_values, 0, np.datetime64("NaT"))
+        else:
+            if global_values.dtype not in (np.dtype(float), np.dtype(object)):
+                global_values = global_values.astype(float)
+            global_values = np.insert(global_values, 0, np.nan)
+        for name in names:
+            tables[name].columns_dict[join_keys[name]].SetGlobalDiscretizeMask(global_values)
+        payload = {"tables": schema_payload(tables), "global_distinct_values": global_values,
+                   "factorized_schemas": {}}
+        del tables, values
+        gc.collect()
+        for name, path in zip(names, sources[1:]):
+            with path.open("rb") as handle:
+                table = pickle.load(handle)
+            payload["factorized_schemas"][name] = schema_payload(table)
+            del table
+            gc.collect()
+    finally:
+        torch.storage._load_from_bytes = original
+    cardinalities = distjoin_cardinality_files(source, base_cardinalities, config.get("tag", ""))
+    report = files_size([*paths, config_path, *cardinalities], payload)
+    report["inference_metadata_sources"] = [
+        {"path": str(p.resolve()), "bytes": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns}
+        for p in sources]
+    report["parameter_count"] = sum(_parameter_count_from_state_dict(
+        torch.load(path, map_location="cpu", weights_only=True)) for path in paths)
+    return report
+
+
 def _parameter_count_from_state_dict(state: dict[str, Any]) -> int:
     """Count parameters in pinned DistJoin checkpoints, excluding mask buffers."""
 
     return sum(
         int(value.numel())
         for name, value in state.items()
-        if not name.endswith(".mask")
+        if name.rsplit(".", 1)[-1] not in {"mask", "block_gradient_mask"}
+        and "multi_pred_embed_nn" not in name
     )
 
 

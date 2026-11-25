@@ -15,6 +15,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Standalone bridge interpreters may start outside the repository.
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[3])
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.append(_REPOSITORY_ROOT)
+
 
 MATERIALIZED_SAMPLES = 1_000
 
@@ -125,6 +130,12 @@ def _prepare(args: argparse.Namespace) -> None:
     }
     _write_json(Path(args.output), payload)
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def inference_artifact_metadata(checkpoint: Path, metadata: Path, source: Path,
+                                runtime: Path | None = None) -> dict[str, Any]:
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import files_size, mscn_files
+    return files_size(mscn_files(checkpoint, metadata, source, runtime))
 
 
 def _train(args: argparse.Namespace) -> None:
@@ -259,7 +270,10 @@ def _train(args: argparse.Namespace) -> None:
     artifact = {
         "parameter_count": parameter_count,
         "trainable_parameter_count": parameter_count,
-        "serialized_model_mb": checkpoint.stat().st_size / 1_000_000.0,
+        "serialized_model_mb": inference_artifact_metadata(
+            checkpoint, Path(args.metadata_output).resolve(), Path(args.source_root).resolve(),
+            Path(args.runtime_root).resolve() if args.runtime_root else None
+        )["inference_artifact_mb"],
         "full_checkpoint_mb": (
             checkpoint.stat().st_size + Path(args.metadata_output).resolve().stat().st_size
         ) / 1_000_000.0,

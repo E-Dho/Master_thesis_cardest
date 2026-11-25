@@ -212,6 +212,11 @@ def _set_seed(seed: int) -> None:
         pass
 
 
+def inference_artifact_metadata(checkpoint: Path, rank_domains: Path | None = None) -> dict:
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import files_size, deepdb_files
+    return files_size(deepdb_files(checkpoint, rank_domains))
+
+
 def build(
     source: Path,
     shared: Path,
@@ -258,7 +263,7 @@ def build(
     }
     artifact = {
         "parameter_count": None,
-        "serialized_model_mb": checkpoint.stat().st_size / 1_000_000,
+        "serialized_model_mb": inference_artifact_metadata(checkpoint)["inference_artifact_mb"],
         "full_checkpoint_mb": sum(path.stat().st_size for path in ensemble.glob("*")) / 1_000_000,
         "checkpoint": str(checkpoint),
         "training": metrics,
@@ -345,7 +350,8 @@ def evaluate_workload(
             continue
         supported.append(record)
 
-    pairwise = checkpoint.parent / "pairwise_rdc.pkl"
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import deepdb_files
+    pairwise = deepdb_files(checkpoint)[1]
 
     def estimate(record) -> tuple[float, float]:
         query = runtime["parse_query"](deepdb_compatible_query_to_sql(record), schema)

@@ -257,12 +257,17 @@ class FojSamplingAdapter(Adapter):
         return {
             "parameter_count": None,
             "parameter_count_reason": "sampling baseline has no learned parameters",
-            "serialized_model_mb": sample_size * bytes_per_row / 1_000_000.0,
+            "serialized_model_mb": self.inference_artifact_metadata()["inference_artifact_mb"],
             "reservoir_path": str(reservoir),
             "sample_size": sample_size,
             "cumulative_sampling_seconds": cumulative.get(str(sample_size)),
             "full_reservoir_serialized_mb": reservoir.stat().st_size / 1_000_000.0,
         }
+
+    def inference_artifact_metadata(self) -> dict[str, Any]:
+        from ..inference_size import foj_size
+        return foj_size(self._reservoir_path(), self._metadata_path(),
+                        int(self.config.adapter.get("sample_size", 1_000)))
 
     def _estimate(self, query: QueryRecord, rows: np.ndarray, metadata: Any, cache):
         from model.src.data.schema import ColumnKind
