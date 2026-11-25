@@ -108,6 +108,9 @@ rare_auxiliary:
 training:
   seed: 0
   device: auto
+  # Steps prepared ahead in 3 forked processes (sampler process + workers); same
+  # training as without them (model/tests/test_training_prefetch.py).
+  prefetch_workers: 3
   batch_size: 2048
   learning_rate: 0.0001
   optimizer: adam
