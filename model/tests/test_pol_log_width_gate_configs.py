@@ -1,4 +1,5 @@
-"""The POL ablations train with the same log-width gate, runtime and prefetch as the
+"""The POL ablations train with the same log-width gate, runtime, prefetch and rare-support
+setting (off) as the
 gated main model they are compared with (pol_main_log_width_gate_seed0.yaml), and the
 three gated main seeds differ only in their seeds and output directories."""
 
@@ -19,7 +20,7 @@ class PolLogWidthGateConfigTest(unittest.TestCase):
         gate = main["predicate_generation"]["log_width_gate"]
         self.assertEqual(gate["probability"], 0.5)
         ablations = sorted(CONFIGS.glob("pol_ablation_*.yaml"))
-        self.assertEqual(len(ablations), 5)
+        self.assertEqual(len(ablations), 4)  # rare_support_off was dropped: rare support is off everywhere
         for path in ablations:
             config = load_simple_yaml(str(path))
             validate_config(config)
@@ -27,11 +28,15 @@ class PolLogWidthGateConfigTest(unittest.TestCase):
             self.assertEqual(config["runtime"], main["runtime"], path.name)
             self.assertEqual(config["training"]["prefetch_workers"], main["training"]["prefetch_workers"])
             self.assertEqual(config["training"]["seed"], 0)
+            self.assertFalse(config["rare_support"]["enabled"], path.name)
+            self.assertFalse(config["rare_auxiliary"]["enabled"], path.name)
 
     def test_main_seeds_differ_only_in_seed_and_output(self) -> None:
         configs = [load_simple_yaml(str(CONFIGS / f"pol_main_log_width_gate_seed{seed}.yaml")) for seed in range(3)]
         for seed, config in enumerate(configs):
             self.assertEqual(config["training"]["seed"], seed)
+            self.assertFalse(config["rare_support"]["enabled"])
+            self.assertFalse(config["rare_auxiliary"]["enabled"])
             self.assertEqual(config["predicate_generation"]["seed"], seed)
             self.assertEqual(config["logging"]["output_directory"], f"model/runs/pol_main_log_width_gate_seed{seed}")
             normalized = {**config, "training": {**config["training"], "seed": 0},

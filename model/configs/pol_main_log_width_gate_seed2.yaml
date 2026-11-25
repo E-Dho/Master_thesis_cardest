@@ -8,6 +8,8 @@
 # trained checkpoint) except training.seed, predicate_generation.seed and
 # logging.output_directory (dataset.name, stored as the checkpoint's
 # preparation_manifest_id, stays: same prepared data). Train from this commit.
+# Rare support off (decided 2026-11-25): rare_support.enabled and rare_auxiliary.enabled are
+# false for all own-model trainings; the earlier models trained with them on.
 dataset:
   type: pol_trajectory_full_join
   name: pol_50m_traj_dedup_single_anchor_mbr_segments_first_20k
@@ -125,7 +127,7 @@ importance_sampling:
   enabled: false
 
 rare_support:
-  enabled: true
+  enabled: false
   discovery:
     enabled: true
     root_data_only: true
@@ -140,7 +142,7 @@ rare_support:
     enabled: true
 
 rare_auxiliary:
-  enabled: true
+  enabled: false
   batch_size: 512
   beta: 0.25
 

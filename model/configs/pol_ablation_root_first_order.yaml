@@ -6,6 +6,8 @@
 # Train from this branch (model/pol-ablations = the pinned training code).
 # Since 2026-11-25 also with predicate_generation.log_width_gate; the reference is
 # pol_main_log_width_gate_seed0.yaml (the same gate), not the earlier evaluated model.
+# Rare support off (decided 2026-11-25): rare_support.enabled and rare_auxiliary.enabled are
+# false for all own-model trainings; the earlier models trained with them on.
 dataset:
   type: pol_trajectory_full_join
   name: pol_50m_traj_dedup_single_anchor_mbr_segments_first_20k
@@ -123,7 +125,7 @@ importance_sampling:
   enabled: false
 
 rare_support:
-  enabled: true
+  enabled: false
   discovery:
     enabled: true
     root_data_only: true
@@ -138,7 +140,7 @@ rare_support:
     enabled: true
 
 rare_auxiliary:
-  enabled: true
+  enabled: false
   batch_size: 512
   beta: 0.25
 
