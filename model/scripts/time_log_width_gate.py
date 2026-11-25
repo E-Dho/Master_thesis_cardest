@@ -3,7 +3,10 @@
 Prints, flushed as it goes: sample-source setup time; the generator's compile time
 (warm_caches at p = 0); per gated column the domain length, value type and the
 seconds to build its numeric view (_numeric_rank_values); then the context
-generation time of a few batches at p = 0, 0.5 and 1.
+generation time of a few batches at p = 0, 0.5 and 1 as a training step does it
+(the trainer's _predicate_generation_config, i.e. with the top-level trajectory_spatial
+section; validate_contexts=False plus the row_validation_sample_size spot check), and
+of one batch with every context validated (metric steps and validation batches).
 
     python -m model.scripts.time_log_width_gate --config <training config> --batches 3
 """
@@ -20,6 +23,7 @@ def main() -> int:
     from model.src.config import load_simple_yaml, validate_config
     from model.src.data.sample_sources import sample_source_from_config
     from model.src.predicates.generation import PredicateTrainingContextGenerator, _numeric_rank_values
+    from model.src.training.resmade_trainer import _predicate_generation_config
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", required=True)
@@ -41,7 +45,9 @@ def main() -> int:
     batches = [source.batches(batch_size, seed=index).encoded_values for index in range(args.batches)]
     say(f"{len(batches)} batches drawn")
 
-    base = dict(config["predicate_generation"])
+    base = _predicate_generation_config(config)
+    say(f"trajectory_spatial {base.get('trajectory_spatial')}")
+    spot_checks = int(base.get("row_validation_sample_size", 32) or 0)
     gate = dict(base.get("log_width_gate") or {})
     uniform = PredicateTrainingContextGenerator({**base, "log_width_gate": {**gate, "probability": 0.0}})
     started = time.perf_counter()
@@ -78,8 +84,12 @@ def main() -> int:
         rng = np.random.default_rng(0)
         started = time.perf_counter()
         for rows in batches:
-            generator.generate_batch(encoded_rows=rows, metadata=metadata, rng=rng)
-        say(f"p = {probability}: {(time.perf_counter() - started) / len(batches):.2f} s per batch")
+            generator.generate_batch(encoded_rows=rows, metadata=metadata, rng=rng,
+                                     validate_contexts=False, validation_sample_size=spot_checks)
+        say(f"p = {probability}: {(time.perf_counter() - started) / len(batches):.2f} s per batch (training step)")
+        started = time.perf_counter()
+        generator.generate_batch(encoded_rows=batches[0], metadata=metadata, rng=rng)
+        say(f"p = {probability}: {time.perf_counter() - started:.2f} s for one batch with every context validated")
     return 0
 
 
