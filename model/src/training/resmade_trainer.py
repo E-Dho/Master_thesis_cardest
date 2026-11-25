@@ -564,6 +564,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
     prefetch_workers = int(training.get("prefetch_workers", 0) or 0)
     worker_phase_timing_history: list[dict[str, float]] = []
     pipeline: _StepPipeline | None = None
+    prefetch_fallback: str | None = None
     total_steps = int(training["epochs"]) * int(training["steps_per_epoch"])
     if prefetch_workers > 0 and total_steps > 0:
         if bool(config.get("importance_sampling", {}).get("enabled", False)):
@@ -594,21 +595,27 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 ),
             )
 
-        pipeline = _StepPipeline(
-            sample_source=sample_source,
-            prepare=prepare,
-            metadata=metadata,
-            batch_size=batch_size,
-            seed=seed,
-            total_steps=total_steps,
-            workers=prefetch_workers,
-            depth=int(training.get("prefetch_factor", 2) or 2),
-            draw_rare=(
-                (lambda step: _draw_rare_batch(sample_source, config, step))
-                if _rare_auxiliary_enabled(config)
-                else None
-            ),
-        )
+        try:
+            pipeline = _StepPipeline(
+                sample_source=sample_source,
+                prepare=prepare,
+                metadata=metadata,
+                batch_size=batch_size,
+                seed=seed,
+                total_steps=total_steps,
+                workers=prefetch_workers,
+                depth=int(training.get("prefetch_factor", 2) or 2),
+                draw_rare=(
+                    (lambda step: _draw_rare_batch(sample_source, config, step))
+                    if _rare_auxiliary_enabled(config)
+                    else None
+                ),
+            )
+        except (OSError, RuntimeError) as error:
+            # Same safeguard as for a failure before the first step (see the loop).
+            prefetch_fallback = f"{type(error).__name__}: {error}"[:2000]
+            print(f"prefetch_fallback=serial reason={prefetch_fallback!r}", flush=True)
+            pipeline = None
     training_start = perf_counter()
     if device == "cuda" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -616,10 +623,25 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         for epoch in range(int(training["epochs"])):
             for step_in_epoch in range(int(training["steps_per_epoch"])):
                 diagnostic_step = bool(metrics_interval and (global_step + 1) % metrics_interval == 0)
+                prepared: PreparedStepInputs | None = None
                 if pipeline is not None:
                     wait_started = perf_counter()
-                    prepared = pipeline.next(global_step)
+                    try:
+                        prepared = pipeline.next(global_step)
+                    except RuntimeError as error:
+                        if pipeline.steps_delivered > 0:
+                            raise
+                        # Safeguard: the prefetch processes failed before delivering
+                        # the first step (e.g. a library touching CUDA in a forked
+                        # process). Train without them instead of losing the job.
+                        # Nothing has been drawn from this process's sample source,
+                        # so the run is an ordinary run without workers.
+                        prefetch_fallback = f"{type(error).__name__}: {error}"[:2000]
+                        print(f"prefetch_fallback=serial reason={prefetch_fallback!r}", flush=True)
+                        pipeline.close()
+                        pipeline = None
                     prefetch_wait_seconds = perf_counter() - wait_started
+                if prepared is not None:
                     _apply_source_counter_deltas(sample_source, prepared.source_counter_deltas)
                     worker_phase_timing_history.append(prepared.phase_timings)
                     prepared.phase_timings = {"prefetch_wait": prefetch_wait_seconds}
@@ -768,7 +790,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                         "rare_auxiliary": last_rare_auxiliary_stats,
                         "phase_timings": step_result.phase_timings,
                         "phase_timing_summary": _phase_summary(phase_timing_history),
-                        **_prefetch_report(prefetch_workers, worker_phase_timing_history),
+                        **_prefetch_report(prefetch_workers, worker_phase_timing_history, prefetch_fallback),
                     }
                     early_stopping_monitor_value: float | None = None
                     if validation_enabled and global_step % validation_interval == 0:
@@ -1026,7 +1048,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
         "columns_with_unseen_evaluation_token_types": [],
         "training_seconds": training_seconds,
         "phase_timing_summary": _phase_summary(phase_timing_history),
-        **_prefetch_report(prefetch_workers, worker_phase_timing_history),
+        **_prefetch_report(prefetch_workers, worker_phase_timing_history, prefetch_fallback),
         "fanout_effective_sample_size": fanout_ess_summary,
         "fanout_inv_only_effective_sample_size": fanout_inv_only_ess_summary,
         "importance_sampling": importance_summary,
@@ -1736,11 +1758,14 @@ def _has_buffered_source(sample_source: object | None) -> bool:
     return any(hasattr(source, "discard_buffer") for source in _source_chain(sample_source))
 
 
-def _prefetch_report(workers: int, history: list[dict[str, float]]) -> dict[str, Any]:
+def _prefetch_report(
+    workers: int, history: list[dict[str, float]], fallback: str | None = None
+) -> dict[str, Any]:
     if workers <= 0:
         return {}
     return {
         "prefetch_workers": int(workers),
+        "prefetch_fallback": fallback,
         "worker_phase_timing_summary": _phase_summary(history),
     }
 
@@ -1802,6 +1827,10 @@ class _StepPipeline:
             )
         for process in self._processes:
             process.start()
+
+    @property
+    def steps_delivered(self) -> int:
+        return self._next_step
 
     def next(self, expected_step: int) -> PreparedStepInputs:
         import queue

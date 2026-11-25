@@ -61,7 +61,7 @@ def _memory() -> dict[str, float]:
 def _strip(row: dict) -> dict:
     return {k: v for k, v in row.items()
             if "timing" not in k and "per_second" not in k and "seconds" not in k
-            and k not in ("prefetch_workers", "checkpoint", "metrics_path", "summary_path",
+            and not k.startswith("prefetch") and k not in ("checkpoint", "metrics_path", "summary_path",
                           "checkpoint_path", "best_checkpoint_path")}
 
 

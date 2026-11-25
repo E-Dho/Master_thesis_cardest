@@ -142,6 +142,23 @@ def _synthetic_rows(source) -> np.ndarray:
     return current.dataset.encoded_rows
 
 
+class ChildFailingSource(BufferedSource):
+    """Works in the training process, fails in any forked process (like CUDA after fork)."""
+
+    def __init__(self) -> None:
+        import os
+
+        super().__init__()
+        self._owner = os.getpid()
+
+    def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
+        import os
+
+        if os.getpid() != self._owner:
+            raise RuntimeError("Cannot re-initialize CUDA in forked subprocess (simulated)")
+        return super().batches(batch_size, seed=seed)
+
+
 class FailingSource(BufferedSource):
     def batches(self, batch_size: int, *, seed: int = 0) -> FullJoinBatch:
         if self.sampler_run_calls >= 2:
@@ -162,7 +179,7 @@ def _prefetch_config(directory: str, *, rare: bool, workers: int) -> dict:
 
 def _strip(row: dict) -> dict:
     return {k: v for k, v in row.items()
-            if "timing" not in k and "per_second" not in k and "seconds" not in k and k != "prefetch_workers"}
+            if "timing" not in k and "per_second" not in k and "seconds" not in k and not k.startswith("prefetch")}
 
 
 @unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
@@ -223,6 +240,18 @@ class PrefetchEquivalenceTest(unittest.TestCase):
             config = _prefetch_config(directory, rare=False, workers=2)
             with self.assertRaisesRegex(RuntimeError, "sampler broke"):
                 train_resmade_sample_source(FailingSource(), config)
+
+    def test_failure_before_the_first_step_falls_back_to_serial_training(self) -> None:
+        with tempfile.TemporaryDirectory() as serial, tempfile.TemporaryDirectory() as fallback:
+            reference = train_resmade_sample_source(BufferedSource(), _prefetch_config(serial, rare=False, workers=0))
+            result = train_resmade_sample_source(ChildFailingSource(), _prefetch_config(fallback, rare=False, workers=2))
+            self.assertEqual((reference.first_loss, reference.last_loss), (result.first_loss, result.last_loss))
+            summary = json.loads((Path(fallback) / "training_summary.json").read_text())
+            self.assertIn("Cannot re-initialize CUDA", summary["prefetch_fallback"])
+            for name in sorted(p.name for p in Path(serial).glob("*.pt")):
+                a = torch.load(Path(serial) / name, weights_only=False)["model_state_dict"]
+                b = torch.load(Path(fallback) / name, weights_only=False)["model_state_dict"]
+                self.assertTrue(all(torch.equal(a[k], b[k]) for k in a), name)
 
     def test_live_sampler_with_validation_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
