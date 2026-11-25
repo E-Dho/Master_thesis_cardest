@@ -282,6 +282,7 @@ def analyze_training_contexts(
     config: Mapping[str, Any],
     batches: int,
     seed: int,
+    progress_every: int = 0,
 ) -> dict[str, Any]:
     """Generate the same contexts as training and collect interval statistics."""
     if batches <= 0:
@@ -324,6 +325,8 @@ def analyze_training_contexts(
             for observation in observations:
                 key = interval_report_key(observation.kind, observation.source)
                 interval_stats[key]["widths_seconds"].append(observation.width_seconds)
+        if progress_every and (global_step + 1) % progress_every == 0:
+            print(f"[interval-widths] completed_batches={global_step + 1}/{batches}", flush=True)
     if satisfaction_failures:
         raise AssertionError(f"{satisfaction_failures} sampled contexts did not satisfy their row")
     projected_contexts = int(training["steps_per_epoch"]) * batch_size * per_row_contexts
@@ -450,6 +453,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
     parser.add_argument("--batches", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--progress-every", type=int, default=0)
     args = parser.parse_args()
 
     config = load_simple_yaml(args.config)
@@ -460,6 +464,7 @@ def main() -> None:
         config=config,
         batches=args.batches,
         seed=args.seed,
+        progress_every=args.progress_every,
     )
     benchmark = analyze_benchmark(args.benchmark)
     report = {
