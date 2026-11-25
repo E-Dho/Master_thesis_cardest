@@ -1,0 +1,346 @@
+{
+  "benchmark": {
+    "benchmark_path": "/work_beegfs/sunip956/master_thesis_trajectories/mobilitydb/query_runs/qgen_pol_v3_exact_st_seed20261021/benchmark.jsonl",
+    "intervals": {
+      "segment_time/spatio_temporal": {
+        "bins": {
+          "1_h_to_1_day": {
+            "count": 274,
+            "projected_count": null,
+            "share_of_all_contexts": 0.1285781323322384,
+            "share_of_two_sided": 0.242263483642794
+          },
+          "1_min_to_1_h": {
+            "count": 290,
+            "projected_count": null,
+            "share_of_all_contexts": 0.1360863444392304,
+            "share_of_two_sided": 0.2564102564102564
+          },
+          "1_to_30_days": {
+            "count": 314,
+            "projected_count": null,
+            "share_of_all_contexts": 0.14734866259971843,
+            "share_of_two_sided": 0.27763041556145
+          },
+          "30_to_180_days": {
+            "count": 168,
+            "projected_count": null,
+            "share_of_all_contexts": 0.07883622712341623,
+            "share_of_two_sided": 0.14854111405835543
+          },
+          "gt_180_days": {
+            "count": 85,
+            "projected_count": null,
+            "share_of_all_contexts": 0.03988737681839512,
+            "share_of_two_sided": 0.07515473032714412
+          },
+          "inside": {
+            "count": 0,
+            "projected_count": null,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "lt_1_min": {
+            "count": 0,
+            "projected_count": null,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          }
+        },
+        "median_width_seconds": 88339.83323159158,
+        "one_sided_context_count": 0,
+        "one_sided_share_of_all_contexts": 0.0,
+        "projected_two_sided_context_count": null,
+        "share_of_all_contexts": 0.5307367433129986,
+        "two_sided_context_count": 1131
+      },
+      "segment_time/temporal": {
+        "bins": {
+          "1_h_to_1_day": {
+            "count": 86,
+            "projected_count": null,
+            "share_of_all_contexts": 0.04035664007508212,
+            "share_of_two_sided": 0.2182741116751269
+          },
+          "1_min_to_1_h": {
+            "count": 119,
+            "projected_count": null,
+            "share_of_all_contexts": 0.05584232754575317,
+            "share_of_two_sided": 0.3020304568527919
+          },
+          "1_to_30_days": {
+            "count": 116,
+            "projected_count": null,
+            "share_of_all_contexts": 0.05443453777569216,
+            "share_of_two_sided": 0.29441624365482233
+          },
+          "30_to_180_days": {
+            "count": 56,
+            "projected_count": null,
+            "share_of_all_contexts": 0.02627874237447208,
+            "share_of_two_sided": 0.14213197969543148
+          },
+          "gt_180_days": {
+            "count": 17,
+            "projected_count": null,
+            "share_of_all_contexts": 0.007977475363679024,
+            "share_of_two_sided": 0.04314720812182741
+          },
+          "inside": {
+            "count": 0,
+            "projected_count": null,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "lt_1_min": {
+            "count": 0,
+            "projected_count": null,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          }
+        },
+        "median_width_seconds": 59819.902700116945,
+        "one_sided_context_count": 0,
+        "one_sided_share_of_all_contexts": 0.0,
+        "projected_two_sided_context_count": null,
+        "share_of_all_contexts": 0.18488972313467855,
+        "two_sided_context_count": 394
+      },
+      "trip_time/temporal": {
+        "bins": {
+          "1_h_to_1_day": {
+            "count": 132,
+            "projected_count": null,
+            "share_of_all_contexts": 0.06194274988268419,
+            "share_of_two_sided": 0.21782178217821782
+          },
+          "1_min_to_1_h": {
+            "count": 183,
+            "projected_count": null,
+            "share_of_all_contexts": 0.08587517597372125,
+            "share_of_two_sided": 0.30198019801980197
+          },
+          "1_to_30_days": {
+            "count": 184,
+            "projected_count": null,
+            "share_of_all_contexts": 0.08634443923040826,
+            "share_of_two_sided": 0.30363036303630364
+          },
+          "30_to_180_days": {
+            "count": 80,
+            "projected_count": null,
+            "share_of_all_contexts": 0.03754106053496011,
+            "share_of_two_sided": 0.132013201320132
+          },
+          "gt_180_days": {
+            "count": 27,
+            "projected_count": null,
+            "share_of_all_contexts": 0.012670107930549039,
+            "share_of_two_sided": 0.04455445544554455
+          },
+          "inside": {
+            "count": 0,
+            "projected_count": null,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "lt_1_min": {
+            "count": 0,
+            "projected_count": null,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          }
+        },
+        "median_width_seconds": 66346.06333844991,
+        "one_sided_context_count": 0,
+        "one_sided_share_of_all_contexts": 0.0,
+        "projected_two_sided_context_count": null,
+        "share_of_all_contexts": 0.28437353355232287,
+        "two_sided_context_count": 606
+      }
+    },
+    "records": 8000,
+    "two_sided_core_intervals": 2131
+  },
+  "benchmark_path": "/work_beegfs/sunip956/master_thesis_trajectories/mobilitydb/query_runs/qgen_pol_v3_exact_st_seed20261021/benchmark.jsonl",
+  "config_path": "model/configs/pol_50m_traj_dedup_single_anchor_mbr_segments_first_20k.yaml",
+  "config_sha256": "b97285ac5ecb71aaed5f418124c84c87e4829511f55a8e8636858421607c2556",
+  "git_revision": "f2f0c93e6cee2d78f7cdbb8a268f8af1119798b4",
+  "training": {
+    "equality_predicates": {
+      "segments:t_e": 14927,
+      "segments:t_s": 14717,
+      "trips:end_time": 40778,
+      "trips:start_time": 41201
+    },
+    "intervals": {
+      "segment_ordinary": {
+        "bins": {
+          "1_h_to_1_day": {
+            "count": 3,
+            "projected_count": 300.0,
+            "share_of_all_contexts": 7.32421875e-06,
+            "share_of_two_sided": 0.0002567833604382436
+          },
+          "1_min_to_1_h": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "1_to_30_days": {
+            "count": 299,
+            "projected_count": 29900.000000000004,
+            "share_of_all_contexts": 0.00072998046875,
+            "share_of_two_sided": 0.025592741590344945
+          },
+          "30_to_180_days": {
+            "count": 5215,
+            "projected_count": 521500.0,
+            "share_of_all_contexts": 0.01273193359375,
+            "share_of_two_sided": 0.4463750748951468
+          },
+          "gt_180_days": {
+            "count": 6166,
+            "projected_count": 616600.0,
+            "share_of_all_contexts": 0.0150537109375,
+            "share_of_two_sided": 0.52777540015407
+          },
+          "inside": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "lt_1_min": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          }
+        },
+        "median_width_seconds": 16204678.509000063,
+        "one_sided_context_count": 35607,
+        "one_sided_share_of_all_contexts": 0.08693115234375,
+        "projected_two_sided_context_count": 1168300.0,
+        "share_of_all_contexts": 0.02852294921875,
+        "two_sided_context_count": 11683
+      },
+      "segment_trajectory_temporal": {
+        "bins": {
+          "1_h_to_1_day": {
+            "count": 4,
+            "projected_count": 400.0,
+            "share_of_all_contexts": 9.765625e-06,
+            "share_of_two_sided": 0.00010080391119175424
+          },
+          "1_min_to_1_h": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "1_to_30_days": {
+            "count": 1092,
+            "projected_count": 109200.0,
+            "share_of_all_contexts": 0.002666015625,
+            "share_of_two_sided": 0.027519467755348907
+          },
+          "30_to_180_days": {
+            "count": 17803,
+            "projected_count": 1780300.0,
+            "share_of_all_contexts": 0.04346435546875,
+            "share_of_two_sided": 0.4486530077367002
+          },
+          "gt_180_days": {
+            "count": 20782,
+            "projected_count": 2078200.0,
+            "share_of_all_contexts": 0.0507373046875,
+            "share_of_two_sided": 0.5237267205967592
+          },
+          "inside": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "lt_1_min": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          }
+        },
+        "median_width_seconds": 16124490.594000101,
+        "one_sided_context_count": 0,
+        "one_sided_share_of_all_contexts": 0.0,
+        "projected_two_sided_context_count": 3968100.0,
+        "share_of_all_contexts": 0.09687744140625,
+        "two_sided_context_count": 39681
+      },
+      "trip_ordinary": {
+        "bins": {
+          "1_h_to_1_day": {
+            "count": 2,
+            "projected_count": 200.0,
+            "share_of_all_contexts": 4.8828125e-06,
+            "share_of_two_sided": 6.10593802472905e-05
+          },
+          "1_min_to_1_h": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "1_to_30_days": {
+            "count": 897,
+            "projected_count": 89700.0,
+            "share_of_all_contexts": 0.00218994140625,
+            "share_of_two_sided": 0.027385132040909786
+          },
+          "30_to_180_days": {
+            "count": 14578,
+            "projected_count": 1457800.0,
+            "share_of_all_contexts": 0.0355908203125,
+            "share_of_two_sided": 0.4450618226225004
+          },
+          "gt_180_days": {
+            "count": 17278,
+            "projected_count": 1727800.0,
+            "share_of_all_contexts": 0.0421826171875,
+            "share_of_two_sided": 0.5274919859563425
+          },
+          "inside": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          },
+          "lt_1_min": {
+            "count": 0,
+            "projected_count": 0.0,
+            "share_of_all_contexts": 0.0,
+            "share_of_two_sided": 0.0
+          }
+        },
+        "median_width_seconds": 16188392.14499998,
+        "one_sided_context_count": 98217,
+        "one_sided_share_of_all_contexts": 0.23978759765625,
+        "projected_two_sided_context_count": 3275500.0,
+        "share_of_all_contexts": 0.07996826171875,
+        "two_sided_context_count": 32755
+      }
+    },
+    "sampling": {
+      "batch_size": 2048,
+      "batches": 200,
+      "context_satisfaction_failures": 0,
+      "context_validation": "PredicateTrainingContextGenerator.generate_batch(validate_contexts=True)",
+      "per_row_contexts": 1,
+      "projected_training_contexts": 40960000,
+      "rejected_unsatisfied_contexts": 0,
+      "sampled_contexts": 409600,
+      "seed": 0
+    }
+  }
+}
