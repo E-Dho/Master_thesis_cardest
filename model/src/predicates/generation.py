@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from itertools import combinations
@@ -204,6 +205,137 @@ class PredicateTrainingContextGenerator:
         )
         self._cache_by_metadata_id: dict[int, tuple[_ColumnPredicateCache | None, ...]] = {}
         self._compiled_by_metadata_id: dict[int, _CompiledGenerationMetadata] = {}
+        self._configure_log_width_gate(self.config.get("log_width_gate"))
+        # (id(compiled), column) -> (values of the valid ranks, first rank, log(span)) or None
+        self._log_width_numeric: dict[tuple[int, int], tuple[np.ndarray, int, float] | None] = {}
+
+    def _configure_log_width_gate(self, gate: Any) -> None:
+        """``predicate_generation.log_width_gate`` (see ``_draw_log_width_dimensions``).
+
+        probability: chance per context and dimension that the bounds on that
+        dimension's columns are drawn at a log-uniform distance from the row's own
+        value (between ``min_width`` and the column's domain span) instead of
+        uniformly over the domain ranks. 0 (or no section) is the uniform generator,
+        unchanged and without extra random draws.
+        dimensions: name -> {min_width: float, columns: [column names]}.
+        """
+
+        gate = dict(gate or {})
+        self.log_width_probability = float(gate.get("probability", 0.0) or 0.0)
+        if not 0.0 <= self.log_width_probability <= 1.0:
+            raise ValueError("predicate_generation.log_width_gate.probability must be in [0, 1]")
+        dimensions = dict(gate.get("dimensions") or {})
+        if self.log_width_probability > 0.0 and not dimensions:
+            raise ValueError("predicate_generation.log_width_gate needs dimensions when probability > 0")
+        self.log_width_dimensions: tuple[str, ...] = tuple(sorted(dimensions))
+        self.log_width_min: dict[str, float] = {}
+        self.log_width_column_dimension: dict[str, str] = {}
+        for name in self.log_width_dimensions:
+            spec = dict(dimensions[name] or {})
+            minimum = float(spec.get("min_width", 0.0) or 0.0)
+            if minimum <= 0.0:
+                raise ValueError(f"predicate_generation.log_width_gate.dimensions.{name}.min_width must be positive")
+            self.log_width_min[name] = minimum
+            for column in spec.get("columns") or ():
+                column = str(column)
+                if column in self.log_width_column_dimension:
+                    raise ValueError(f"log_width_gate column {column} is in two dimensions")
+                self.log_width_column_dimension[column] = name
+
+    def _draw_log_width_dimensions(self, rng: np.random.Generator) -> frozenset[str]:
+        """The dimensions whose bounds use log-uniform distances in this context.
+
+        One coin per dimension (in sorted name order), drawn only when the gate is
+        on, so probability 0 leaves the random stream and the contexts unchanged.
+        """
+
+        if self.log_width_probability <= 0.0:
+            return frozenset()
+        return frozenset(
+            name for name in self.log_width_dimensions
+            if float(rng.random()) < self.log_width_probability
+        )
+
+    def _log_dimension_of(self, column_name: str, log_dimensions: frozenset[str]) -> str | None:
+        if not log_dimensions:
+            return None
+        dimension = self.log_width_column_dimension.get(column_name)
+        return dimension if dimension in log_dimensions else None
+
+    def _log_width_values(
+        self, compiled: "_CompiledGenerationMetadata", column_index: int
+    ) -> tuple[np.ndarray, int, float] | None:
+        """Numeric values of a column's valid domain ranks, the first such rank, and
+        the log of the column's span; None if the column is not numeric in domain
+        order (it then stays uniform)."""
+
+        key = (id(compiled), int(column_index))
+        if key in self._log_width_numeric:
+            return self._log_width_numeric[key]
+        cache = compiled.column_caches[column_index]
+        numeric = None if cache is None else _numeric_rank_values(cache.comparable_values)
+        result = None
+        if numeric is not None:
+            values, first, stop = numeric
+            block = np.ascontiguousarray(values[first:stop])
+            span = float(block[-1] - block[0])
+            result = (block, first, float(np.log(span)) if span > 0 else float("-inf"))
+        self._log_width_numeric[key] = result
+        return result
+
+    def _log_distance(self, dimension: str, log_span: float, rng: np.random.Generator) -> float:
+        """exp(U(log min_width, log span)); min_width if the span is not larger."""
+
+        log_low = math.log(self.log_width_min[dimension])
+        if log_span <= log_low:
+            return self.log_width_min[dimension]
+        return math.exp(log_low + float(rng.random()) * (log_span - log_low))
+
+    def _log_upper_rank(
+        self,
+        compiled: "_CompiledGenerationMetadata",
+        column_index: int,
+        *,
+        anchor_rank: int,
+        start: int,
+        dimension: str,
+        rng: np.random.Generator,
+    ) -> int | None:
+        """Rank of the first value >= anchor + distance, at least ``start``."""
+
+        numeric = self._log_width_values(compiled, column_index)
+        if numeric is None:
+            return None
+        block, first, log_span = numeric
+        stop = first + len(block)
+        if not (first <= anchor_rank < stop) or start >= stop:
+            return None
+        target = float(block[anchor_rank - first]) + self._log_distance(dimension, log_span, rng)
+        rank = first + int(block.searchsorted(target, side="left"))
+        return max(min(rank, stop - 1), start)
+
+    def _log_lower_rank(
+        self,
+        compiled: "_CompiledGenerationMetadata",
+        column_index: int,
+        *,
+        anchor_rank: int,
+        stop_rank: int,
+        dimension: str,
+        rng: np.random.Generator,
+    ) -> int | None:
+        """Rank of the last value <= anchor - distance, below ``stop_rank``."""
+
+        numeric = self._log_width_values(compiled, column_index)
+        if numeric is None:
+            return None
+        block, first, log_span = numeric
+        stop = first + len(block)
+        if not (first <= anchor_rank < stop) or stop_rank <= first:
+            return None
+        target = float(block[anchor_rank - first]) - self._log_distance(dimension, log_span, rng)
+        rank = first + int(block.searchsorted(target, side="right")) - 1
+        return min(max(rank, first), stop_rank - 1)
 
     def probability_diagnostics(self) -> dict[str, float | bool]:
         return {
@@ -214,6 +346,8 @@ class PredicateTrainingContextGenerator:
             "native_range_probability": self.native_range_probability,
             "probability_total": self._probability_total,
             "normalize_predicate_probabilities": self.normalize_predicate_probabilities,
+            "log_width_gate_probability": self.log_width_probability,
+            "log_width_gate_min_width": dict(self.log_width_min),
         }
 
     def generate_batch(
@@ -362,6 +496,7 @@ class PredicateTrainingContextGenerator:
         debug_allow_row_dependent_native_range_tail: bool = False,
     ) -> GeneratedTrainingContext:
         compiled = compiled or self._compiled(metadata)
+        log_dimensions = self._draw_log_width_dimensions(rng)
         included_tables = set(self._sample_included_tables(encoded_row, metadata, rng, compiled))
         column = metadata.columns[int(stratum.column_index)]
         if column.table is not None:
@@ -391,6 +526,7 @@ class PredicateTrainingContextGenerator:
             rng,
             frozenset(included_tables),
             compiled=compiled,
+            log_dimensions=log_dimensions,
         )
         ordinary[column.name] = forced_predicate_for_stratum(
             stratum,
@@ -517,6 +653,7 @@ class PredicateTrainingContextGenerator:
         compiled: _CompiledGenerationMetadata | None = None,
     ) -> GeneratedPhysicalQuery:
         compiled = compiled or self._compiled(metadata)
+        log_dimensions = self._draw_log_width_dimensions(rng)
         included_table_mask = self._sample_included_table_mask(
             encoded_row,
             metadata,
@@ -536,6 +673,7 @@ class PredicateTrainingContextGenerator:
             rng,
             included_tables,
             compiled,
+            log_dimensions=log_dimensions,
         )
         if trajectory_query is not None:
             semantic_owned.update(_semantic_owned_column_names(trajectory_query))
@@ -547,6 +685,7 @@ class PredicateTrainingContextGenerator:
             excluded_columns=frozenset(semantic_owned),
             compiled=compiled,
             included_table_mask=included_table_mask,
+            log_dimensions=log_dimensions,
         )
         if trajectory_query is not None:
             ordinary.update(dict(getattr(trajectory_query, "scalar_predicates", ())))
@@ -663,6 +802,7 @@ class PredicateTrainingContextGenerator:
         excluded_columns: frozenset[str] = frozenset(),
         compiled: _CompiledGenerationMetadata | None = None,
         included_table_mask: int | None = None,
+        log_dimensions: frozenset[str] = frozenset(),
     ) -> dict[str, PredicateToken]:
         compiled = compiled or self._compiled(metadata)
         if included_table_mask is None:
@@ -681,6 +821,9 @@ class PredicateTrainingContextGenerator:
                 value,
                 rng,
                 encoded_value_id=int(encoded_row[column_index]),
+                log_dimension=self._log_dimension_of(column.name, log_dimensions),
+                compiled=compiled,
+                column_index=column_index,
             )
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
@@ -693,6 +836,7 @@ class PredicateTrainingContextGenerator:
         rng: np.random.Generator,
         included_tables: frozenset[str],
         compiled: _CompiledGenerationMetadata | None = None,
+        log_dimensions: frozenset[str] = frozenset(),
     ) -> Any | None:
         compiled = compiled or self._compiled(metadata)
         if self.trajectory_query_semantics not in {"auto_pol_segments", "pol_segments"}:
@@ -715,12 +859,16 @@ class PredicateTrainingContextGenerator:
         temporal_predicates = []
         spatial_predicates = []
         if float(rng.random()) < self.trajectory_temporal_probability:
-            generated = self._sample_pol_temporal_query(encoded_row, metadata, rng, compiled)
+            generated = self._sample_pol_temporal_query(
+                encoded_row, metadata, rng, compiled, log_dimensions=log_dimensions
+            )
             if generated is not None:
                 scalar_predicates.extend(generated[0])
                 temporal_predicates.append(generated[1])
         if float(rng.random()) < self.trajectory_spatial_probability:
-            generated = self._sample_pol_spatial_query(encoded_row, metadata, rng, compiled)
+            generated = self._sample_pol_spatial_query(
+                encoded_row, metadata, rng, compiled, log_dimensions=log_dimensions
+            )
             if generated is not None:
                 scalar_predicates.extend(generated[0])
                 spatial_predicates.append(generated[1])
@@ -740,6 +888,7 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         rng: np.random.Generator,
         compiled: _CompiledGenerationMetadata | None = None,
+        log_dimensions: frozenset[str] = frozenset(),
     ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
         from model.src.data.trajectory_distinct import SegmentTemporalPredicate
 
@@ -758,10 +907,26 @@ class PredicateTrainingContextGenerator:
         upper_start = start_cache.domain_id_to_right_rank[int(encoded_row[start_index])]
         if lower_stop <= 0 or upper_start >= len(start_cache.comparable_values):
             return None
-        lower = end_cache.comparable_values[int(rng.integers(0, lower_stop))]
-        upper = start_cache.comparable_values[
-            int(rng.integers(upper_start, len(start_cache.comparable_values)))
-        ]
+        lower_rank = upper_rank = None
+        end_dimension = self._log_dimension_of(metadata.columns[end_index].name, log_dimensions)
+        start_dimension = self._log_dimension_of(metadata.columns[start_index].name, log_dimensions)
+        if end_dimension is not None:
+            lower_rank = self._log_lower_rank(
+                compiled, end_index, anchor_rank=lower_stop - 1, stop_rank=lower_stop,
+                dimension=end_dimension, rng=rng,
+            )
+        if lower_rank is None:
+            lower_rank = int(rng.integers(0, lower_stop))
+        if start_dimension is not None:
+            upper_rank = self._log_upper_rank(
+                compiled, start_index,
+                anchor_rank=start_cache.domain_id_to_left_rank[int(encoded_row[start_index])],
+                start=upper_start, dimension=start_dimension, rng=rng,
+            )
+        if upper_rank is None:
+            upper_rank = int(rng.integers(upper_start, len(start_cache.comparable_values)))
+        lower = end_cache.comparable_values[lower_rank]
+        upper = start_cache.comparable_values[upper_rank]
         scalar = [
             ("segments:t_s", PredicateToken(PredicateOp.LESS_THAN, value=upper)),
             ("segments:t_e", PredicateToken(PredicateOp.GREATER_EQUAL, value=lower)),
@@ -780,6 +945,7 @@ class PredicateTrainingContextGenerator:
         metadata: ModelMetadata,
         rng: np.random.Generator,
         compiled: _CompiledGenerationMetadata | None = None,
+        log_dimensions: frozenset[str] = frozenset(),
     ) -> tuple[list[tuple[str, PredicateToken]], Any] | None:
         """Sample a row-satisfied POL spatial rectangle context."""
 
@@ -839,13 +1005,36 @@ class PredicateTrainingContextGenerator:
                 or y_lower_stop <= 0
             ):
                 return None
-            raw_min_x = float(seg_max_x_values[int(rng.integers(0, x_lower_stop))])
+            def lower_rank(name: str, stop: int) -> int:
+                index = compiled.mbr_spatial_indices[name]
+                dimension = self._log_dimension_of(name, log_dimensions)
+                rank = None
+                if dimension is not None:
+                    rank = self._log_lower_rank(
+                        compiled, index, anchor_rank=stop - 1, stop_rank=stop,
+                        dimension=dimension, rng=rng,
+                    )
+                return int(rng.integers(0, stop)) if rank is None else rank
+
+            def upper_rank(name: str, start: int, size: int) -> int:
+                index = compiled.mbr_spatial_indices[name]
+                dimension = self._log_dimension_of(name, log_dimensions)
+                rank = None
+                if dimension is not None:
+                    rank = self._log_upper_rank(
+                        compiled, index, anchor_rank=start, start=start,
+                        dimension=dimension, rng=rng,
+                    )
+                return int(rng.integers(start, size)) if rank is None else rank
+
+            # Draw order as before: min_x, max_x, min_y, max_y.
+            raw_min_x = float(seg_max_x_values[lower_rank("segments:seg_max_x", x_lower_stop)])
             raw_max_x = float(
-                seg_min_x_values[int(rng.integers(x_upper_start, len(seg_min_x_values)))]
+                seg_min_x_values[upper_rank("segments:seg_min_x", x_upper_start, len(seg_min_x_values))]
             )
-            raw_min_y = float(seg_max_y_values[int(rng.integers(0, y_lower_stop))])
+            raw_min_y = float(seg_max_y_values[lower_rank("segments:seg_max_y", y_lower_stop)])
             raw_max_y = float(
-                seg_min_y_values[int(rng.integers(y_upper_start, len(seg_min_y_values)))]
+                seg_min_y_values[upper_rank("segments:seg_min_y", y_upper_start, len(seg_min_y_values))]
             )
             min_x, max_x = sorted((raw_min_x, raw_max_x))
             min_y, max_y = sorted((raw_min_y, raw_max_y))
@@ -911,10 +1100,22 @@ class PredicateTrainingContextGenerator:
         y_upper_candidates = [value for value in y_domain if value >= y_high_anchor]
         if not (x_lower_candidates and x_upper_candidates and y_lower_candidates and y_upper_candidates):
             return None
-        min_x = float(x_lower_candidates[int(rng.integers(0, len(x_lower_candidates)))])
-        max_x = float(x_upper_candidates[int(rng.integers(0, len(x_upper_candidates)))])
-        min_y = float(y_lower_candidates[int(rng.integers(0, len(y_lower_candidates)))])
-        max_y = float(y_upper_candidates[int(rng.integers(0, len(y_upper_candidates)))])
+        space_dimension = None
+        for name in column_names:
+            space_dimension = space_dimension or self._log_dimension_of(name, log_dimensions)
+        if space_dimension is None:
+            min_x = float(x_lower_candidates[int(rng.integers(0, len(x_lower_candidates)))])
+            max_x = float(x_upper_candidates[int(rng.integers(0, len(x_upper_candidates)))])
+            min_y = float(y_lower_candidates[int(rng.integers(0, len(y_lower_candidates)))])
+            max_y = float(y_upper_candidates[int(rng.integers(0, len(y_upper_candidates)))])
+        else:
+            # log-uniform distances from the row's own extent (the candidates are sorted)
+            x_span = math.log(max(float(x_domain[-1] - x_domain[0]), 1e-300))
+            y_span = math.log(max(float(y_domain[-1] - y_domain[0]), 1e-300))
+            min_x = _last_at_most(x_lower_candidates, x_low_anchor - self._log_distance(space_dimension, x_span, rng))
+            max_x = _first_at_least(x_upper_candidates, x_high_anchor + self._log_distance(space_dimension, x_span, rng))
+            min_y = _last_at_most(y_lower_candidates, y_low_anchor - self._log_distance(space_dimension, y_span, rng))
+            max_y = _first_at_least(y_upper_candidates, y_high_anchor + self._log_distance(space_dimension, y_span, rng))
         scalar = [
             ("segments:s_x", PredicateToken.range(min_x, max_x)),
             ("segments:e_x", PredicateToken.range(min_x, max_x)),
@@ -1031,6 +1232,9 @@ class PredicateTrainingContextGenerator:
         value: Any,
         rng: np.random.Generator,
         encoded_value_id: int | None = None,
+        log_dimension: str | None = None,
+        compiled: "_CompiledGenerationMetadata | None" = None,
+        column_index: int | None = None,
     ) -> PredicateToken:
         if not self.enabled:
             return PredicateToken.wildcard()
@@ -1054,18 +1258,26 @@ class PredicateTrainingContextGenerator:
         if roll < self.equality_probability:
             return PredicateToken.equal(value)
         roll -= self.equality_probability
+        # A gated column (log_dimension) draws its bounds at a log-uniform distance
+        # from the row's value; otherwise (or if the column is not numeric) uniformly
+        # over the satisfying ranks, as before.
+        log = (
+            (log_dimension, compiled, column_index)
+            if log_dimension is not None and compiled is not None and column_index is not None
+            else None
+        )
         if roll < self.lower_bound_probability:
             stop = right_rank
             if stop <= 0:
                 return PredicateToken.wildcard()
-            threshold = comparable_values[int(rng.integers(0, stop))]
+            threshold = comparable_values[self._lower_rank(log, right_rank, rng)]
             return PredicateToken(PredicateOp.GREATER_EQUAL, value=threshold)
         roll -= self.lower_bound_probability
         if roll < self.upper_bound_probability:
             start = left_rank
             if start >= len(comparable_values):
                 return PredicateToken.wildcard()
-            threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
+            threshold = comparable_values[self._upper_rank(log, left_rank, len(comparable_values), rng)]
             return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
         return self._sample_row_range_style_predicate(
             comparable_values,
@@ -1073,7 +1285,34 @@ class PredicateTrainingContextGenerator:
             right_rank=right_rank,
             domain_size=len(cache.comparable_values),
             rng=rng,
+            log=log,
         )
+
+    def _lower_rank(self, log: tuple | None, right_rank: int, rng: np.random.Generator) -> int:
+        """A rank below ``right_rank`` (values <= the row's value)."""
+
+        if log is not None:
+            dimension, compiled, column_index = log
+            rank = self._log_lower_rank(
+                compiled, column_index, anchor_rank=right_rank - 1, stop_rank=right_rank,
+                dimension=dimension, rng=rng,
+            )
+            if rank is not None:
+                return rank
+        return int(rng.integers(0, right_rank))
+
+    def _upper_rank(self, log: tuple | None, left_rank: int, size: int, rng: np.random.Generator) -> int:
+        """A rank from ``left_rank`` on (values >= the row's value)."""
+
+        if log is not None:
+            dimension, compiled, column_index = log
+            rank = self._log_upper_rank(
+                compiled, column_index, anchor_rank=left_rank, start=left_rank,
+                dimension=dimension, rng=rng,
+            )
+            if rank is not None:
+                return rank
+        return int(rng.integers(left_rank, size))
 
     def _sample_row_range_style_predicate(
         self,
@@ -1083,6 +1322,7 @@ class PredicateTrainingContextGenerator:
         right_rank: int,
         domain_size: int,
         rng: np.random.Generator,
+        log: tuple | None = None,
     ) -> PredicateToken:
         if not (
             self.enable_native_range_tokens
@@ -1092,25 +1332,30 @@ class PredicateTrainingContextGenerator:
                 stop = right_rank
                 if stop <= 0:
                     return PredicateToken.wildcard()
-                threshold = comparable_values[int(rng.integers(0, stop))]
+                threshold = comparable_values[self._lower_rank(log, right_rank, rng)]
                 return PredicateToken(PredicateOp.GREATER_EQUAL, value=threshold)
             start = left_rank
             if start >= len(comparable_values):
                 return PredicateToken.wildcard()
-            threshold = comparable_values[int(rng.integers(start, len(comparable_values)))]
+            threshold = comparable_values[self._upper_rank(log, left_rank, len(comparable_values), rng)]
             return PredicateToken(PredicateOp.LESS_EQUAL, value=threshold)
         stop = right_rank
         start = left_rank
         if stop <= 0 or start >= len(comparable_values):
             return PredicateToken.wildcard()
-        lower = comparable_values[int(rng.integers(0, stop))]
-        upper = comparable_values[int(rng.integers(start, len(comparable_values)))]
+        lower = comparable_values[self._lower_rank(log, right_rank, rng)]
+        upper = comparable_values[self._upper_rank(log, left_rank, len(comparable_values), rng)]
         return PredicateToken.range(lower, upper)
 
     def warm_caches(self, metadata: ModelMetadata) -> None:
         """Build the per-metadata caches now (e.g. before worker processes fork)."""
 
-        self._compiled(metadata)
+        compiled = self._compiled(metadata)
+        if self.log_width_probability > 0.0:
+            for name in self.log_width_column_dimension:
+                index = compiled.column_name_to_index.get(name)
+                if index is not None:
+                    self._log_width_values(compiled, index)
 
     def _compiled(self, metadata: ModelMetadata) -> _CompiledGenerationMetadata:
         key = id(metadata)
@@ -1503,6 +1748,68 @@ def _build_column_predicate_cache(domain: tuple[Any, ...]) -> _ColumnPredicateCa
         domain_id_to_left_rank=tuple(left_ranks),
         domain_id_to_right_rank=tuple(right_ranks),
     )
+
+
+def _numeric_rank_values(values: tuple[Any, ...]) -> tuple[np.ndarray, int, int] | None:
+    """Numbers for sorted comparable values (timestamps as UTC seconds), and the block
+    of ranks that hold numbers; None unless that block is contiguous and ordered.
+
+    Timestamp strings are parsed with numpy in one pass (domains have millions of
+    values) and checked against ``_timestamp_to_float`` on a sample; any mismatch
+    or unparsable value falls back to the per-value conversion.
+    """
+
+    from model.src.data.trajectory_distinct import _timestamp_to_float
+
+    def one(value: Any) -> float:
+        if isinstance(value, str) and value.startswith("__"):
+            return float("nan")
+        if isinstance(value, bool):
+            return float("nan")
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return float(value)
+        try:
+            return _timestamp_to_float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    numbers = None
+    real = [index for index, value in enumerate(values)
+            if not (isinstance(value, str) and value.startswith("__"))]
+    if real and all(isinstance(values[index], str) for index in real):
+        try:
+            parsed = np.array([values[index] for index in real], dtype="datetime64[us]")
+            seconds = parsed.astype("int64").astype(np.float64) / 1e6
+            numbers = np.full(len(values), np.nan, dtype=np.float64)
+            numbers[real] = seconds
+            check = np.linspace(0, len(real) - 1, num=min(len(real), 64), dtype=int)
+            if any(abs(one(values[real[i]]) - numbers[real[i]]) > 1e-6 for i in check):
+                numbers = None
+        except (ValueError, TypeError):
+            numbers = None
+    elif real and all(isinstance(values[index], (int, float, np.integer, np.floating))
+                      and not isinstance(values[index], bool) for index in real):
+        numbers = np.full(len(values), np.nan, dtype=np.float64)
+        numbers[real] = np.asarray([values[index] for index in real], dtype=np.float64)
+    if numbers is None:
+        numbers = np.asarray([one(value) for value in values], dtype=np.float64)
+    valid = np.flatnonzero(~np.isnan(numbers))
+    if valid.size == 0:
+        return None
+    first, stop = int(valid[0]), int(valid[-1]) + 1
+    if valid.size != stop - first or np.any(np.diff(numbers[first:stop]) < 0):
+        return None
+    return numbers, first, stop
+
+
+def _last_at_most(sorted_values: list[float], target: float) -> float:
+    index = bisect_right(sorted_values, target) - 1
+    return float(sorted_values[max(index, 0)])
+
+
+def _first_at_least(sorted_values: list[float], target: float) -> float:
+    index = bisect_left(sorted_values, target)
+    return float(sorted_values[min(index, len(sorted_values) - 1)])
 
 
 def _numeric_domain_literals_from_cache(

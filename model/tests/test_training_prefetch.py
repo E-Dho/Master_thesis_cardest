@@ -136,6 +136,14 @@ class PrefetchEquivalenceTest(unittest.TestCase):
             _assert_same(self, Path(serial), Path(parallel))
 
     def test_pol_trajectory_source_with_rare_support_and_dedup_targets(self) -> None:
+        self._pol_trajectory_source(log_width_gate=None)
+
+    def test_pol_trajectory_source_with_log_width_gate(self) -> None:
+        from model.tests.test_log_width_gate import GATE
+
+        self._pol_trajectory_source(log_width_gate={**GATE, "probability": 0.5})
+
+    def _pol_trajectory_source(self, *, log_width_gate) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_pol_staging(root / "staging")
@@ -157,6 +165,8 @@ class PrefetchEquivalenceTest(unittest.TestCase):
                                           validation_interval_steps=3, prefetch_workers=workers)
                 config["validation"].update(interval_steps=3, batch_size=64, fresh_sampler_batches=2)
                 config["rare_auxiliary"]["batch_size"] = 16
+                if log_width_gate is not None:
+                    config["predicate_generation"]["log_width_gate"] = log_width_gate
                 # the fixture is tiny: demand more support so that discovery selects strata
                 config["rare_support"]["discovery"]["minimum_expected_context_support"] = 10**9
                 config["logging"]["output_directory"] = str(root / name)
