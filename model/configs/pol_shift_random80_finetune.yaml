@@ -5,6 +5,8 @@
 # Everything else as the evaluated model. The stale run must have finished first.
 # Since 2026-11-25 also with predicate_generation.log_width_gate; the retrain
 # reference is pol_main_log_width_gate_seed0.yaml (model/pol-ablations), trained with the same gate.
+# Rare support off (decided 2026-11-25): rare_support.enabled and rare_auxiliary.enabled are
+# false for all own-model trainings; the earlier models trained with them on.
 dataset:
   type: pol_trajectory_full_join
   name: pol_shift_random80_finetune
@@ -122,7 +124,7 @@ importance_sampling:
   enabled: false
 
 rare_support:
-  enabled: true
+  enabled: false
   discovery:
     enabled: true
     root_data_only: true
@@ -137,7 +139,7 @@ rare_support:
     enabled: true
 
 rare_auxiliary:
-  enabled: true
+  enabled: false
   batch_size: 512
   beta: 0.25
 
