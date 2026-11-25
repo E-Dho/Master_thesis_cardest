@@ -112,6 +112,12 @@ assert config["rare_auxiliary"]["enabled"] is False
 assert config["runtime"]["require_cuda"] is True
 PY
 
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  # Check the generated config and its asserts only (e.g. on a login node).
+  echo "dry_run=ok config=$CONFIG"
+  exit 0
+fi
+
 "$PYTHON" -m model.scripts.check_live_sampler_startup \
   --config "$CONFIG" \
   --output-dir "$STARTUP" \
