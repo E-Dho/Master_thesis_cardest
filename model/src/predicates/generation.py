@@ -99,11 +99,6 @@ class _CompiledGenerationMetadata:
 
 
 _WILDCARD_TOKEN = PredicateToken.wildcard()
-# start/end columns of one table that together describe an interval (gate only)
-_INTERVAL_COLUMN_PAIRS = (
-    ("trips:start_time", "trips:end_time"),
-    ("segments:t_s", "segments:t_e"),
-)
 _INDICATOR_INCLUDED_TOKEN = PredicateToken.equal(1)
 _INV_FANOUT_TOKEN = PredicateToken.inv_fanout()
 
@@ -324,48 +319,6 @@ class PredicateTrainingContextGenerator:
         if new_upper >= len(start_block) or new_lower < 0:
             return None
         return start_first + new_upper, end_first + new_lower
-
-    def _uninvert_ordinary_pairs(
-        self,
-        compiled: "_CompiledGenerationMetadata",
-        ordinary: dict[str, PredicateToken],
-        log_dimensions: frozenset[str],
-    ) -> None:
-        """The same as _uninverted_interval_ranks for an ordinary ``start <= U`` and
-        ``end >= L`` pair on the same table (trip times, segment times) drawn with the
-        gate; if no valid values exist, the end bound is dropped."""
-
-        for start_name, end_name in _INTERVAL_COLUMN_PAIRS:
-            start_token = ordinary.get(start_name)
-            end_token = ordinary.get(end_name)
-            if start_token is None or end_token is None:
-                continue
-            if start_token.op != PredicateOp.LESS_EQUAL or end_token.op != PredicateOp.GREATER_EQUAL:
-                continue
-            if start_name not in self.log_width_column_dimension or \
-                    end_name not in self.log_width_column_dimension:
-                continue
-            start_index = compiled.column_name_to_index[start_name]
-            end_index = compiled.column_name_to_index[end_name]
-            start_cache = compiled.column_caches[start_index]
-            end_cache = compiled.column_caches[end_index]
-            if start_cache is None or end_cache is None:
-                continue
-            upper_rank = bisect_left(start_cache.comparable_values, start_token.value)
-            lower_rank = bisect_left(end_cache.comparable_values, end_token.value)
-            ranks = self._uninverted_interval_ranks(
-                compiled, start_index, end_index, upper_rank=upper_rank, lower_rank=lower_rank
-            )
-            if ranks is None:
-                del ordinary[end_name]
-                continue
-            if ranks != (upper_rank, lower_rank):
-                ordinary[start_name] = PredicateToken(
-                    PredicateOp.LESS_EQUAL, value=start_cache.comparable_values[ranks[0]]
-                )
-                ordinary[end_name] = PredicateToken(
-                    PredicateOp.GREATER_EQUAL, value=end_cache.comparable_values[ranks[1]]
-                )
 
     def _log_distance(self, dimension: str, log_span: float, rng: np.random.Generator) -> float:
         """exp(U(log min_width, log span)); min_width if the span is not larger."""
@@ -911,8 +864,6 @@ class PredicateTrainingContextGenerator:
             )
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
-        if self.log_width_probability > 0.0:
-            self._uninvert_ordinary_pairs(compiled, ordinary, log_dimensions)
         return ordinary
 
     def _pol_trajectory_query_for_row(

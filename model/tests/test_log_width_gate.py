@@ -225,8 +225,9 @@ def _write_dense_pol_staging(staging: Path) -> None:
 
 class DenseTimestampGateTest(unittest.TestCase):
     """Bounds drawn from a row's start and end can cross when the log distances are
-    shorter than the row; the generator must then return the interval inside the row
-    (lower <= upper), never an inverted one."""
+    shorter than the row; for the segment temporal context (one interval query) the
+    generator must then return the interval inside the row (lower <= upper). Ordinary
+    start/end predicates are independent and keep their values."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -270,7 +271,7 @@ class DenseTimestampGateTest(unittest.TestCase):
     def _check_no_inverted_intervals(self, probability: float) -> None:
         contexts, rows, stats = self._generate(probability)
         self.assertEqual(stats.rejected_unsatisfied_contexts, 0)
-        segment_intervals = inside_segment = trip_pairs = inside_trip = 0
+        segment_intervals = inside_segment = trip_pairs = inside_trip = spanning_trip = 0
         for context, row in zip(contexts, rows):
             query = context.trajectory_query
             for temporal in getattr(query, "temporal_predicates", ()) if query is not None else ():
@@ -281,18 +282,22 @@ class DenseTimestampGateTest(unittest.TestCase):
             for start_name, end_name in (("trips:start_time", "trips:end_time"), ("segments:t_s", "segments:t_e")):
                 start = context.ordinary_predicates.get(start_name)
                 end = context.ordinary_predicates.get(end_name)
+                # Ordinary start/end bounds are independent Duet predicates: L > U is a
+                # valid conjunction (rows spanning the gap) and is left as drawn.
                 if (start is not None and end is not None and start.op == PredicateOp.LESS_EQUAL
-                        and end.op == PredicateOp.GREATER_EQUAL):
-                    self.assertLessEqual(_seconds(end.value), _seconds(start.value), (start_name, end_name))
-                    if start_name == "trips:start_time":
-                        trip_pairs += 1
-                        inside_trip += (_seconds(end.value) > self._value(row, start_name)
-                                        and _seconds(start.value) < self._value(row, end_name))
+                        and end.op == PredicateOp.GREATER_EQUAL and start_name == "trips:start_time"):
+                    trip_pairs += 1
+                    lower, upper = _seconds(end.value), _seconds(start.value)
+                    inside_trip += (lower <= upper and lower > self._value(row, start_name)
+                                    and upper < self._value(row, end_name))
+                    spanning_trip += lower > upper
         self.assertGreater(segment_intervals, 100)
         self.assertGreater(trip_pairs, 20)
         # narrow intervals inside the row's own span exist (the case that was inverted)
         self.assertGreater(inside_segment, 0.03 * segment_intervals)
         self.assertGreater(inside_trip, 0)
+        if probability == 1.0:
+            self.assertGreater(spanning_trip, 0)  # independent predicates are not rewritten
 
     def test_uniform_generator_unchanged_on_dense_domains(self) -> None:
         absent = PredicateTrainingContextGenerator(self.predicate_config).generate_batch(
