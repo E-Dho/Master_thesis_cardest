@@ -5,6 +5,8 @@
 #   ResMADE).
 # Train with model/slurm/job_light_ranges_ablation_20k.sbatch, which applies the
 # same 20k-step recipe as the evaluated model (job_light_ranges_rare_aux_20k).
+# Rare support off (decided 2026-11-25): rare_support.enabled and rare_auxiliary.enabled are
+# false for all own-model trainings; the earlier models trained with them on.
 dataset:
   type: neurocard_full_join
   name: job_light_ranges_duet_binary_native_anpm_40k_rare_auxiliary
@@ -89,7 +91,7 @@ importance_sampling:
   enabled: false
 
 rare_support:
-  enabled: true
+  enabled: false
   discovery:
     enabled: true
     root_data_only: true
@@ -108,7 +110,7 @@ rare_support:
     enabled: true
 
 rare_auxiliary:
-  enabled: true
+  enabled: false
   batch_size: 512
   beta: 0.25
 
