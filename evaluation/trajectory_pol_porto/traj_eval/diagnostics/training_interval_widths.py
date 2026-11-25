@@ -296,7 +296,11 @@ def analyze_training_contexts(
             observations, one_sided, equalities = extract_context_intervals(context)
             equality_counts.update(equalities)
             for key, count in one_sided.items():
-                interval_stats[key]["one_sided_context_count"] += count
+                report_key = {
+                    "segment_time_ordinary": "segment_ordinary",
+                    "trip_time_ordinary": "trip_ordinary",
+                }.get(key, key)
+                interval_stats[report_key]["one_sided_context_count"] += count
             for observation in observations:
                 key = f"{observation.kind}_{observation.source}"
                 interval_stats[key]["widths_seconds"].append(observation.width_seconds)
