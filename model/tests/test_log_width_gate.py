@@ -194,6 +194,114 @@ class LogWidthGateTest(unittest.TestCase):
                          {"trips:start_time": "time", "trips:end_time": "time"})
 
 
+def _write_dense_pol_staging(staging: Path) -> None:
+    """Long segments (5-50 min) and trips packed into a few hours: timestamp domains
+    dense relative to segment durations, unlike the sparse prefetch fixture."""
+
+    from model.tests.test_training_prefetch import _iso
+
+    rng = np.random.default_rng(1)
+    staging.mkdir(parents=True)
+    agents, trips, segments = [], [], []
+    trip_id = 0
+    for agent in range(1, 121):
+        agents.append(f"{agent}\t{rng.integers(18, 60)}.0\t{['Graduate', 'Bachelors', 'Low'][agent % 3]}\t"
+                      f"{'ABC'[agent % 3]}\t{rng.random():.6f}\t{1 + agent % 3}")
+        for _ in range(int(rng.integers(1, 4))):
+            trip_id += 1
+            length = int(rng.integers(2, 6))
+            start = 1_600_000_000 + int(rng.integers(0, 20_000))
+            x, y, t = rng.uniform(740_000, 744_000), rng.uniform(3_734_000, 3_739_000), start
+            for index in range(length):
+                dx, dy, dt = rng.normal(0, 300), rng.normal(0, 300), int(rng.integers(300, 3000))
+                segments.append(f"{trip_id}\t{index}\t{x:.2f}\t{y:.2f}\t{x + dx:.2f}\t{y + dy:.2f}\t"
+                                f"{_iso(t)}\t{_iso(t + dt)}")
+                x, y, t = x + dx, y + dy, t + dt
+            trips.append(f"{trip_id}\t{agent}\t{_iso(start)}\t{_iso(t)}\t{length}")
+    (staging / "agents.tsv").write_text("\n".join(agents) + "\n")
+    (staging / "trips.tsv").write_text("\n".join(trips) + "\n")
+    (staging / "segments.tsv").write_text("\n".join(segments) + "\n")
+
+
+class DenseTimestampGateTest(unittest.TestCase):
+    """Bounds drawn from a row's start and end can cross when the log distances are
+    shorter than the row; the generator must then return the interval inside the row
+    (lower <= upper), never an inverted one."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from model.src.data.sample_sources import sample_source_from_config
+
+        cls.directory = tempfile.TemporaryDirectory()
+        root = Path(cls.directory.name)
+        _write_dense_pol_staging(root / "staging")
+        text = (REPO / BASE_CONFIG).read_text().replace(PREPARED, str(root / "prepared"))
+        (root / "prepare.yaml").write_text(text)
+        subprocess.run([sys.executable, "-m", "model.scripts.prepare_pol_staging_data", "--config",
+                        str(root / "prepare.yaml"), "--staging-dir", str(root / "staging")],
+                       cwd=REPO, check=True, capture_output=True, text=True)
+        config = load_simple_yaml(str(root / "prepare.yaml"))
+        config["rare_support"]["enabled"] = False
+        config["rare_auxiliary"]["enabled"] = False
+        source = sample_source_from_config(config)
+        cls.metadata = source.metadata
+        cls.rows = np.concatenate([source.batches(512, seed=seed).encoded_values for seed in range(6)])
+        cls.predicate_config = dict(config["predicate_generation"])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.directory.cleanup()
+
+    def _generate(self, probability: float):
+        config = {**self.predicate_config, "log_width_gate": {**GATE, "probability": probability}}
+        return PredicateTrainingContextGenerator(config).generate_batch(
+            encoded_rows=self.rows, metadata=self.metadata, rng=np.random.default_rng(2)
+        )
+
+    def _value(self, row, name: str) -> float:
+        index = [column.name for column in self.metadata.columns].index(name)
+        return _seconds(self.metadata.columns[index].domain[int(row[index])])
+
+    def test_no_inverted_intervals_and_narrow_ones_inside_rows(self) -> None:
+        for probability in (0.5, 1.0):
+            with self.subTest(probability=probability):
+                self._check_no_inverted_intervals(probability)
+
+    def _check_no_inverted_intervals(self, probability: float) -> None:
+        contexts, rows, stats = self._generate(probability)
+        self.assertEqual(stats.rejected_unsatisfied_contexts, 0)
+        segment_intervals = inside_segment = trip_pairs = inside_trip = 0
+        for context, row in zip(contexts, rows):
+            query = context.trajectory_query
+            for temporal in getattr(query, "temporal_predicates", ()) if query is not None else ():
+                lower, upper = _seconds(temporal.lower), _seconds(temporal.upper)
+                self.assertLessEqual(lower, upper)
+                segment_intervals += 1
+                inside_segment += lower > self._value(row, "segments:t_s") and upper < self._value(row, "segments:t_e")
+            for start_name, end_name in (("trips:start_time", "trips:end_time"), ("segments:t_s", "segments:t_e")):
+                start = context.ordinary_predicates.get(start_name)
+                end = context.ordinary_predicates.get(end_name)
+                if (start is not None and end is not None and start.op == PredicateOp.LESS_EQUAL
+                        and end.op == PredicateOp.GREATER_EQUAL):
+                    self.assertLessEqual(_seconds(end.value), _seconds(start.value), (start_name, end_name))
+                    if start_name == "trips:start_time":
+                        trip_pairs += 1
+                        inside_trip += (_seconds(end.value) > self._value(row, start_name)
+                                        and _seconds(start.value) < self._value(row, end_name))
+        self.assertGreater(segment_intervals, 100)
+        self.assertGreater(trip_pairs, 20)
+        # narrow intervals inside the row's own span exist (the case that was inverted)
+        self.assertGreater(inside_segment, 0.03 * segment_intervals)
+        self.assertGreater(inside_trip, 0)
+
+    def test_uniform_generator_unchanged_on_dense_domains(self) -> None:
+        absent = PredicateTrainingContextGenerator(self.predicate_config).generate_batch(
+            encoded_rows=self.rows, metadata=self.metadata, rng=np.random.default_rng(2)
+        )
+        zero = self._generate(0.0)
+        self.assertEqual([c.tokens for c in absent[0]], [c.tokens for c in zero[0]])
+
+
 class NumericRankValuesTest(unittest.TestCase):
     def test_timestamps_sentinels_and_order(self) -> None:
         values = ("2020-01-01T00:00:00.000", "2020-01-01 00:01:00", "2020-01-02T00:00:00.000", "__SQL_NULL__")
