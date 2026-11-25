@@ -249,6 +249,7 @@ def inference_artifact_metadata(source: Path, overlay: Path, base_cardinalities:
     import torch
     from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import (
         distjoin_checkpoints, distjoin_cardinality_files, files_size, schema_payload,
+        benchmark_predicate_columns, query_domain_payload,
     )
     import types
     # GPU monitoring is not part of schema loading or inference-size accounting.
@@ -312,10 +313,16 @@ def inference_artifact_metadata(source: Path, overlay: Path, base_cardinalities:
     finally:
         torch.storage._load_from_bytes = original
     cardinalities = distjoin_cardinality_files(source, base_cardinalities, config.get("tag", ""))
+    benchmarks = [source / "queries/job-light.csv", source / "queries/job-light-ranges.csv"]
+    predicate_columns = benchmark_predicate_columns(benchmarks)
+    payload, excluded = query_domain_payload(payload, join_keys, predicate_columns)
     report = files_size([*paths, config_path, *cardinalities], payload)
+    report["excluded_key_domains"] = excluded
+    report["query_predicate_columns"] = sorted("%s.%s" % item for item in predicate_columns)
+    report["key_domain_rule"] = "count ID/key domains only when used for query-literal encoding; retain join alignment masks and sizes"
     report["inference_metadata_sources"] = [
         {"path": str(p.resolve()), "bytes": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns}
-        for p in sources]
+        for p in [*sources, *benchmarks]]
     report["parameter_count"] = sum(_parameter_count_from_state_dict(
         torch.load(path, map_location="cpu", weights_only=True)) for path in paths)
     return report

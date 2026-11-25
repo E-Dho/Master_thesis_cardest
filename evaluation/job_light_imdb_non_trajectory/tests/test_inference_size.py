@@ -18,6 +18,10 @@ from evaluation.job_light_imdb_non_trajectory.joblight_eval import inference_siz
 from evaluation.job_light_imdb_non_trajectory.scripts import deepdb_bridge, deepdb_ranges_adapted_bridge, mscn_bridge, neurocard_bridge, distjoin_bridge
 
 
+class CachedColumn:
+    pass
+
+
 class InferenceSizeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -158,6 +162,68 @@ class InferenceSizeTests(unittest.TestCase):
                 completed = subprocess.run([sys.executable, "-I", "-B", "-c", code], cwd=self.root,
                                            capture_output=True, text=True)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_schema_copy_prunes_base_rows_held_by_column_dictionary_keys(self):
+        column = CachedColumn()
+        column.name = "id"
+        column.data = np.arange(10000)
+        column.all_distinct_values = np.arange(10)
+        payload = {"columns": [column], "factor_mapping": {column: ["id_fact_0"]}}
+        copied = size.schema_payload(payload)
+        key = next(iter(copied["factor_mapping"]))
+        self.assertIs(key, copied["columns"][0])
+        self.assertIsNot(key, column)
+        self.assertIsNone(key.data)
+        self.assertIsNotNone(column.data)
+        self.assertLess(len(pickle.dumps(copied, protocol=4)), 2000)
+
+    def test_key_rule_keeps_predicate_ids_and_join_alignment_but_not_unused_key_values(self):
+        key = CachedColumn()
+        key.name = key.raw_col_name = "movie_id"
+        key.all_distinct_values = np.arange(1000)
+        key.all_distinct_values_gpu = np.arange(1000)
+        key.distribution_size = 1000
+        key.global_discretize_distinct_values_mask = np.ones(1000, dtype=bool)
+        predicate = CachedColumn()
+        predicate.name = predicate.raw_col_name = "company_id"
+        predicate.all_distinct_values = np.arange(100)
+        table = types.SimpleNamespace(columns=[key, predicate], factor_mapping={key: []})
+        payload = {"tables": {"movie_companies": table}, "global_distinct_values": np.arange(1000)}
+        result, removed = size.query_domain_payload(payload, {"movie_companies": "movie_id"},
+                                                    {("movie_companies", "company_id")})
+        columns = result["tables"]["movie_companies"].columns
+        self.assertIsNone(columns[0].all_distinct_values)
+        self.assertEqual(columns[0].distribution_size, 1000)
+        np.testing.assert_array_equal(columns[0].global_discretize_distinct_values_mask, key.global_discretize_distinct_values_mask)
+        np.testing.assert_array_equal(columns[1].all_distinct_values, predicate.all_distinct_values)
+        self.assertEqual(result["global_domain_size"], 1000)
+        self.assertNotIn("global_distinct_values", result)
+        self.assertEqual(len(removed), 1)
+        self.assertIsNotNone(key.all_distinct_values)
+        result, removed = size.query_domain_payload(payload, {"movie_companies": "movie_id"},
+                                                    {("movie_companies", "movie_id")})
+        self.assertFalse(removed)
+        self.assertIsNotNone(result["tables"]["movie_companies"].columns[0].all_distinct_values)
+
+    def test_literal_column_rule_distinguishes_id_predicates_from_joins(self):
+        path = self.file("queries.csv", b"title t,movie_companies mc#t.id=mc.movie_id#mc.company_id,=,7,t.kind_id,=,1#4\n")
+        self.assertEqual(size.benchmark_predicate_columns([path]),
+                         {("movie_companies", "company_id"), ("title", "kind_id")})
+
+    def test_mscn_excludes_only_id_bounds_not_used_to_encode_benchmark_literals(self):
+        ckpt = self.file("model.pt")
+        bitmap = self.file("source/workloads/job-light.bitmaps")
+        queries = self.file("queries.csv", b"title t,movie_companies mc#t.id=mc.movie_id#mc.company_id,=,7#4\n")
+        document = {"table_keys": ["title t", "movie_companies mc"],
+                    "column_min_max": {"t.id": [1, 100], "mc.movie_id": [1, 100], "mc.company_id": [1, 10]}}
+        metadata = self.file("metadata.json", (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+        before = metadata.read_bytes()
+        result = mscn_bridge.inference_artifact_metadata(ckpt, metadata, self.root / "source", benchmark_paths=[queries])
+        projected = dict(document, column_min_max={"mc.company_id": [1, 10]})
+        expected = len((json.dumps(projected, indent=2, sort_keys=True) + "\n").encode())
+        self.assertEqual(result["excluded_id_bounds"], ["mc.movie_id", "t.id"])
+        self.assertEqual(result["inference_artifact_mb"], (ckpt.stat().st_size + bitmap.stat().st_size + expected) / 1_000_000)
+        self.assertEqual(metadata.read_bytes(), before)
 
     def test_files_are_not_modified_and_missing_inputs_are_rejected(self):
         p = self.file("artifact", b"unchanged")

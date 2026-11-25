@@ -133,9 +133,39 @@ def _prepare(args: argparse.Namespace) -> None:
 
 
 def inference_artifact_metadata(checkpoint: Path, metadata: Path, source: Path,
-                                runtime: Path | None = None) -> dict[str, Any]:
-    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import files_size, mscn_files
-    return files_size(mscn_files(checkpoint, metadata, source, runtime))
+                                runtime: Path | None = None,
+                                benchmark_paths: list[Path] | None = None) -> dict[str, Any]:
+    from evaluation.job_light_imdb_non_trajectory.joblight_eval.inference_size import (
+        files_size, mscn_files, benchmark_predicate_columns,
+    )
+    report = files_size(mscn_files(checkpoint, metadata, source, runtime))
+    document = json.loads(metadata.read_text(encoding="utf-8"))
+    bounds = document.get("column_min_max", {})
+    if not bounds:
+        return report
+    benchmarks = benchmark_paths or ([source / "workloads/job-light.csv"] if runtime is None else
+                                     [source.parent / "distjoin/queries/job-light-ranges.csv"])
+    predicates = benchmark_predicate_columns(benchmarks)
+    aliases = {item.split()[-1]: item.split()[0] for item in document["table_keys"]}
+    excluded = []
+    filtered = {}
+    for name, domain in bounds.items():
+        alias, column = name.split(".", 1)
+        if (column == "id" or column.endswith("_id")) and (aliases.get(alias, alias), column) not in predicates:
+            excluded.append(name)
+        else:
+            filtered[name] = domain
+    if excluded:
+        projected = dict(document, column_min_max=filtered)
+        counted_bytes = len((json.dumps(projected, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+        entry = next(item for item in report["inference_files"] if item["path"] == str(metadata.resolve()))
+        entry["counted_bytes"] = counted_bytes
+        report["inference_artifact_mb"] += (counted_bytes - entry["bytes"]) / 1_000_000
+    report["excluded_id_bounds"] = sorted(excluded)
+    report["inference_metadata_sources"] = [
+        {"path": str(p.resolve()), "bytes": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns}
+        for p in benchmarks]
+    return report
 
 
 def _train(args: argparse.Namespace) -> None:

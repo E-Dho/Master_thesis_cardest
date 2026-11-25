@@ -57,7 +57,8 @@ def measure_request(request: dict[str, Any]) -> dict[str, Any]:
         from evaluation.job_light_imdb_non_trajectory.scripts.mscn_bridge import inference_artifact_metadata
         runtime = BASE / "joblight_evaluation/mscn_job_light_ranges_adapted" if "adapted" in variant else None
         return inference_artifact_metadata(Path(artifact["checkpoint"]), Path(artifact["metadata"]),
-                                           BASE / "external/mscn", runtime)
+                                           BASE / "external/mscn", runtime,
+                                           [BASE / "external/distjoin/queries" / ("job-light-ranges.csv" if runtime else "job-light.csv")])
     if method == "deepdb":
         from evaluation.job_light_imdb_non_trajectory.scripts.deepdb_bridge import inference_artifact_metadata
         rank_domains = BASE / "joblight_evaluation/deepdb_ranges_adapted_shared/rank_domains.json" if "adapted" in variant else None

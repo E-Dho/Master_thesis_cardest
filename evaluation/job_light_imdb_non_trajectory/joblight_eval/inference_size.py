@@ -11,9 +11,8 @@ POSTGRES_STATISTICS_SOURCE = "SELECT pg_total_relation_size('pg_catalog.pg_stati
 
 
 def measurement_version(method: str) -> int:
-    # DistJoin v3 / NeuroCard v2 retain mapping subclasses as loaded;
-    # DistJoin also excludes cached per-base-row null masks.
-    return {"distjoin": 3, "neurocard": 2}.get(method, 1)
+    # Prune dictionary keys too; DistJoin counts key values only for literal encoding.
+    return {"distjoin": 4, "neurocard": 3, "mscn": 2}.get(method, 1)
 
 
 def files_size(paths: Iterable[Path], metadata: Any = None) -> dict[str, Any]:
@@ -74,7 +73,7 @@ def schema_payload(value: Any, memo: dict[int, Any] | None = None) -> Any:
         result = value.copy()
         result.clear()
         memo[id(value)] = result
-        result.update((k, schema_payload(v, memo)) for k, v in value.items())
+        result.update((schema_payload(k, memo), schema_payload(v, memo)) for k, v in value.items())
         return result
     if isinstance(value, list):
         result = []; memo[id(value)] = result
@@ -98,6 +97,77 @@ def schema_payload(value: Any, memo: dict[int, Any] | None = None) -> Any:
                                for k, v in vars(value).items())
         return result
     return value
+
+
+
+def benchmark_predicate_columns(paths: Iterable[Path]) -> set[tuple[str, str]]:
+    """Literal columns only: equality join expressions do not encode literals."""
+    columns = set()
+    for path in paths:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            tables, _joins, predicates, _truth = line.split("#")
+            aliases = {}
+            for item in tables.split(","):
+                parts = item.split()
+                aliases[parts[-1]] = parts[0]
+            fields = predicates.split(",")
+            for index in range(0, len(fields) - 2, 3):
+                alias, column = fields[index].split(".", 1)
+                columns.add((aliases[alias], column))
+    return columns
+
+
+def query_domain_payload(payload: dict[str, Any], join_keys: dict[str, str],
+                         predicate_columns: set[tuple[str, str]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Keep predicate ID domains, and only shape/alignment metadata for unfiltered keys.
+
+    Operates on a detached schema copy. Raw join-key values used during setup to
+    construct alignment masks are not query-literal encoders. Those masks and
+    distribution sizes remain; base rows are excluded even through mapping keys.
+    """
+    result = schema_payload(payload)
+    fields = ("all_distinct_values", "all_distinct_values_gpu",
+              "all_discretize_distinct_values", "all_discretize_distinct_values_gpu")
+    seen = set()
+    excluded = []
+
+    def visit(value: Any, table: str) -> None:
+        if id(value) in seen or value is None or isinstance(value, (str, bytes, int, float, bool, type)):
+            return
+        seen.add(id(value))
+        if isinstance(value, dict):
+            for key, item in value.items():
+                visit(key, table)
+                visit(item, table)
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item, table)
+        elif hasattr(value, "__dict__") and not callable(value):
+            attributes = vars(value)
+            name = attributes.get("name")
+            raw_name = attributes.get("raw_col_name", name)
+            if raw_name == join_keys.get(table) and (table, raw_name) not in predicate_columns:
+                removed = []
+                for field in fields:
+                    domain = attributes.get(field)
+                    if domain is not None:
+                        removed.append({"field": field, "domain_size": len(domain)})
+                        attributes[field] = None
+                if removed:
+                    excluded.append({"table": table, "column": name, "raw_column": raw_name,
+                                     "fields": removed})
+            for item in attributes.values():
+                visit(item, table)
+
+    for origin in ("tables", "factorized_schemas"):
+        for table, value in result.get(origin, {}).items():
+            visit(value, table)
+    # Query-time join alignment reads only this array's length; keep that scalar.
+    if "global_distinct_values" in result:
+        result["global_domain_size"] = len(result.pop("global_distinct_values"))
+    return result, excluded
 
 
 def foj_size(reservoir: Path, metadata: Path, sample_size: int) -> dict[str, Any]:
