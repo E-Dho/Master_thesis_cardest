@@ -58,6 +58,29 @@ def main_predicate_rng_seed(generator_seed: int, global_step: int) -> int:
     return int(generator_seed) + int(global_step)
 
 
+def interval_report_key(kind: str, source: str) -> str:
+    """Map extractor labels onto the stable JSON report keys."""
+    try:
+        return {
+            ("segment_time", "trajectory_temporal"): "segment_trajectory_temporal",
+            ("segment_time", "ordinary"): "segment_ordinary",
+            ("trip_time", "ordinary"): "trip_ordinary",
+        }[(kind, source)]
+    except KeyError as error:
+        raise ValueError(f"unexpected interval source: {kind}/{source}") from error
+
+
+def one_sided_report_key(key: str) -> str:
+    """Map a serialized one-sided extractor key onto its report key."""
+    try:
+        return {
+            "segment_time_ordinary": "segment_ordinary",
+            "trip_time_ordinary": "trip_ordinary",
+        }[key]
+    except KeyError as error:
+        raise ValueError(f"unexpected one-sided interval source: {key}") from error
+
+
 @dataclass(frozen=True)
 class IntervalObservation:
     """One paired lower/upper temporal interval found in a context."""
@@ -296,13 +319,10 @@ def analyze_training_contexts(
             observations, one_sided, equalities = extract_context_intervals(context)
             equality_counts.update(equalities)
             for key, count in one_sided.items():
-                report_key = {
-                    "segment_time_ordinary": "segment_ordinary",
-                    "trip_time_ordinary": "trip_ordinary",
-                }.get(key, key)
+                report_key = one_sided_report_key(key)
                 interval_stats[report_key]["one_sided_context_count"] += count
             for observation in observations:
-                key = f"{observation.kind}_{observation.source}"
+                key = interval_report_key(observation.kind, observation.source)
                 interval_stats[key]["widths_seconds"].append(observation.width_seconds)
     if satisfaction_failures:
         raise AssertionError(f"{satisfaction_failures} sampled contexts did not satisfy their row")

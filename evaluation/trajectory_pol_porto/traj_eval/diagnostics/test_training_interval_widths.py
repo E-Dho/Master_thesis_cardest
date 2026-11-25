@@ -8,11 +8,26 @@ from model.src.predicates.operators import PredicateOp, PredicateToken
 
 from evaluation.trajectory_pol_porto.traj_eval.diagnostics.training_interval_widths import (
     extract_context_intervals,
+    interval_report_key,
+    one_sided_report_key,
     width_bin,
 )
 
 
 class TrainingIntervalWidthsTest(unittest.TestCase):
+    def test_maps_extractor_labels_to_report_groups(self) -> None:
+        self.assertEqual(
+            interval_report_key("segment_time", "trajectory_temporal"),
+            "segment_trajectory_temporal",
+        )
+        self.assertEqual(
+            interval_report_key("segment_time", "ordinary"),
+            "segment_ordinary",
+        )
+        self.assertEqual(interval_report_key("trip_time", "ordinary"), "trip_ordinary")
+        self.assertEqual(one_sided_report_key("segment_time_ordinary"), "segment_ordinary")
+        self.assertEqual(one_sided_report_key("trip_time_ordinary"), "trip_ordinary")
+
     def test_extracts_temporal_and_ordinary_pairs_with_ranges_and_inside(self) -> None:
         temporal = SegmentTemporalPredicate(
             "segments:t_s", "segments:t_e", lower=20.0, upper=10.0,
