@@ -465,8 +465,9 @@ def fixture_config(root: Path, name: str, prepared: Path, extra: str = "") -> Pa
                            (r"(?m)^  checkpoint_interval_steps: 500", "  checkpoint_interval_steps: 2"),
                            (r"(?m)^  validation_interval_steps: 250", "  validation_interval_steps: 2"),
                            (r"(?m)^  device: auto", "  device: cpu"),
-                           (r"(?m)^rare_support:\n  enabled: true", "rare_support:\n  enabled: false"),
-                           (r"(?m)^rare_auxiliary:\n  enabled: true", "rare_auxiliary:\n  enabled: false"),
+                           # (the template has rare support off since 2026-11-25; the fixture needs it off)
+                           (r"(?m)^rare_support:\n  enabled: (true|false)", "rare_support:\n  enabled: false"),
+                           (r"(?m)^rare_auxiliary:\n  enabled: (true|false)", "rare_auxiliary:\n  enabled: false"),
                            (r"(?m)^  output_directory: .*", f"  output_directory: {root / 'runs' / name}")):
         text, n = re.subn(pattern, value, text)
         assert n >= 1, pattern
