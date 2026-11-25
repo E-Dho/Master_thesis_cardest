@@ -1823,6 +1823,16 @@ def _numeric_rank_values(values: tuple[Any, ...]) -> tuple[np.ndarray, int, int]
             return float("nan")
 
     numbers = None
+    if values and not isinstance(values[0], (str, bool)) and not isinstance(values[-1], (str, bool)):
+        try:
+            # all numeric (e.g. epoch seconds, coordinates): one C-level conversion
+            numbers = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError):
+            numbers = None
+    if numbers is not None:
+        if np.all(np.diff(numbers) >= 0) and not np.isnan(numbers).any():
+            return numbers, 0, len(numbers)
+        numbers = None
     real = [index for index, value in enumerate(values)
             if not (isinstance(value, str) and value.startswith("__"))]
     if real and all(isinstance(values[index], str) for index in real):
