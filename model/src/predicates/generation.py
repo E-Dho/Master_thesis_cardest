@@ -99,6 +99,11 @@ class _CompiledGenerationMetadata:
 
 
 _WILDCARD_TOKEN = PredicateToken.wildcard()
+# start/end columns of one table that together describe an interval (gate only)
+_INTERVAL_COLUMN_PAIRS = (
+    ("trips:start_time", "trips:end_time"),
+    ("segments:t_s", "segments:t_e"),
+)
 _INDICATOR_INCLUDED_TOKEN = PredicateToken.equal(1)
 _INV_FANOUT_TOKEN = PredicateToken.inv_fanout()
 
@@ -282,6 +287,85 @@ class PredicateTrainingContextGenerator:
             result = (block, first, float(np.log(span)) if span > 0 else float("-inf"))
         self._log_width_numeric[key] = result
         return result
+
+    def _uninverted_interval_ranks(
+        self,
+        compiled: "_CompiledGenerationMetadata",
+        start_index: int,
+        end_index: int,
+        *,
+        upper_rank: int,
+        lower_rank: int,
+    ) -> tuple[int, int] | None:
+        """(upper rank on the start column, lower rank on the end column), no longer inverted.
+
+        For ``start < U`` (or <=) and ``end >= L`` drawn from a row, L > U means both
+        lie inside the row's [start, end]. The interval [U, L] then lies inside the row
+        too, so the new bounds are U' = first start value >= L and L' = last end value
+        <= U: the row still satisfies both (start < U < L <= U', end >= L > U >= L'),
+        and L' <= U'. Returns None if such values do not exist, or the ranks unchanged
+        if the interval is not inverted or the columns are not numeric.
+        """
+
+        start_view = self._log_width_values(compiled, start_index)
+        end_view = self._log_width_values(compiled, end_index)
+        if start_view is None or end_view is None:
+            return upper_rank, lower_rank
+        start_block, start_first, _ = start_view
+        end_block, end_first, _ = end_view
+        if not (0 <= upper_rank - start_first < len(start_block) and 0 <= lower_rank - end_first < len(end_block)):
+            return upper_rank, lower_rank
+        upper_value = float(start_block[upper_rank - start_first])
+        lower_value = float(end_block[lower_rank - end_first])
+        if lower_value <= upper_value:
+            return upper_rank, lower_rank
+        new_upper = int(start_block.searchsorted(lower_value, side="left"))
+        new_lower = int(end_block.searchsorted(upper_value, side="right")) - 1
+        if new_upper >= len(start_block) or new_lower < 0:
+            return None
+        return start_first + new_upper, end_first + new_lower
+
+    def _uninvert_ordinary_pairs(
+        self,
+        compiled: "_CompiledGenerationMetadata",
+        ordinary: dict[str, PredicateToken],
+        log_dimensions: frozenset[str],
+    ) -> None:
+        """The same as _uninverted_interval_ranks for an ordinary ``start <= U`` and
+        ``end >= L`` pair on the same table (trip times, segment times) drawn with the
+        gate; if no valid values exist, the end bound is dropped."""
+
+        for start_name, end_name in _INTERVAL_COLUMN_PAIRS:
+            start_token = ordinary.get(start_name)
+            end_token = ordinary.get(end_name)
+            if start_token is None or end_token is None:
+                continue
+            if start_token.op != PredicateOp.LESS_EQUAL or end_token.op != PredicateOp.GREATER_EQUAL:
+                continue
+            if start_name not in self.log_width_column_dimension or \
+                    end_name not in self.log_width_column_dimension:
+                continue
+            start_index = compiled.column_name_to_index[start_name]
+            end_index = compiled.column_name_to_index[end_name]
+            start_cache = compiled.column_caches[start_index]
+            end_cache = compiled.column_caches[end_index]
+            if start_cache is None or end_cache is None:
+                continue
+            upper_rank = bisect_left(start_cache.comparable_values, start_token.value)
+            lower_rank = bisect_left(end_cache.comparable_values, end_token.value)
+            ranks = self._uninverted_interval_ranks(
+                compiled, start_index, end_index, upper_rank=upper_rank, lower_rank=lower_rank
+            )
+            if ranks is None:
+                del ordinary[end_name]
+                continue
+            if ranks != (upper_rank, lower_rank):
+                ordinary[start_name] = PredicateToken(
+                    PredicateOp.LESS_EQUAL, value=start_cache.comparable_values[ranks[0]]
+                )
+                ordinary[end_name] = PredicateToken(
+                    PredicateOp.GREATER_EQUAL, value=end_cache.comparable_values[ranks[1]]
+                )
 
     def _log_distance(self, dimension: str, log_span: float, rng: np.random.Generator) -> float:
         """exp(U(log min_width, log span)); min_width if the span is not larger."""
@@ -827,6 +911,8 @@ class PredicateTrainingContextGenerator:
             )
             if token.op != PredicateOp.WILDCARD:
                 ordinary[column.name] = token
+        if self.log_width_probability > 0.0:
+            self._uninvert_ordinary_pairs(compiled, ordinary, log_dimensions)
         return ordinary
 
     def _pol_trajectory_query_for_row(
@@ -925,6 +1011,18 @@ class PredicateTrainingContextGenerator:
             )
         if upper_rank is None:
             upper_rank = int(rng.integers(upper_start, len(start_cache.comparable_values)))
+        if self.log_width_probability > 0.0:
+            # Log distances from the row's start and end can cross (L > U) when they
+            # are shorter than the segment: turn that into the interval between them,
+            # which lies inside the segment (see _uninverted_interval_ranks). With the
+            # gate configured this also covers the (rare) inversions of the uniform
+            # draws; without it the generator stays exactly as before.
+            ranks = self._uninverted_interval_ranks(
+                compiled, start_index, end_index, upper_rank=upper_rank, lower_rank=lower_rank
+            )
+            if ranks is None:
+                return None
+            upper_rank, lower_rank = ranks
         lower = end_cache.comparable_values[lower_rank]
         upper = start_cache.comparable_values[upper_rank]
         scalar = [
