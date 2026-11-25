@@ -12,6 +12,8 @@
 # trip-level static columns, and the output directory. Trip columns: call_type,
 # origin_stand (SQL NULL kept as the model's __SQL_NULL__ value), start_time,
 # end_time, num_of_segments, and POL's constant trip_geom placeholder.
+# Rare support off (decided 2026-11-25): rare_support.enabled and rare_auxiliary.enabled are
+# false for all own-model trainings; the earlier models trained with them on.
 dataset:
   type: pol_trajectory_full_join
   name: porto_traj_dedup_single_anchor_mbr_segments_first_20k
@@ -129,7 +131,7 @@ importance_sampling:
   enabled: false
 
 rare_support:
-  enabled: true
+  enabled: false
   discovery:
     enabled: true
     root_data_only: true
@@ -144,7 +146,7 @@ rare_support:
     enabled: true
 
 rare_auxiliary:
-  enabled: true
+  enabled: false
   batch_size: 512
   beta: 0.25
 
