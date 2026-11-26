@@ -739,6 +739,67 @@ def seeds_note(rows: list[dict]) -> str:
     return "Mean\\,$\\pm$\\,std over three seeds (PostgreSQL: one run); no $\\pm$ where the std rounds to zero."
 
 
+# GPU per own-model training run (run directory -> {"gpu": name}), written by
+# scripts/own_model_training_hardware.py; set by main() from --training-hardware.
+OWN_TRAINING_HARDWARE: dict[str, dict[str, Any]] = {}
+
+
+TRAINING_LOGS = "/work_beegfs/sunip956/master_thesis_trajectories/slurm_logs/own_main_rare_off_*.out"
+
+
+def _record_training_hardware(path: Path) -> None:
+    """Write the GPU of each rule-row training run from its Slurm log (warn if not possible)."""
+    import glob
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "own_model_training_hardware", Path(__file__).resolve().parent / "own_model_training_hardware.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    runs = [str(Path(summary).parent) for variant in _OWN_MODEL_RULE_VARIANT.values()
+            for summary in OWN_MODEL_VARIANTS[variant]["training_summaries"]]
+    try:
+        records = module.hardware(runs, [Path(log) for log in sorted(glob.glob(TRAINING_LOGS))])
+    except SystemExit as error:
+        print(f"WARNING: training GPUs not recorded ({error}); the training tables say so")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _short_gpu(name: str) -> str:
+    return name.replace("NVIDIA ", "").strip()
+
+
+def own_model_training_hardware_note(rows: list[dict]) -> str:
+    """Name the GPU of each training seed (the runs are not bound to one GPU type)."""
+    notes = []
+    for row in rows:
+        variant = OWN_MODEL_VARIANTS.get(row.get("variant_id"), {})
+        if row.get("method_id") != "own_model" or not variant.get("training_summaries"):
+            continue
+        by_gpu: dict[str, list[int]] = {}
+        for seed, summary in enumerate(variant["training_summaries"]):
+            record = OWN_TRAINING_HARDWARE.get(str(Path(summary).parent))
+            gpu = _short_gpu(record["gpu"]) if record else "not recorded"
+            by_gpu.setdefault(gpu, []).append(seed)
+        if not OWN_TRAINING_HARDWARE:
+            notes.append(r"\OwnModelName{}: trained on one GPU per seed (type not recorded).")
+            continue
+        parts = [f"{gpu} (seed{'s' if len(seeds) > 1 else ''} {', '.join(map(str, seeds))})"
+                 for gpu, seeds in sorted(by_gpu.items())]
+        if len(parts) == 1:
+            notes.append(rf"\OwnModelName{{}}: trained on one {_latex_escape_plain(next(iter(by_gpu)))} GPU per seed.")
+        else:
+            notes.append(r"\OwnModelName{}: trained on one GPU per seed, "
+                         + _latex_escape_plain("; ".join(parts)) + ".")
+    return " ".join(notes)
+
+
+def _latex_escape_plain(text: str) -> str:
+    return "".join("\\" + c if c in "&%$#_{}" else c for c in text)
+
+
 def own_model_single_run_note(rows: list[dict]) -> str:
     if any(r.get("method_id") == "own_model" and int(r.get("seed_count", 1)) == 1
            for r in rows):
@@ -1538,6 +1599,7 @@ def training_table(rows: list[dict], workload: str, show_std: bool, data: DataSt
         own_model_single_run_note(rows),
         (r"\OwnModelName{}: training up to step 11,000."
          if any(r.get("_build.training_record_is_selected_checkpoint") for r in rows) else ""),
+        own_model_training_hardware_note(rows),
         ("FOJ sampling: cumulative reservoir draw time."
          if any(r.get("_build.foj_cumulative_sampling") for r in rows) else ""),
         coverage_note(rows, data),
@@ -1756,7 +1818,16 @@ def main() -> None:
     )
     parser.add_argument("--inference-size-metadata", type=Path,
                         help="read-only measurements of the actual inference artifacts")
+    parser.add_argument("--training-hardware", type=Path,
+                        help="GPU per own-model training run (scripts/own_model_training_hardware.py); "
+                             "default: final_comparison/own_model_training_hardware.json, written from "
+                             "the training logs if absent")
     args = parser.parse_args()
+    hardware_path = args.training_hardware or args.results_root / "final_comparison/own_model_training_hardware.json"
+    if not hardware_path.is_file() and args.training_hardware is None:
+        _record_training_hardware(hardware_path)
+    if hardware_path.is_file():
+        OWN_TRAINING_HARDWARE.update(json.loads(hardware_path.read_text(encoding="utf-8")))
 
     data = json.loads(args.comparison.read_text(encoding="utf-8"))
     results = data["results"]

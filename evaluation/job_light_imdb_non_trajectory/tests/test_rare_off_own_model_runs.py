@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import runpy
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +129,50 @@ class RunLookupTest(unittest.TestCase):
             self._run(results, "rare_off_content_final_seed0", 0, "other-1", complete=False)
             with self.assertRaises(SystemExit):
                 RUNS.completed_run("rare_off_content_final_seed0", 0, "other", results)
+
+
+class TrainingHardwareTest(unittest.TestCase):
+    def test_gpu_per_run_from_the_finished_logs_and_the_table_note(self) -> None:
+        spec = importlib.util.spec_from_file_location("hardware", HERE / "scripts" / "own_model_training_hardware.py")
+        hardware = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hardware)
+        runs = [f"/x/own_model_rare_off_40k/seed_{seed}" for seed in RUNS.SEEDS]
+        with tempfile.TemporaryDirectory() as directory:
+            logs = []
+            for index, (run, gpu, finished) in enumerate([
+                    (runs[0], "NVIDIA L40S", True), (runs[1], "NVIDIA H100 80GB HBM3", True),
+                    (runs[2], "NVIDIA L40S", True), (runs[1], "NVIDIA L40S", False)]):
+                log = Path(directory) / f"own_main_rare_off_{index}.out"
+                log.write_text(f"job_id={index}\noutput_directory={run}\nruntime_python=x cuda_device={gpu}\n"
+                               + ("end_utc=2026-11-30T00:00:00Z\n" if finished else ""))
+                logs.append(log)
+            result = hardware.hardware(runs, logs)
+            self.assertEqual([result[run]["gpu"] for run in runs],
+                             ["NVIDIA L40S", "NVIDIA H100 80GB HBM3", "NVIDIA L40S"])
+            with self.assertRaises(SystemExit):  # a run without a finished log
+                hardware.hardware(runs + ["/x/other"], logs)
+
+        MODULE = runpy.run_path(str(HERE / "scripts" / "make_latex_tables.py"))
+
+        variant = MODULE["OWN_MODEL_VARIANTS"]["rare_off_rule_step_11000"]
+        directories = [str(Path(path).parent) for path in variant["training_summaries"]]
+        row = {"method_id": "own_model", "variant_id": "rare_off_rule_step_11000"}
+        table_hardware = MODULE["OWN_TRAINING_HARDWARE"]
+        try:
+            table_hardware.update({directories[0]: {"gpu": "NVIDIA L40S"},
+                                   directories[1]: {"gpu": "NVIDIA H100 80GB HBM3"},
+                                   directories[2]: {"gpu": "NVIDIA L40S"}})
+            self.assertEqual(MODULE["own_model_training_hardware_note"]([row]),
+                             r"\OwnModelName{}: trained on one GPU per seed, "
+                             "H100 80GB HBM3 (seed 1); L40S (seeds 0, 2).")
+            for directory in directories:
+                table_hardware[directory] = {"gpu": "NVIDIA L40S"}
+            self.assertEqual(MODULE["own_model_training_hardware_note"]([row]),
+                             r"\OwnModelName{}: trained on one L40S GPU per seed.")
+            table_hardware.clear()
+            self.assertIn("not recorded", MODULE["own_model_training_hardware_note"]([row]))
+        finally:
+            table_hardware.clear()
 
 
 if __name__ == "__main__":
