@@ -75,16 +75,48 @@ GROUP_OF_METHOD = {
 
 DASH = "--"
 
-# Placeholder for the sped-up training (estimate of 2026-11-24: 0.33-0.37 s per step, midpoint 0.35 s,
-# x 11,000 steps = 3,850 s). Replaces the measured training time of the old runs on both benchmarks.
-# Set to None once the sped-up runs are measured (todo t46 in the tracker).
-OWN_TRAINING_ESTIMATE_SECONDS: float | None = 0.35 * 11_000
+# Placeholder for the sped-up training (an estimate, used while no sped-up run was measured).
+# None since the rare-support-off main runs (decided 2026-11-25), which use the sped-up training:
+# their time to the step-11,000 checkpoint is measured (training_time_mode "checkpoint").
+OWN_TRAINING_ESTIMATE_SECONDS: float | None = None
 
-# Final own-model rows follow one preregistered rule on each workload: use the
-# rare-auxiliary configuration's step-11,000 checkpoint across training seeds
-# 0--2.  The mapping also supplies the immutable training artifacts required to
-# refresh deployable-size and time-to-checkpoint records.
+# Final own-model rows follow one preregistered rule on each workload: the
+# step-11,000 checkpoint across training seeds 0--2.  Since 2026-11-25 the rule rows
+# are the rare-support-off main runs (model/slurm/job_light_main_rare_off.sbatch);
+# the earlier rare-auxiliary rule rows below are kept only so that their records stay
+# readable and are listed as superseded.  The mapping also supplies the immutable
+# training artifacts required to refresh deployable-size and time-to-checkpoint records.
 OWN_MODEL_VARIANTS = {
+    "rare_off_rule_step_11000": {
+        "label": r"\OwnModelName{}",
+        "selection_order": 0,
+        "checkpoint_paths": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_0/checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_1/checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_2/checkpoint_step_11000.pt",
+        ),
+        "training_summaries": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_0/training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_1/training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_2/training_summary.json",
+        ),
+        "training_time_mode": "checkpoint",
+    },
+    "rare_off_content_rule_step_11000": {
+        "label": r"\OwnModelName{}",
+        "selection_order": 0,
+        "checkpoint_paths": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_0/checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_1/checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_2/checkpoint_step_11000.pt",
+        ),
+        "training_summaries": (
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_0/training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_1/training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_2/training_summary.json",
+        ),
+        "training_time_mode": "checkpoint",
+    },
     "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code": {
         "label": r"\OwnModelName{}",
         "selection_order": 0,
@@ -144,6 +176,11 @@ OWN_MODEL_VARIANTS = {
 }
 
 _OWN_MODEL_RULE_VARIANT = {
+    "job_light": "rare_off_rule_step_11000",
+    "job_light_ranges": "rare_off_content_rule_step_11000",
+}
+# The rare-auxiliary rule rows of 2026-11-19 (replaced by the rare-support-off rows).
+_RARE_AUX_RULE_VARIANTS = {
     "job_light": "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
     "job_light_ranges": "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
 }
@@ -157,6 +194,7 @@ _INTERIM_RANGES_TIMING_VARIANT = (
 )
 _SUPERSEDED_OWN_MODEL_VARIANTS = {
     *_INTERIM_OWN_MODEL_VARIANT.values(),
+    *_RARE_AUX_RULE_VARIANTS.values(),
     _INTERIM_RANGES_TIMING_VARIANT,
     "duet_neurocard_distjoin_rare_aux_best_median_step_18000_corrected_model_code",
     "duet_neurocard_distjoin_rare_aux_best_p99_step_19500_corrected_model_code",
@@ -630,19 +668,10 @@ def prepare_rows(results: list[dict], workload: str,
     target_own_model_variant = _OWN_MODEL_RULE_VARIANT[workload]
     own_model_rows = [row for row in results if row.get("method_id") == "own_model"]
     has_rule_row = any(row.get("variant_id") == target_own_model_variant for row in own_model_rows)
+    # No interim substitute: every earlier row (the rare-auxiliary rule rows, the interim
+    # step-11,000 rows) is another model since rare support was switched off, so without the
+    # rule row the table has no own-model row (main() refuses to write such tables).
     interim_rule = None
-    if not has_rule_row:
-        if workload == "job_light_ranges":
-            interim_rule = _interim_ranges_rule_row(results, interim_ranges_accuracy)
-        else:
-            interim_source = next(
-                (row for row in own_model_rows
-                 if row.get("variant_id") == _INTERIM_OWN_MODEL_VARIANT[workload]),
-                None,
-            )
-            if interim_source is not None:
-                interim_rule = dict(interim_source)
-                interim_rule["variant_id"] = target_own_model_variant
     rows = []
     for result in results:
         if result["workload"] != workload:
@@ -1733,6 +1762,17 @@ def main() -> None:
     results = data["results"]
     attach_configured_timing_profiles(results, args.comparison)
     interim_ranges_accuracy = _interim_ranges_accuracy(args.results_root)
+    missing_rule_rows = [
+        workload for workload, variant in _OWN_MODEL_RULE_VARIANT.items()
+        if not any(row.get("method_id") == "own_model" and row.get("variant_id") == variant
+                   and row.get("workload") == workload for row in results)
+    ]
+    if missing_rule_rows:
+        raise SystemExit(
+            "the comparison has no own-model rule row (rare support off, step 11,000) for "
+            + ", ".join(missing_rule_rows)
+            + "; refresh it with slurm/refresh_rare_off_own_model_tables.sbatch first"
+        )
     show_std = not args.no_std
     args.output.mkdir(parents=True, exist_ok=True)
     repo_root = str(Path(__file__).resolve().parents[3])

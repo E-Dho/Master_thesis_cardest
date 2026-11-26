@@ -79,7 +79,7 @@ class LatexTablesTest(unittest.TestCase):
             {
                 "workload": "job_light",
                 "method_id": "own_model",
-                "variant_id": "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
+                "variant_id": "rare_off_rule_step_11000",
                 "seed_count": 3,
                 "coverage_complete_all_seeds": True,
             },
@@ -91,7 +91,7 @@ class LatexTablesTest(unittest.TestCase):
         row = {
             "workload": "job_light",
             "method_id": "own_model",
-            "variant_id": "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code",
+            "variant_id": "rare_off_rule_step_11000",
             "seed_count": 3,
             "coverage_complete_all_seeds": True,
             "smoothed_q_error.p50.mean": 1.0,
@@ -151,15 +151,17 @@ class LatexTablesTest(unittest.TestCase):
         self.assertIn(r"Est.\,$<1$ counts them before rounding.", table)
         self.assertNotIn("Est. < 1", table)
 
-    def test_own_model_training_table_uses_the_sped_up_placeholder(self) -> None:
+    def test_own_model_training_table_uses_the_measured_time(self) -> None:
+        # The rare-support-off rule rows are sped-up runs: no placeholder estimate.
+        self.assertIsNone(MODULE["OWN_TRAINING_ESTIMATE_SECONDS"])
         row = {
             "workload": "job_light", "method_id": "own_model", "variant_id": "v",
             "seed_count": 3, "coverage_complete_all_seeds": True,
             "_build.preprocessing_s.mean": 0.27,
             "_build.preprocessing_s.std": 0.02,
-            "_build.training_s.mean": 32089.0,
+            "_build.training_s.mean": 3900.0,
             "_build.training_s.std": 20.0,
-            "_build.total_s.mean": 32089.27,
+            "_build.total_s.mean": 3900.27,
             "_build.total_s.std": 20.0,
         }
         store = MODULE["DataStore"]()
@@ -167,8 +169,10 @@ class LatexTablesTest(unittest.TestCase):
             MODULE["prepare_rows"]([row], "job_light"), "job_light", True, store,
         )
         prefix = "job_light/training/own_model/v"
-        self.assertEqual(store.values[f"{prefix}/training"], r"$1.07$\,h")
-        self.assertEqual(store.values[f"{prefix}/total"], r"$1.07$\,h")
+        self.assertEqual(store.values[f"{prefix}/training"],
+                         MODULE["fmt_duration"](3900.0, 20.0, True))
+        self.assertEqual(store.values[f"{prefix}/total"],
+                         MODULE["fmt_duration"](3900.27, 20.0, True))
         self.assertEqual(
             store.values[f"{prefix}/preprocessing"],
             r"$0.270$\,{\scriptsize$\pm 0.020$}\,s",
@@ -184,31 +188,25 @@ class LatexTablesTest(unittest.TestCase):
         ], "job_light_ranges")
         self.assertEqual([row["variant_id"] for row in rows], ["imdb_light_ranges_adapted"])
 
-    def test_interim_ranges_rule_uses_old_accuracy_and_current_timing(self) -> None:
+    def test_rare_aux_and_interim_rows_never_stand_in_for_the_rule_row(self) -> None:
+        # Rare support off since 2026-11-25: the earlier rows are another model.
         legacy = {
             "workload": "job_light_ranges", "method_id": "own_model",
             "variant_id": "duet_neurocard_distjoin_rare_aux_content_step_11000",
             "seed_count": 3, "coverage_complete_all_seeds": True,
             "smoothed_q_error.p50.mean": 2.0,
         }
-        timing = {
+        rare_aux_rule = {
             "workload": "job_light_ranges", "method_id": "own_model",
-            "variant_id": "duet_neurocard_distjoin_rare_aux_best_median_step_40000_corrected_model_code",
-            "seed_count": 1, "coverage_complete_all_seeds": True,
-            "timing.cpu_1core.mean_ms.mean": 10.0,
-            "timing.gpu_single_query.mean_ms.mean": 3.0,
-            "_configured_timing_profiles": ("cpu_1core", "gpu_single_query"),
+            "variant_id": "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
+            "seed_count": 3, "coverage_complete_all_seeds": True,
         }
-        rows = MODULE["prepare_rows"](
-            [legacy, timing], "job_light_ranges", interim_ranges_accuracy=legacy,
-        )
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(
-            rows[0]["variant_id"],
-            "duet_neurocard_distjoin_rare_aux_content_rule_step_11000_corrected_model_code",
-        )
-        self.assertEqual(rows[0]["smoothed_q_error.p50.mean"], 2.0)
-        self.assertEqual(rows[0]["timing.cpu_1core.mean_ms.mean"], 10.0)
+        self.assertEqual(MODULE["prepare_rows"](
+            [legacy, rare_aux_rule], "job_light_ranges", interim_ranges_accuracy=legacy,
+        ), [])
+        rule = dict(rare_aux_rule, variant_id="rare_off_content_rule_step_11000")
+        rows = MODULE["prepare_rows"]([legacy, rare_aux_rule, rule], "job_light_ranges")
+        self.assertEqual([row["variant_id"] for row in rows], ["rare_off_content_rule_step_11000"])
 
     def test_adapted_mscn_uses_an_explicit_label(self) -> None:
         self.assertEqual(
