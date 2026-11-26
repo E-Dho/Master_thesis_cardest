@@ -6,7 +6,8 @@ and conditional draws share random state yields the same rows, and workers
 prepare each step's contexts, weights, forced rare contexts and token IDs. Runs with 0 and with 2-3 workers are
 compared: losses, metrics apart from timings, the summary's sampler counters and
 all checkpoints (model and optimizer state) are identical, with residual dropout
-on so that a shifted torch random stream would show.
+on so that a shifted torch random stream would show. With validation on, the
+sampler process also draws the validation batches in the serial loop's order.
 """
 
 from __future__ import annotations
@@ -166,9 +167,9 @@ class FailingSource(BufferedSource):
         return super().batches(batch_size, seed=seed)
 
 
-def _prefetch_config(directory: str, *, rare: bool, workers: int) -> dict:
+def _prefetch_config(directory: str, *, rare: bool, workers: int, validation: bool = False) -> dict:
     config = _config(directory, rare=rare)
-    config["validation"]["enabled"] = False
+    config["validation"]["enabled"] = validation
     config["model"]["residual_dropout"] = 0.2
     config["training"]["steps_per_epoch"] = 11
     config["training"]["checkpoint_interval_steps"] = 4
@@ -184,11 +185,11 @@ def _strip(row: dict) -> dict:
 
 @unittest.skipUnless(HAS_TORCH, "PyTorch is not installed")
 class PrefetchEquivalenceTest(unittest.TestCase):
-    def _compare(self, make_source, *, rare: bool, workers: int) -> None:
+    def _compare(self, make_source, *, rare: bool, workers: int, validation: bool = False) -> None:
         with tempfile.TemporaryDirectory() as serial, tempfile.TemporaryDirectory() as parallel:
             results = []
             for directory, count in ((serial, 0), (parallel, workers)):
-                config = _prefetch_config(directory, rare=rare, workers=count)
+                config = _prefetch_config(directory, rare=rare, workers=count, validation=validation)
                 source = make_source(config)
                 results.append((train_resmade_sample_source(source, config), source))
             (left, left_source), (right, right_source) = results
@@ -197,7 +198,18 @@ class PrefetchEquivalenceTest(unittest.TestCase):
                     for d in (serial, parallel)]
             self.assertEqual(rows[0], rows[1])
             summaries = [_strip(json.loads((Path(d) / "training_summary.json").read_text())) for d in (serial, parallel)]
+            if validation:
+                self.assertIn("checkpoint_best.pt", {p.name for p in Path(parallel).glob("*.pt")})
+                self.assertGreater(summaries[0]["validation_fresh_sampler_rows"], 0)
+                self.assertEqual(sum("validation_weighted_nll" in row for row in rows[1]), 5)
+                left_validation, right_validation = (
+                    {**summary["validation"], "history": [_strip(row) for row in summary["validation"]["history"]],
+                     "best_checkpoint": Path(summary["validation"]["best_checkpoint"]).name}
+                    for summary in summaries)
+                self.assertEqual(left_validation, right_validation)
+                self.assertIsNotNone(left_validation["best_step"])
             for key in ("fresh_sampler_rows", "fixture_rows_reused", "sampler_run_calls", "rare_support",
+                        "validation_fresh_sampler_rows", "best_step", "best_validation_metric",
                         "rare_auxiliary", "predicate_token_coverage", "generated_predicate_contexts"):
                 if key in summaries[0]:
                     value = summaries[0][key]
@@ -253,12 +265,15 @@ class PrefetchEquivalenceTest(unittest.TestCase):
                 b = torch.load(Path(fallback) / name, weights_only=False)["model_state_dict"]
                 self.assertTrue(all(torch.equal(a[k], b[k]) for k in a), name)
 
-    def test_live_sampler_with_validation_is_refused(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            config = _prefetch_config(directory, rare=False, workers=2)
-            config["validation"]["enabled"] = True
-            with self.assertRaisesRegex(ValueError, "validation.enabled: false"):
-                train_resmade_sample_source(BufferedSource(), config)
+    def test_validation_on_a_live_like_source(self) -> None:
+        # The sampler process draws the validation batches between the steps' draws,
+        # as the serial loop does (fresh buffer first), so training, validation losses
+        # and checkpoint_best.pt are the same.
+        self._compare(lambda config: BufferedSource(), rare=False, workers=2, validation=True)
+
+    def test_validation_with_rare_auxiliary_and_shared_random_state(self) -> None:
+        self._compare(lambda config: SharedStateRareSource(sample_source_from_config(config)),
+                      rare=True, workers=3, validation=True)
 
 
 class BenchmarkIdentityTest(unittest.TestCase):
