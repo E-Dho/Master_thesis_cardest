@@ -294,13 +294,27 @@ def verify_printed(text: str, expected: list[float], *, unit_scale: float = 1.0)
     return text
 
 
+def _show_std_at_mean_precision(mean_text: str, std: Any, show_std: bool) -> bool:
+    """Keep deviations of at least half a unit in the mean's last printed place."""
+    if not show_std or _is_missing(std) or float(std) <= 0:
+        return False
+    number = _NUMBER_RE.fullmatch(mean_text.replace("{,}", ""))
+    if number is None:
+        raise ValueError(f"cannot determine printed precision of {mean_text!r}")
+    mantissa, exponent = number.groups()
+    decimals = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
+    half_unit = 0.5 * 10.0 ** (int(exponent or 0) - decimals)
+    return float(std) >= half_unit
+
+
 def fmt_cell(mean: Any, std: Any = None, sig: int = 3, show_std: bool = True,
              suffix: str = "") -> str:
     if _is_missing(mean):
         return DASH
     mean = float(mean)
-    body = f"${fmt_number(mean, sig)}$"
-    if show_std and not _is_missing(std) and float(std) > 0:
+    mean_text = fmt_number(mean, sig)
+    body = f"${mean_text}$"
+    if _show_std_at_mean_precision(mean_text, std, show_std):
         std = float(std)
         if mean >= 1e5:
             # share the mean's exponent: (1.33 +- 0.78) * 10^5
@@ -319,9 +333,10 @@ def fmt_count(mean: Any, std: Any, show_std: bool = True) -> str:
     if _is_missing(mean):
         return DASH
     mean = float(mean)
-    text = f"${mean:.0f}$" if abs(mean - round(mean)) < 1e-9 else f"${mean:.1f}$"
+    mean_text = f"{mean:.0f}" if abs(mean - round(mean)) < 1e-9 else f"{mean:.1f}"
+    text = f"${mean_text}$"
     expected = [mean]
-    if show_std and not _is_missing(std) and float(std) > 0:
+    if _show_std_at_mean_precision(mean_text, std, show_std):
         text += f"\\,{{\\scriptsize$\\pm {float(std):.1f}$}}"
         expected.append(float(std))
     return verify_printed(text, expected)
@@ -692,7 +707,7 @@ def coverage_note(rows: list[dict], data: DataStore) -> str:
 
 
 def seeds_note(rows: list[dict]) -> str:
-    return "Mean\\,$\\pm$\\,std over three seeds (PostgreSQL: one run)."
+    return "Mean\\,$\\pm$\\,std over three seeds (PostgreSQL: one run); no $\\pm$ where the std rounds to zero."
 
 
 def own_model_single_run_note(rows: list[dict]) -> str:
@@ -1609,6 +1624,7 @@ def model_size_table(rows: list[dict], workload: str, show_std: bool, data: Data
     marks = column_marks(rows, columns)
     notes = [
         r"MB = $10^6$ bytes.",
+        r"Mean\,$\pm$\,std over three seeds; no $\pm$ where the std rounds to zero.",
         r"Size: everything needed at inference except the base data (\OwnModelName{}: checkpoint without optimizer state, including the value domains).",
         ("MSCN (published): precomputed bitmaps of the JOB-light workload."
          if any(r["method_id"] == "mscn" and r["variant_id"] == "published_job_light" for r in rows) else ""),

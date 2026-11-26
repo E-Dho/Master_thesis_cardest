@@ -19,6 +19,31 @@ class LatexTablesTest(unittest.TestCase):
         self.assertEqual(MODULE["fmt_number"](9.997), "10.0")
         self.assertEqual(MODULE["fmt_number"](0.9997), "1.00")
 
+    def test_deviations_below_the_printed_mean_precision_are_omitted(self) -> None:
+        fmt = MODULE["fmt_cell"]
+        for mean, below, boundary in [(7.484015, .004999, .005), (9.997, .04999, .05),
+                                      (100.458, .4999, .5), (1000., .4999, .5),
+                                      (132700., 499.9, 500.)]:
+            with self.subTest(mean=mean):
+                self.assertEqual(fmt(mean, below), fmt(mean))
+                self.assertIn(r"\pm", fmt(mean, boundary))
+        self.assertEqual(fmt(7.484015, .000001155), "$7.48$")
+        self.assertEqual(fmt(9.997204, .000002887), "$10.0$")
+
+    def test_count_deviation_uses_the_counts_own_printed_precision(self) -> None:
+        fmt = MODULE["fmt_count"]
+        for mean, below, boundary in [(0., .4999, .5), (1000., .4999, .5), (2.4, .04999, .05)]:
+            with self.subTest(mean=mean):
+                self.assertEqual(fmt(mean, below), fmt(mean, None))
+                self.assertIn(r"\pm", fmt(mean, boundary))
+
+    def test_duration_deviation_uses_the_displayed_unit(self) -> None:
+        fmt = MODULE["fmt_duration"]
+        self.assertEqual(fmt(120., .2999), fmt(120., None))
+        self.assertIn(r"\pm", fmt(120., .3))
+        self.assertEqual(fmt(7200., 17.99), fmt(7200., None))
+        self.assertIn(r"\pm", fmt(7200., 18.))
+
     def test_timing_config_reader_resolves_one_level_of_inheritance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
