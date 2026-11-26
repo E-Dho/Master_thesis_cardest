@@ -572,11 +572,6 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 "training.prefetch_workers needs importance_sampling.enabled: false "
                 "(its context statistics update the sample source during the step)"
             )
-        if validation_enabled and _has_buffered_source(sample_source):
-            raise ValueError(
-                "training.prefetch_workers with a live sampler needs validation.enabled: false "
-                "(validation draws from the same sampler stream as training)"
-            )
 
         def prepare(
             step_batch: FullJoinBatch, step: int, step_rare_batch: FullJoinBatch | None
@@ -608,6 +603,25 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                 draw_rare=(
                     (lambda step: _draw_rare_batch(sample_source, config, step))
                     if _rare_auxiliary_enabled(config)
+                    else None
+                ),
+                # Validation draws from the same sample source as training (a live
+                # sampler's stream), so the sampler process makes them too, at the
+                # point where the serial loop would: after step k when k + 1 is a
+                # validation step (see _validation_after_step).
+                draw_validation=(
+                    (lambda step: _draw_validation_batches(
+                        sample_source,
+                        batch_size=validation_batch_size,
+                        batches=validation_batches,
+                        seed=seed + 1_000_000 + step + 1,
+                    ))
+                    if validation_enabled
+                    else None
+                ),
+                validation_after_step=(
+                    (lambda step: _validation_after_step(step, metrics_interval, validation_interval))
+                    if validation_enabled
                     else None
                 ),
             )
@@ -794,6 +808,10 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                     }
                     early_stopping_monitor_value: float | None = None
                     if validation_enabled and global_step % validation_interval == 0:
+                        prefetched_validation = None
+                        if pipeline is not None:
+                            prefetched_validation, validation_deltas = pipeline.validation_batches(global_step)
+                            _apply_source_counter_deltas(sample_source, validation_deltas)
                         validation_metrics = _run_validation(
                             model,
                             sample_source,
@@ -805,6 +823,7 @@ def train_resmade_sample_source(sample_source: object, config: dict[str, Any]) -
                             batches=validation_batches,
                             seed=seed + 1_000_000 + global_step,
                             context_generator=context_generator,
+                            prefetched_batches=prefetched_validation,
                         )
                         validation_fresh_sampler_rows += int(
                             validation_metrics["validation_fresh_sampler_rows"]
@@ -1754,10 +1773,6 @@ def _restore_prepared(prepared: PreparedStepInputs, metadata: object) -> Prepare
     return prepared
 
 
-def _has_buffered_source(sample_source: object | None) -> bool:
-    return any(hasattr(source, "discard_buffer") for source in _source_chain(sample_source))
-
-
 def _prefetch_report(
     workers: int, history: list[dict[str, float]], fallback: str | None = None
 ) -> dict[str, Any]:
@@ -1793,6 +1808,8 @@ class _StepPipeline:
         workers: int,
         depth: int,
         draw_rare: object | None = None,
+        draw_validation: object | None = None,
+        validation_after_step: object | None = None,
     ) -> None:
         import gc
         import multiprocessing
@@ -1803,6 +1820,11 @@ class _StepPipeline:
         self._next_step = 0
         self._inputs = [context.Queue(maxsize=max(1, depth)) for _ in range(self._workers)]
         self._outputs = [context.Queue(maxsize=max(1, depth)) for _ in range(self._workers)]
+        # Validation batches (small, a few per validation step) are not bounded.
+        self._validation = context.Queue()
+        validation = None
+        if draw_validation is not None and validation_after_step is not None:
+            validation = (draw_validation, validation_after_step, self._validation)
         # Forked processes share the training process's memory copy-on-write; keep
         # the garbage collector from touching (and so copying) long-lived objects.
         gc.collect()
@@ -1810,7 +1832,7 @@ class _StepPipeline:
         self._processes = [
             context.Process(
                 target=_produce_step_batches,
-                args=(sample_source, metadata, batch_size, seed, total_steps, self._inputs, draw_rare),
+                args=(sample_source, metadata, batch_size, seed, total_steps, self._inputs, draw_rare, validation),
                 daemon=True,
                 name="prefetch-sampler",
             )
@@ -1855,6 +1877,27 @@ class _StepPipeline:
         self._next_step += 1
         return _restore_prepared(payload, self._metadata)
 
+    def validation_batches(self, global_step: int) -> tuple[list[FullJoinBatch], dict[str, Any]]:
+        """The validation batches the sampler process drew after step ``global_step - 1``."""
+
+        import queue
+
+        while True:
+            try:
+                kind, step, payload, deltas = self._validation.get(timeout=5.0)
+                break
+            except queue.Empty:
+                for process in self._processes:
+                    if process.exitcode not in (None, 0):
+                        raise RuntimeError(
+                            f"prefetch process {process.name} died with exit code {process.exitcode}"
+                        ) from None
+        if kind == "error":
+            raise RuntimeError(f"prefetch failed drawing validation batches:\n{payload}")
+        if step != global_step:
+            raise RuntimeError(f"validation batches of step {step} arrived for step {global_step}")
+        return [_with_column_metadata(batch, self._metadata) for batch in payload], deltas
+
     def close(self) -> None:
         for process in self._processes:
             if process.is_alive():
@@ -1871,6 +1914,7 @@ def _produce_step_batches(
     total_steps: int,
     inputs: list,
     draw_rare: object | None,
+    validation: tuple | None = None,
 ) -> None:
     import traceback
 
@@ -1889,10 +1933,22 @@ def _produce_step_batches(
             inputs[step % len(inputs)].put(
                 ("batch", step, (_without_column_metadata(batch, metadata), rare_batch), timings, deltas)
             )
+            if validation is not None and validation[1](step):  # type: ignore[operator]
+                draw_validation, _, validation_queue = validation
+                before = _source_counters(sample_source)
+                batches = draw_validation(step)  # type: ignore[operator]
+                validation_queue.put((
+                    "batches",
+                    step + 1,
+                    [_without_column_metadata(item, metadata) for item in batches],
+                    _source_counter_deltas(before, _source_counters(sample_source)),
+                ))
     except BaseException:
         message = traceback.format_exc()
         for queue in inputs:
             queue.put(("error", None, message, {}, {}))
+        if validation is not None:
+            validation[2].put(("error", None, message, {}))
 
 
 def _prepare_step_worker(prepare: object, metadata: object, steps: int, inputs: object, outputs: object) -> None:
@@ -2050,6 +2106,27 @@ def rare_auxiliary_diagnostics(
     }
 
 
+def _validation_after_step(step: int, metrics_interval: int, validation_interval: int) -> bool:
+    """Whether the loop validates after training step ``step`` (global_step = step + 1)."""
+
+    following = step + 1
+    return bool(
+        metrics_interval and following % metrics_interval == 0
+        and validation_interval and following % validation_interval == 0
+    )
+
+
+def _draw_validation_batches(
+    sample_source: object, *, batch_size: int, batches: int, seed: int
+) -> list[FullJoinBatch]:
+    """The validation draws: a buffered live sampler starts from a fresh buffer."""
+
+    discard_buffer = getattr(sample_source, "discard_buffer", None)
+    if discard_buffer is not None:
+        discard_buffer()
+    return [sample_source.batches(batch_size, seed=seed + index) for index in range(batches)]  # type: ignore[attr-defined]
+
+
 def _run_validation(
     model: PredicateResMADE,
     sample_source: object,
@@ -2062,11 +2139,19 @@ def _run_validation(
     batches: int,
     seed: int,
     context_generator: PredicateTrainingContextGenerator | None = None,
+    prefetched_batches: list[FullJoinBatch] | None = None,
 ) -> dict[str, Any]:
+    """Validation loss on fresh sample-source batches.
+
+    ``prefetched_batches``: the batches already drawn by the prefetch sampler process
+    (_draw_validation_batches, same calls and order as below); otherwise they are drawn here.
+    """
     import torch
 
     if batches <= 0:
         raise ValueError("validation batches must be positive")
+    if prefetched_batches is not None and len(prefetched_batches) != batches:
+        raise ValueError(f"expected {batches} prefetched validation batches, got {len(prefetched_batches)}")
     if batch_size <= 0:
         raise ValueError("validation batch_size must be positive")
     was_training = model.training
@@ -2085,12 +2170,13 @@ def _run_validation(
         # The training loop passes its own generator: it holds only its
         # configuration and caches derived from the metadata.
         context_generator = PredicateTrainingContextGenerator(predicate_config)
-    discard_buffer = getattr(sample_source, "discard_buffer", None)
-    if discard_buffer is not None:
-        discard_buffer()
+    if prefetched_batches is None:
+        prefetched_batches = _draw_validation_batches(
+            sample_source, batch_size=batch_size, batches=batches, seed=seed
+        )
     with torch.no_grad():
         for batch_index in range(batches):
-            batch = sample_source.batches(batch_size, seed=seed + batch_index)
+            batch = prefetched_batches[batch_index]
             fresh_rows += int(getattr(batch, "fresh_rows_drawn", 0))
             fixture_rows += int(getattr(batch, "fixture_rows_reused", 0))
             rng = np.random.default_rng(generator_seed + seed + batch_index)
