@@ -489,6 +489,30 @@ def train(path: Path):
 
 
 @unittest.skipUnless(__import__("importlib").util.find_spec("torch"), "needs torch")
+class ImdbDataShiftCheckpointSelectionTest(unittest.TestCase):
+    """Since 2026-11-26 the stale and fine-tuned models are selected by validation loss."""
+
+    def test_training_script_and_template(self) -> None:
+        script = (REPO / "model/slurm/job_light_ranges_data_shift_20k.sbatch").read_text()
+        self.assertIn("INIT_CHECKPOINT=$RUN_ROOT/${SPLIT}_stale/seed_0/checkpoint_best.pt", script)
+        self.assertIn('assert training["early_stopping_patience_steps"] == 0', script)
+        self.assertNotIn("checkpoint_step_11000", script)
+        from model.src.config import load_simple_yaml
+
+        template = load_simple_yaml(str(REPO / "model/configs/job_light_ranges_duet_binary_native_anpm_40k_rare_auxiliary.yaml"))
+        self.assertEqual(template["validation"]["selection_metric"], "validation_weighted_nll")
+        self.assertTrue(template["validation"]["enabled"])
+        self.assertEqual((template["validation"]["interval_steps"], template["validation"]["fresh_sampler_batches"]), (250, 4))
+
+    def test_evaluations_use_checkpoint_best(self) -> None:
+        configs = REPO / "evaluation/job_light_imdb_non_trajectory/configs"
+        for split in ("random80", "temporal80"):
+            for kind, run in (("stale", "stale"), ("refreshed", "stale"), ("control", "stale"), ("finetuned", "finetune")):
+                text = (configs / f"own_model_data_shift_{split}_{kind}.yaml").read_text()
+                self.assertEqual(text.count(f"own_model_data_shift/{split}_{run}/seed_{{seed}}/checkpoint_best.pt"), 7)
+                self.assertNotIn("checkpoint_step_", text)
+
+
 class ImdbPrepareAndFineTuneTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

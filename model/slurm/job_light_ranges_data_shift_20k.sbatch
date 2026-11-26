@@ -12,9 +12,11 @@
 #   KIND=stale     the evaluated model's 20k recipe (job_light_ranges_rare_aux_20k.sbatch) on the
 #                  80 % data of SPLIT: its CSVs, preparation and NeuroCard working directory
 #                  ($ROOT/data_shift/imdb/$SPLIT, model/scripts/imdb_data_shift.py);
-#   KIND=finetune  the stale run's checkpoint_step_11000 (the evaluated model's step) trained
-#                  2,000 more steps (10 % of the training) at a tenth of the learning rate (1e-5)
-#                  on the full data, rare-support planning over those steps.
+#   KIND=finetune  the stale run's checkpoint_best.pt trained 2,000 more steps (10 % of the
+#                  training) at a tenth of the learning rate (1e-5) on the full data.
+# Since 2026-11-26 the recipe of the mains, as for POL/Porto: no early stopping, validation
+# every 250 steps on fresh sampler batches (the template's validation section), and
+# checkpoint_best.pt (lowest validation weighted NLL) is the evaluated checkpoint.
 # REPO = a checkout of model/imdb-data-shift. Run directory:
 # $ROOT/joblight_evaluation/own_model_data_shift/<SPLIT>_<KIND>/seed_0.
 set -euo pipefail
@@ -42,7 +44,7 @@ case "$KIND" in
     PREPARED_DIRECTORY=$ROOT/Master_thesis_cardest/data/neurocard_prepared/job_light_ranges_content
     NEUROCARD_PATH=$ROOT/external/neurocard/neurocard
     STEPS=2000; SUPPORT_STEPS=2000; LEARNING_RATE=0.00001
-    INIT_CHECKPOINT=$RUN_ROOT/${SPLIT}_stale/seed_0/checkpoint_step_11000.pt
+    INIT_CHECKPOINT=$RUN_ROOT/${SPLIT}_stale/seed_0/checkpoint_best.pt
     if [[ ! -f "$INIT_CHECKPOINT" ]]; then echo "missing $INIT_CHECKPOINT" >&2; exit 3; fi ;;
   *) echo "KIND must be stale or finetune" >&2; exit 2 ;;
 esac
@@ -86,7 +88,7 @@ sed \
   -e "s/^    support_planning_steps: 40000$/    support_planning_steps: $SUPPORT_STEPS/" \
   -e "s/^  steps_per_epoch: 40000$/  steps_per_epoch: $STEPS/" \
   -e "s/^  learning_rate: 0.0001$/  learning_rate: $LEARNING_RATE/" \
-  -e "s/^  early_stopping_patience_steps: 5000$/  early_stopping_patience_steps: 3000/" \
+  -e "s/^  early_stopping_patience_steps: 5000$/  early_stopping_patience_steps: 0/" \
   -e "s#^  output_directory:.*#  output_directory: $RUN_DIR#" \
   "$SOURCE_CONFIG" > "$CONFIG"
 if [[ -n "$INIT_CHECKPOINT" ]]; then
@@ -118,7 +120,11 @@ assert training["batch_size"] == 2048
 assert config["rare_auxiliary"]["batch_size"] == 512 and config["rare_auxiliary"]["beta"] == 0.25
 assert config["rare_support"]["discovery"]["support_planning_steps"] == steps
 assert training["steps_per_epoch"] == steps
-assert training["early_stopping_patience_steps"] == 3000
+assert training["early_stopping_patience_steps"] == 0
+validation = config["validation"]
+assert validation["enabled"] is True and validation["interval_steps"] == 250
+assert validation["fresh_sampler_batches"] == 4 and validation["batch_size"] == 2048
+assert validation["selection_metric"] == "validation_weighted_nll" and validation["minimize"] is True
 assert float(training["learning_rate"]) == learning_rate
 assert (training.get("init_checkpoint") or "") == init
 if kind == "stale":
