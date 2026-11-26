@@ -142,6 +142,18 @@ inference:
   factorized_decoder: anpm
   use_log_space_product: true
 
+# Checkpoint selection as for POL/Porto (decided 2026-11-26): validation loss on fresh
+# sample-source batches every 250 steps, checkpoint_best.pt (lowest validation weighted NLL)
+# is the evaluated checkpoint. With the training scripts' 20,000 steps and no early stopping.
+validation:
+  enabled: true
+  prepared_directory: null
+  interval_steps: 250
+  fresh_sampler_batches: 4
+  batch_size: 2048
+  selection_metric: validation_weighted_nll
+  minimize: true
+
 logging:
   output_directory: model/runs/imdb_ablation_no_native_ranges
 

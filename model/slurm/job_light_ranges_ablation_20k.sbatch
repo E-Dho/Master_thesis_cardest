@@ -27,8 +27,9 @@ case "$SEED" in
   *) echo "SEED must be 0, 1, or 2; received $SEED" >&2; exit 2 ;;
 esac
 
-# Same 20k recipe (the sed below) as job_light_ranges_rare_aux_20k.sbatch, which trained
-# the evaluated model; only the source config and the run directory differ.
+# Same recipe as the IMDB mains (job_light_main_rare_off.sbatch; since 2026-11-26 as for
+# POL/Porto: 20,000 steps, no early stopping, checkpoint_best.pt by validation loss);
+# only the source config and the run directory differ.
 SOURCE_CONFIG=model/configs/$ABLATION.yaml
 CSV_DIRECTORY=$ROOT/datasets/job
 PREPARED_DIRECTORY=$ROOT/Master_thesis_cardest/data/neurocard_prepared/job_light_ranges_content
@@ -57,7 +58,7 @@ echo "output_directory=$RUN_DIR"
 echo "batch_size=2048"
 echo "rare_batch_size=512"
 echo "steps_per_epoch=20000"
-echo "early_stopping_patience_steps=3000"
+echo "early_stopping_patience_steps=0"
 echo "support_planning_steps=20000"
 echo "use_cols=content"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
@@ -75,7 +76,7 @@ sed \
   -e "s/^  seed: 0$/  seed: $SEED/g" \
   -e "s/^    support_planning_steps: 40000$/    support_planning_steps: 20000/" \
   -e "s/^  steps_per_epoch: 40000$/  steps_per_epoch: 20000/" \
-  -e "s/^  early_stopping_patience_steps: 5000$/  early_stopping_patience_steps: 3000/" \
+  -e "s/^  early_stopping_patience_steps: 5000$/  early_stopping_patience_steps: 0/" \
   -e "s#^  output_directory:.*#  output_directory: $RUN_DIR#" \
   "$SOURCE_CONFIG" > "$CONFIG"
 
@@ -102,7 +103,11 @@ assert config["rare_auxiliary"]["batch_size"] == 512
 assert config["rare_auxiliary"]["beta"] == 0.25
 assert config["rare_support"]["discovery"]["support_planning_steps"] == 20000
 assert config["training"]["steps_per_epoch"] == 20000
-assert config["training"]["early_stopping_patience_steps"] == 3000
+assert config["training"]["early_stopping_patience_steps"] == 0
+validation = config["validation"]
+assert validation["enabled"] is True and validation["interval_steps"] == 250
+assert validation["fresh_sampler_batches"] == 4 and validation["batch_size"] == 2048
+assert validation["selection_metric"] == "validation_weighted_nll" and validation["minimize"] is True
 ablation = sys.argv[6]
 pg, enc, model = config["predicate_generation"], config["predicate_encoding"], config["model"]
 expected = {

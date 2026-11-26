@@ -8,13 +8,12 @@
 #SBATCH --output=/work_beegfs/sunip956/master_thesis_trajectories/slurm_logs/%x_%j.out
 #SBATCH --error=/work_beegfs/sunip956/master_thesis_trajectories/slurm_logs/%x_%j.err
 
-# Main IMDB models with rare support off (decided 2026-11-25), three seeds per workload:
-#   WORKLOAD=job_light_ranges: the 20k recipe of job_light_ranges_rare_aux_20k.sbatch
-#     (template 40k config, steps/patience/planning set to 20000/3000/20000 here);
-#   WORKLOAD=job_light: the 40k recipe of own_model_rare_aux_40k (unchanged steps).
-# Both evaluate checkpoint_step_11000 like the evaluated models (evaluation configs
-# own_model_job_light{,_ranges}_rare_off_step_11000.yaml). Training runs under
-# learned-gpu through the config's runtime section.
+# Main IMDB models with rare support off (decided 2026-11-25), three seeds per workload
+# (WORKLOAD=job_light or job_light_ranges). Since 2026-11-26 the recipe of the POL/Porto
+# mains for both workloads: 20,000 steps, no early stopping, validation every 250 steps on
+# fresh sampler batches, and checkpoint_best.pt (lowest validation weighted NLL) is the
+# evaluated checkpoint (the template's validation section; steps, patience and planning set
+# here). Training runs under learned-gpu through the config's runtime section.
 
 set -euo pipefail
 
@@ -35,16 +34,15 @@ case "$WORKLOAD" in
     SOURCE_CONFIG=model/configs/imdb_main_job_light_ranges_rare_off.yaml
     PREPARED_DIRECTORY=$ROOT/Master_thesis_cardest/data/neurocard_prepared/job_light_ranges_content
     RUN_DIR=$ROOT/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_${SEED}
-    STEPS=20000; PATIENCE=3000; PLANNING=20000
     ;;
   job_light)
     SOURCE_CONFIG=model/configs/imdb_main_job_light_rare_off.yaml
     PREPARED_DIRECTORY=$ROOT/Master_thesis_cardest/data/neurocard_prepared/job_light
-    RUN_DIR=$ROOT/joblight_evaluation/own_model_rare_off_40k/seed_${SEED}
-    STEPS=40000; PATIENCE=5000; PLANNING=40000
+    RUN_DIR=$ROOT/joblight_evaluation/own_model_job_light_rare_off_20k/seed_${SEED}
     ;;
   *) echo "unknown WORKLOAD $WORKLOAD" >&2; exit 2 ;;
 esac
+STEPS=20000; PATIENCE=0; PLANNING=20000
 CONFIG=$RUN_DIR/training_config.yaml
 STARTUP=$RUN_DIR/startup_check_${SLURM_JOB_ID:-manual}
 
@@ -110,6 +108,10 @@ assert config["rare_support"]["discovery"]["support_planning_steps"] == planning
 assert config["rare_support"]["enabled"] is False
 assert config["rare_auxiliary"]["enabled"] is False
 assert config["runtime"]["require_cuda"] is True
+validation = config["validation"]
+assert validation["enabled"] is True and validation["interval_steps"] == 250
+assert validation["fresh_sampler_batches"] == 4 and validation["batch_size"] == 2048
+assert validation["selection_metric"] == "validation_weighted_nll" and validation["minimize"] is True
 PY
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
