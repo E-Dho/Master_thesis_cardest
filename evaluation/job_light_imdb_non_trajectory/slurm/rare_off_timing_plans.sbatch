@@ -20,4 +20,4 @@ PYTHON=$ROOT/joblight_evaluation/envs/learned-gpu/bin/python
 cd "$REPO"
 "$PYTHON" evaluation/job_light_imdb_non_trajectory/scripts/rare_off_own_model_runs.py timing-plans \
   --run-id "${RUN_ID:?}" --output-directory "${PLAN_DIRECTORY:?}"
-cat "$PLAN_DIRECTORY"/timing_plan_own_model_rare_off_rule_step_11000_cpu.txt
+cat "$PLAN_DIRECTORY"/timing_plan_own_model_rare_off_best_val_cpu.txt

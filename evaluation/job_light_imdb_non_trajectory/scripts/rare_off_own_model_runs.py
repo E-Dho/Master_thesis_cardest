@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Run bookkeeping for the rare-support-off own-model main rows (decided 2026-11-25).
 
-The main rows follow the preregistered rule (step 11,000, training seeds 0-2) on
-the runs trained by model/slurm/job_light_main_rare_off.sbatch. Three helpers for
+The main rows evaluate checkpoint_best.pt (lowest validation loss over 20,000 steps, the
+rule of the POL/Porto mains since 2026-11-26), training seeds 0-2, of the runs trained
+by model/slurm/job_light_main_rare_off.sbatch. Three helpers for
 the Slurm chain in slurm/submit_rare_off_own_model_tables.sh, run from the
 repository root:
 
   final-config --workload W --seed S
       Write the final-checkpoint sensitivity config of one seed and print its path.
-      The final step is the highest checkpoint_step_<N>.pt of the finished run (the
-      runs stop early at different steps), so it is resolved when the job starts.
+      The final step is the highest checkpoint_step_<N>.pt of the finished run
+      (20,000), resolved when the job starts; best versus final checkpoint.
   timing-plans --run-id R --output-directory D
       Write the CPU and GPU timing plans of the six rule runs (both workloads,
       seeds 0-2) completed under run id R.
@@ -35,22 +36,21 @@ TRAINING_ROOT = Path("/work_beegfs/sunip956/master_thesis_trajectories/joblight_
 
 WORKLOADS = {
     "job_light": {
-        "rule_config": "own_model_job_light_rare_off_rule_step_11000.yaml",
-        "rule_variant": "rare_off_rule_step_11000",
-        "training_directory": "own_model_rare_off_40k",
+        "rule_config": "own_model_job_light_rare_off_best_val.yaml",
+        "rule_variant": "rare_off_best_val",
+        "training_directory": "own_model_job_light_rare_off_20k",
     },
     "job_light_ranges": {
-        "rule_config": "own_model_job_light_ranges_rare_off_rule_step_11000.yaml",
-        "rule_variant": "rare_off_content_rule_step_11000",
+        "rule_config": "own_model_job_light_ranges_rare_off_best_val.yaml",
+        "rule_variant": "rare_off_content_best_val",
         "training_directory": "own_model_job_light_ranges_rare_off_20k",
     },
 }
-RULE_STEP = 11_000
 _CHECKPOINT = re.compile(r"checkpoint_step_(\d+)\.pt")
 
 
 def final_variant(workload: str, seed: int) -> str:
-    return f"{WORKLOADS[workload]['rule_variant'].replace('rule_step_11000', 'final')}_seed{seed}"
+    return f"{WORKLOADS[workload]['rule_variant'].replace('best_val', 'final')}_seed{seed}"
 
 
 def final_step(run_directory: Path) -> int:
@@ -60,10 +60,7 @@ def final_step(run_directory: Path) -> int:
              if (match := _CHECKPOINT.fullmatch(path.name))]
     if not steps:
         raise SystemExit(f"{run_directory} has no checkpoint_step_<N>.pt")
-    step = max(steps)
-    if step < RULE_STEP:
-        raise SystemExit(f"{run_directory}: final checkpoint {step} is before the rule step {RULE_STEP}")
-    return step
+    return max(steps)
 
 
 def final_config_text(rule_text: str, workload: str, seed: int, step: int) -> str:
@@ -71,9 +68,9 @@ def final_config_text(rule_text: str, workload: str, seed: int, step: int) -> st
 
     rule_variant = WORKLOADS[workload]["rule_variant"]
     replacements = (
-        ("checkpoint_step_11000.pt", f"checkpoint_step_{step}.pt"),
+        ("checkpoint_best.pt", f"checkpoint_step_{step}.pt"),
         (f"variant_id: {rule_variant}", f"variant_id: {final_variant(workload, seed)}\n  seeds: [{seed}]"),
-        ("display_name: Own model rule checkpoint step 11,000 (rare support off)",
+        ("display_name: Own model best validation checkpoint (rare support off)",
          f"display_name: Own model final checkpoint step {step:,} sensitivity, training seed {seed} "
          "(rare support off)"),
     )
@@ -108,7 +105,7 @@ def completed_run(variant: str, seed: int, run_id: str, results: Path = RESULTS)
 
 
 def timing_plan_lines(run_id: str, results: Path = RESULTS) -> list[str]:
-    lines = [f"# Rare-support-off rule rows (step 11,000), seeds 0-2; accuracy run id {run_id}."]
+    lines = [f"# Rare-support-off main rows (checkpoint_best.pt), seeds 0-2; accuracy run id {run_id}."]
     for spec in WORKLOADS.values():
         for seed in SEEDS:
             run = completed_run(spec["rule_variant"], seed, run_id, results)
@@ -147,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         lines = timing_plan_lines(args.run_id)
         args.output_directory.mkdir(parents=True, exist_ok=True)
         for profile in ("cpu", "gpu"):
-            path = args.output_directory / f"timing_plan_own_model_rare_off_rule_step_11000_{profile}.txt"
+            path = args.output_directory / f"timing_plan_own_model_rare_off_best_val_{profile}.txt"
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             print(path)
     else:

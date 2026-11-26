@@ -79,7 +79,7 @@ class LatexTablesTest(unittest.TestCase):
             {
                 "workload": "job_light",
                 "method_id": "own_model",
-                "variant_id": "rare_off_rule_step_11000",
+                "variant_id": "rare_off_best_val",
                 "seed_count": 3,
                 "coverage_complete_all_seeds": True,
             },
@@ -91,7 +91,7 @@ class LatexTablesTest(unittest.TestCase):
         row = {
             "workload": "job_light",
             "method_id": "own_model",
-            "variant_id": "rare_off_rule_step_11000",
+            "variant_id": "rare_off_best_val",
             "seed_count": 3,
             "coverage_complete_all_seeds": True,
             "smoothed_q_error.p50.mean": 1.0,
@@ -204,9 +204,9 @@ class LatexTablesTest(unittest.TestCase):
         self.assertEqual(MODULE["prepare_rows"](
             [legacy, rare_aux_rule], "job_light_ranges", interim_ranges_accuracy=legacy,
         ), [])
-        rule = dict(rare_aux_rule, variant_id="rare_off_content_rule_step_11000")
+        rule = dict(rare_aux_rule, variant_id="rare_off_content_best_val")
         rows = MODULE["prepare_rows"]([legacy, rare_aux_rule, rule], "job_light_ranges")
-        self.assertEqual([row["variant_id"] for row in rows], ["rare_off_content_rule_step_11000"])
+        self.assertEqual([row["variant_id"] for row in rows], ["rare_off_content_best_val"])
 
     def test_adapted_mscn_uses_an_explicit_label(self) -> None:
         self.assertEqual(

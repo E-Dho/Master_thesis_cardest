@@ -77,45 +77,45 @@ DASH = "--"
 
 # Placeholder for the sped-up training (an estimate, used while no sped-up run was measured).
 # None since the rare-support-off main runs (decided 2026-11-25), which use the sped-up training:
-# their time to the step-11,000 checkpoint is measured (training_time_mode "checkpoint").
+# their full training time is measured (all 20,000 steps: the best validation checkpoint is
+# known only at the end, as for POL/Porto).
 OWN_TRAINING_ESTIMATE_SECONDS: float | None = None
 
-# Final own-model rows follow one preregistered rule on each workload: the
-# step-11,000 checkpoint across training seeds 0--2.  Since 2026-11-25 the rule rows
-# are the rare-support-off main runs (model/slurm/job_light_main_rare_off.sbatch);
-# the earlier rare-auxiliary rule rows below are kept only so that their records stay
+# Final own-model rows follow one rule on each workload: since 2026-11-26 the rule of
+# the POL/Porto mains, checkpoint_best.pt (lowest validation loss over 20,000 steps)
+# across training seeds 0--2 of the rare-support-off main runs
+# (model/slurm/job_light_main_rare_off.sbatch, decided 2026-11-25).  The earlier
+# rare-auxiliary step-11,000 rule rows below are kept only so that their records stay
 # readable and are listed as superseded.  The mapping also supplies the immutable
 # training artifacts required to refresh deployable-size and time-to-checkpoint records.
 OWN_MODEL_VARIANTS = {
-    "rare_off_rule_step_11000": {
+    "rare_off_best_val": {
         "label": r"\OwnModelName{}",
         "selection_order": 0,
         "checkpoint_paths": (
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_0/checkpoint_step_11000.pt",
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_1/checkpoint_step_11000.pt",
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_2/checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_rare_off_20k/seed_0/checkpoint_best.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_rare_off_20k/seed_1/checkpoint_best.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_rare_off_20k/seed_2/checkpoint_best.pt",
         ),
         "training_summaries": (
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_0/training_summary.json",
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_1/training_summary.json",
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_rare_off_40k/seed_2/training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_rare_off_20k/seed_0/training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_rare_off_20k/seed_1/training_summary.json",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_rare_off_20k/seed_2/training_summary.json",
         ),
-        "training_time_mode": "checkpoint",
     },
-    "rare_off_content_rule_step_11000": {
+    "rare_off_content_best_val": {
         "label": r"\OwnModelName{}",
         "selection_order": 0,
         "checkpoint_paths": (
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_0/checkpoint_step_11000.pt",
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_1/checkpoint_step_11000.pt",
-            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_2/checkpoint_step_11000.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_0/checkpoint_best.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_1/checkpoint_best.pt",
+            "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_2/checkpoint_best.pt",
         ),
         "training_summaries": (
             "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_0/training_summary.json",
             "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_1/training_summary.json",
             "/work_beegfs/sunip956/master_thesis_trajectories/joblight_evaluation/own_model_job_light_ranges_rare_off_20k/seed_2/training_summary.json",
         ),
-        "training_time_mode": "checkpoint",
     },
     "duet_neurocard_distjoin_rare_aux_rule_step_11000_corrected_model_code": {
         "label": r"\OwnModelName{}",
@@ -176,8 +176,8 @@ OWN_MODEL_VARIANTS = {
 }
 
 _OWN_MODEL_RULE_VARIANT = {
-    "job_light": "rare_off_rule_step_11000",
-    "job_light_ranges": "rare_off_content_rule_step_11000",
+    "job_light": "rare_off_best_val",
+    "job_light_ranges": "rare_off_content_best_val",
 }
 # The rare-auxiliary rule rows of 2026-11-19 (replaced by the rare-support-off rows).
 _RARE_AUX_RULE_VARIANTS = {
@@ -1840,7 +1840,7 @@ def main() -> None:
     ]
     if missing_rule_rows:
         raise SystemExit(
-            "the comparison has no own-model rule row (rare support off, step 11,000) for "
+            "the comparison has no own-model main row (rare support off, best validation checkpoint) for "
             + ", ".join(missing_rule_rows)
             + "; refresh it with slurm/refresh_rare_off_own_model_tables.sbatch first"
         )

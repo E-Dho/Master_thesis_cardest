@@ -29,8 +29,8 @@ for CONFIG in \
   neurocard_job_light.yaml \
   neurocard_job_light_ranges.yaml \
   distjoin_job_light.yaml \
-  own_model_job_light_rare_off_rule_step_11000.yaml \
-  own_model_job_light_ranges_rare_off_rule_step_11000.yaml; do
+  own_model_job_light_rare_off_best_val.yaml \
+  own_model_job_light_ranges_rare_off_best_val.yaml; do
   "$PYTHON" -m evaluation.job_light_imdb_non_trajectory.joblight_eval.cli aggregate --config "$EVAL/configs/$CONFIG"
 done
 
@@ -49,7 +49,7 @@ excluded = {results / "foj_sampling" / "n7168000" / "aggregate" / "comparison.js
 kept = [Path(path) for path in previous["inputs"]
         if own_model not in Path(path).parents and Path(path) not in excluded]
 replacement = [own_model / variant / "aggregate" / "comparison.json"
-               for variant in ("rare_off_rule_step_11000", "rare_off_content_rule_step_11000")]
+               for variant in ("rare_off_best_val", "rare_off_content_best_val")]
 inputs = kept + replacement
 if len(inputs) != len(set(inputs)):
     raise RuntimeError("comparison input list contains duplicates")

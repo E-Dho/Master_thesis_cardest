@@ -46,9 +46,9 @@ class RuleConfigTest(unittest.TestCase):
             for text in texts:
                 self.assertIn(directory, text)
                 self.assertNotIn("rare_aux", text)
-            for text in _commands(config)[:4] + texts[-2:]:
-                if "checkpoint" in text:
-                    self.assertIn("checkpoint_step_11000.pt", text)
+            for text in _commands(config) + [config["artifacts"]["checkpoint_template"]]:
+                self.assertIn("checkpoint_best.pt", text)
+                self.assertNotIn("checkpoint_step_", text)
             # same inference code and timing protocol as the earlier rule rows
             self.assertEqual(config["source"]["revision"], "7c156b247031d7f5dfbd96e812f111abe14a75f2")
             self.assertEqual(config["timing"]["profiles"], ["cpu_1core", "gpu_single_query"])
@@ -60,13 +60,13 @@ class FinalConfigTest(unittest.TestCase):
     def test_final_step_is_the_last_checkpoint_of_a_finished_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
-            for step in (500, 11000, 31000, 30500):
+            for step in (500, 11000, 20000, 19500):
                 (run / f"checkpoint_step_{step}.pt").write_bytes(b"")
             (run / "checkpoint_best.pt").write_bytes(b"")
             with self.assertRaises(SystemExit):
                 RUNS.final_step(run)  # no training_summary.json yet
             (run / "training_summary.json").write_text("{}")
-            self.assertEqual(RUNS.final_step(run), 31000)
+            self.assertEqual(RUNS.final_step(run), 20000)
 
     def test_generated_config_changes_only_step_variant_and_seed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -77,25 +77,27 @@ class FinalConfigTest(unittest.TestCase):
                     (configs / name).write_text((HERE / "configs" / name).read_text())
             for name in ("own_model_job_light_step_11000.yaml", "own_model_job_light_ranges_full_schema_step_11000.yaml"):
                 (configs / name).write_text((HERE / "configs" / name).read_text())
-            run = training / "own_model_rare_off_40k" / "seed_1"
+            run = training / "own_model_job_light_rare_off_20k" / "seed_1"
             run.mkdir(parents=True)
-            (run / "checkpoint_step_38500.pt").write_bytes(b"")
+            (run / "checkpoint_step_20000.pt").write_bytes(b"")
+            (run / "checkpoint_best.pt").write_bytes(b"")
             (run / "training_summary.json").write_text("{}")
             path = RUNS.write_final_config("job_light", 1, training_root=training, configs=configs)
             final, rule = _merged(path), _merged(configs / RUNS.WORKLOADS["job_light"]["rule_config"])
             self.assertEqual(final["experiment"]["variant_id"], "rare_off_final_seed1")
             self.assertEqual(final["experiment"]["seeds"], [1])
-            self.assertIn("38,500", final["experiment"]["display_name"])
+            self.assertIn("20,000", final["experiment"]["display_name"])
             for text in _commands(final):
-                self.assertIn("checkpoint_step_38500.pt", text)
-                self.assertNotIn("checkpoint_step_11000.pt", text)
+                self.assertIn("checkpoint_step_20000.pt", text)
+                self.assertNotIn("checkpoint_best.pt", text)
             self.assertEqual(
-                [text.replace("38500", "11000") for text in _commands(final)], _commands(rule))
+                [text.replace("checkpoint_step_20000.pt", "checkpoint_best.pt") for text in _commands(final)],
+                _commands(rule))
             final["experiment"].pop("seeds"), rule["experiment"].pop("seeds")
             for key in ("variant_id", "display_name"):
                 final["experiment"].pop(key), rule["experiment"].pop(key)
             final.pop("adapter"), rule.pop("adapter")
-            final["artifacts"] = {k: v.replace("38500", "11000") if isinstance(v, str) else v
+            final["artifacts"] = {k: v.replace("checkpoint_step_20000.pt", "checkpoint_best.pt") if isinstance(v, str) else v
                                   for k, v in final["artifacts"].items()}
             self.assertEqual(final, rule)
         self.assertEqual(RUNS.final_variant("job_light_ranges", 2), "rare_off_content_final_seed2")
@@ -114,18 +116,18 @@ class RunLookupTest(unittest.TestCase):
             results = Path(directory)
             for workload, spec in RUNS.WORKLOADS.items():
                 for seed in RUNS.SEEDS:
-                    self._run(results, spec["rule_variant"], seed, "rule_step11000_rare_off-abc")
+                    self._run(results, spec["rule_variant"], seed, "best_val_rare_off-abc")
                     self._run(results, RUNS.final_variant(workload, seed), seed, "final_sensitivity_rare_off-def")
-            lines = RUNS.timing_plan_lines("rule_step11000_rare_off", results)
+            lines = RUNS.timing_plan_lines("best_val_rare_off", results)
             self.assertEqual(len(lines), 7)
             self.assertEqual({line.split()[1] for line in lines[1:]}, {"0", "1", "2"})
-            arguments = RUNS.sensitivity_arguments("rule_step11000_rare_off", "final_sensitivity_rare_off", results)
+            arguments = RUNS.sensitivity_arguments("best_val_rare_off", "final_sensitivity_rare_off", results)
             self.assertEqual(len(arguments), 24)
             self.assertEqual(arguments[0::2].count("--job-light-final"), 3)
             # a second or an incomplete run of the same id is refused
-            self._run(results, "rare_off_rule_step_11000", 0, "rule_step11000_rare_off-zzz")
+            self._run(results, "rare_off_best_val", 0, "best_val_rare_off-zzz")
             with self.assertRaises(SystemExit):
-                RUNS.timing_plan_lines("rule_step11000_rare_off", results)
+                RUNS.timing_plan_lines("best_val_rare_off", results)
             self._run(results, "rare_off_content_final_seed0", 0, "other-1", complete=False)
             with self.assertRaises(SystemExit):
                 RUNS.completed_run("rare_off_content_final_seed0", 0, "other", results)
@@ -136,7 +138,7 @@ class TrainingHardwareTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("hardware", HERE / "scripts" / "own_model_training_hardware.py")
         hardware = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hardware)
-        runs = [f"/x/own_model_rare_off_40k/seed_{seed}" for seed in RUNS.SEEDS]
+        runs = [f"/x/own_model_job_light_rare_off_20k/seed_{seed}" for seed in RUNS.SEEDS]
         with tempfile.TemporaryDirectory() as directory:
             logs = []
             for index, (run, gpu, finished) in enumerate([
@@ -154,9 +156,9 @@ class TrainingHardwareTest(unittest.TestCase):
 
         MODULE = runpy.run_path(str(HERE / "scripts" / "make_latex_tables.py"))
 
-        variant = MODULE["OWN_MODEL_VARIANTS"]["rare_off_rule_step_11000"]
+        variant = MODULE["OWN_MODEL_VARIANTS"]["rare_off_best_val"]
         directories = [str(Path(path).parent) for path in variant["training_summaries"]]
-        row = {"method_id": "own_model", "variant_id": "rare_off_rule_step_11000"}
+        row = {"method_id": "own_model", "variant_id": "rare_off_best_val"}
         table_hardware = MODULE["OWN_TRAINING_HARDWARE"]
         try:
             table_hardware.update({directories[0]: {"gpu": "NVIDIA L40S"},
