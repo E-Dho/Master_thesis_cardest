@@ -19,6 +19,7 @@ class PolLogWidthGateConfigTest(unittest.TestCase):
         validate_config(main)
         gate = main["predicate_generation"]["log_width_gate"]
         self.assertEqual(gate["probability"], 0.5)
+        self.assertEqual(gate["span_quantile"], 0.01)
         ablations = sorted(CONFIGS.glob("pol_ablation_*.yaml"))
         self.assertEqual(len(ablations), 4)  # rare_support_off was dropped: rare support is off everywhere
         for path in ablations:
