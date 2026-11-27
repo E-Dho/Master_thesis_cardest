@@ -218,6 +218,10 @@ class PredicateTrainingContextGenerator:
         uniformly over the domain ranks. 0 (or no section) is the uniform generator,
         unchanged and without extra random draws.
         dimensions: name -> {min_width: float, columns: [column names]}.
+        span_quantile: q in [0, 0.5); the span a distance is drawn up to is the range
+        between the q and 1 - q quantiles of the column's domain values instead of
+        min to max, so that a few far outliers (Porto has GPS points hundreds of km
+        outside the city) do not stretch the distances. 0 is min to max.
         """
 
         gate = dict(gate or {})
@@ -227,6 +231,9 @@ class PredicateTrainingContextGenerator:
         dimensions = dict(gate.get("dimensions") or {})
         if self.log_width_probability > 0.0 and not dimensions:
             raise ValueError("predicate_generation.log_width_gate needs dimensions when probability > 0")
+        self.log_width_span_quantile = float(gate.get("span_quantile", 0.0) or 0.0)
+        if not 0.0 <= self.log_width_span_quantile < 0.5:
+            raise ValueError("predicate_generation.log_width_gate.span_quantile must be in [0, 0.5)")
         self.log_width_dimensions: tuple[str, ...] = tuple(sorted(dimensions))
         self.log_width_min: dict[str, float] = {}
         self.log_width_column_dimension: dict[str, str] = {}
@@ -266,8 +273,9 @@ class PredicateTrainingContextGenerator:
         self, compiled: "_CompiledGenerationMetadata", column_index: int
     ) -> tuple[np.ndarray, int, float] | None:
         """Numeric values of a column's valid domain ranks, the first such rank, and
-        the log of the column's span; None if the column is not numeric in domain
-        order (it then stays uniform)."""
+        the log of the column's span (between the span_quantile and 1 - span_quantile
+        quantiles of the values); None if the column is not numeric in domain order
+        (it then stays uniform)."""
 
         key = (id(compiled), int(column_index))
         if key in self._log_width_numeric:
@@ -278,7 +286,7 @@ class PredicateTrainingContextGenerator:
         if numeric is not None:
             values, first, stop = numeric
             block = np.ascontiguousarray(values[first:stop])
-            span = float(block[-1] - block[0])
+            span = _quantile_span(block, self.log_width_span_quantile)
             result = (block, first, float(np.log(span)) if span > 0 else float("-inf"))
         self._log_width_numeric[key] = result
         return result
@@ -1810,6 +1818,18 @@ def _build_column_predicate_cache(domain: tuple[Any, ...]) -> _ColumnPredicateCa
         domain_id_to_left_rank=tuple(left_ranks),
         domain_id_to_right_rank=tuple(right_ranks),
     )
+
+
+def _quantile_span(sorted_values: np.ndarray, quantile: float) -> float:
+    """Range between the ``quantile`` and ``1 - quantile`` order statistics of sorted values
+    (nearest ranks, outward); 0 gives max - min."""
+
+    count = len(sorted_values)
+    if count == 0:
+        return 0.0
+    low = int(math.floor(quantile * (count - 1)))
+    high = int(math.ceil((1.0 - quantile) * (count - 1)))
+    return float(sorted_values[high] - sorted_values[low])
 
 
 def _numeric_rank_values(values: tuple[Any, ...]) -> tuple[np.ndarray, int, int] | None:
