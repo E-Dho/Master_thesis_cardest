@@ -96,6 +96,9 @@ predicate_generation:
   # from the benchmark. probability 0 is the generator of the earlier models.
   log_width_gate:
     probability: 0.5
+    # Distances are drawn up to the range between the 1 % and 99 % quantiles of each
+    # column's domain values (robust to outliers, e.g. Porto's far GPS points).
+    span_quantile: 0.01
     dimensions:
       space:
         min_width: 1.0
