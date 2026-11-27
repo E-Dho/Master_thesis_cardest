@@ -339,5 +339,39 @@ class NumericRankValuesTest(unittest.TestCase):
         self.assertIsNone(_numeric_rank_values(("a", "b")))
 
 
+class QuantileSpanTest(unittest.TestCase):
+    def test_outliers_do_not_stretch_the_span(self) -> None:
+        from model.src.predicates.generation import _quantile_span
+
+        dense = np.linspace(0.0, 15_000.0, 9_950)         # the city, 15 km
+        outliers = np.linspace(400_000.0, 900_000.0, 50)  # 0.5 % far GPS outliers
+        values = np.sort(np.concatenate([dense, outliers]))
+        self.assertEqual(_quantile_span(values, 0.0), 900_000.0)
+        self.assertLess(_quantile_span(values, 0.01), 16_000.0)
+        self.assertGreater(_quantile_span(values, 0.01), 14_000.0)
+        self.assertEqual(_quantile_span(np.asarray([5.0]), 0.01), 0.0)
+
+    def test_span_quantile_sets_the_log_span_and_is_validated(self) -> None:
+        fixture = _PolFixture.load()
+        config = _training_predicate_config(fixture.config)
+        compiled_spans = {}
+        for quantile in (0.0, 0.01):
+            config["log_width_gate"] = {**GATE, "probability": 1.0, "span_quantile": quantile}
+            generator = PredicateTrainingContextGenerator(config)
+            compiled = generator._compiled(fixture.metadata)
+            index = compiled.column_name_to_index["segments:seg_min_x"]
+            block, _, log_span = generator._log_width_values(compiled, index)
+            n = len(block) - 1
+            expected = block[-1] - block[0] if quantile == 0.0 else (
+                block[int(np.ceil(0.99 * n))] - block[int(np.floor(0.01 * n))])
+            self.assertAlmostEqual(np.exp(log_span), expected, places=6)
+            compiled_spans[quantile] = log_span
+        self.assertLess(compiled_spans[0.01], compiled_spans[0.0])
+        for bad in (-0.1, 0.5):
+            config["log_width_gate"] = {**GATE, "probability": 1.0, "span_quantile": bad}
+            with self.assertRaises(ValueError):
+                PredicateTrainingContextGenerator(config)
+
+
 if __name__ == "__main__":
     unittest.main()
