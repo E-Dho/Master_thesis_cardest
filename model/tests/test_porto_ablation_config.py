@@ -25,6 +25,7 @@ class PortoMainLogWidthGateConfigTest(unittest.TestCase):
         evaluated = load_simple_yaml(str(EVALUATED))
         gate = main["predicate_generation"].pop("log_width_gate")
         self.assertEqual(gate["probability"], 0.5)
+        self.assertEqual(gate["span_quantile"], 0.01)
         self.assertEqual(main["training"].pop("prefetch_workers"), 3)
         self.assertEqual(main.pop("runtime"), {"python": LEARNED_GPU, "require_cuda": True})
         self.assertEqual(main["logging"].pop("output_directory"), "model/runs/porto_main_log_width_gate")
